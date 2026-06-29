@@ -1,0 +1,7 @@
+# [설치 방법] torch CPU 버전은 아래 명령어로 설치하세요 (일반 pip install 하면 GPU 버전이 깔릴 수 있음):
+# pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+
+PyMuPDF==1.27.2.3
+easyocr==1.7.2
+numpy==2.4.4
+torch==2.12.1+cpu
