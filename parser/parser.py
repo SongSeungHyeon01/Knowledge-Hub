@@ -3,9 +3,10 @@
 #   2단계: classify_pdf      — 텍스트형/스캔형 판별
 #   3단계: extract_text_pages — 텍스트형 PDF 본문 추출
 #   4단계: extract_ocr_pages  — 스캔형 PDF OCR 인식 + 신뢰도 계산
-import fitz        # PyMuPDF
-import easyocr     # OCR 엔진
-import numpy as np # 이미지 배열 변환용
+import fitz         # PyMuPDF (extract_text_pages/extract_ocr_pages에서 아직 사용 — STEP 3~5에서 교체 예정)
+import pdfplumber   # PDF 텍스트 추출 (MIT) — classify_pdf()부터 순차 교체 중
+import easyocr      # OCR 엔진
+import numpy as np  # 이미지 배열 변환용
 
 # 페이지에 이 글자 수 이상이면 "텍스트형"으로 판별한다.
 # 너무 짧으면 스캔 PDF의 메타데이터 잡음(공백·제어문자)일 수 있어서 10자로 걸러낸다.
@@ -34,30 +35,27 @@ def classify_pdf(filepath: str) -> dict:
     }
     """
     try:
-        doc = fitz.open(filepath)
+        with pdfplumber.open(filepath) as pdf:
+            # 페이지가 없는 빈 PDF 걸러내기
+            # (형식이 아예 PDF가 아니거나 손상된 파일은 pdfplumber.open() 자체에서 예외가 난다)
+            if len(pdf.pages) == 0:
+                raise ValueError("페이지가 없는 빈 PDF입니다.")
 
-        # PDF 형식이 아닌 파일(깨진 파일 등) 걸러내기
-        if not doc.is_pdf:
-            raise ValueError("PDF 형식이 아닌 파일입니다.")
-        if len(doc) == 0:
-            raise ValueError("페이지가 없는 빈 PDF입니다.")
+            pages = []
+            for page_num, page in enumerate(pdf.pages, start=1):
+                # extract_text()로 텍스트 레이어에서 글자를 읽어 본다.
+                # 스캔 PDF는 여기서 빈 문자열(또는 None)이 나온다.
+                text = (page.extract_text() or "").strip()
+                page_type = "text" if len(text) >= TEXT_THRESHOLD else "scan"
+                pages.append({"page": page_num, "type": page_type})
 
-        pages = []
-        for page_num, page in enumerate(doc, start=1):
-            # get_text()로 텍스트 레이어에서 글자를 읽어 본다.
-            # 스캔 PDF는 여기서 빈 문자열이 나온다.
-            text = page.get_text().strip()
-            page_type = "text" if len(text) >= TEXT_THRESHOLD else "scan"
-            pages.append({"page": page_num, "type": page_type})
-
-        doc.close()
         return {"status": "success", "error": None, "pages": pages}
 
     except Exception as e:
         return {"status": "failed", "error": str(e), "pages": []}
 
 
-def extract_text_pages(filepath: str, source_file: str = None) -> dict:
+def extract_text_pages(filepath: str, source_file: str = None, pages: list = None) -> dict:
     """
     3단계: 텍스트형 PDF에서 페이지별 본문 텍스트를 추출한다.
     classify_pdf()가 "text"로 판별한 PDF에 사용한다.
@@ -65,6 +63,8 @@ def extract_text_pages(filepath: str, source_file: str = None) -> dict:
 
     source_file: 결과 객체에 기록할 상대 경로.
                  None이면 filepath를 그대로 사용.
+    pages: 처리할 페이지 번호(1부터 시작) 목록. None이면 전체 페이지를 처리한다.
+           parse_pdf()는 classify_pdf() 판별 결과 중 "text" 페이지 번호만 넘겨서 호출한다.
 
     반환값 (CLAUDE.md 4번 출력 약속 형식):
     {
@@ -93,11 +93,14 @@ def extract_text_pages(filepath: str, source_file: str = None) -> dict:
         if len(doc) == 0:
             raise ValueError("페이지가 없는 빈 PDF입니다.")
 
-        pages = []
-        for page_num, page in enumerate(doc, start=1):
+        target_pages = pages if pages is not None else range(1, len(doc) + 1)
+
+        result_pages = []
+        for page_num in target_pages:
+            page = doc[page_num - 1]
             # 날것 그대로 추출한다. 마크다운 변환 X (그건 ② 송승현 담당)
             text = page.get_text()
-            pages.append({
+            result_pages.append({
                 "page": page_num,
                 "text": text,
                 "method": "text",
@@ -110,7 +113,7 @@ def extract_text_pages(filepath: str, source_file: str = None) -> dict:
             "source_file": source_file,
             "status": "success",
             "error": None,
-            "pages": pages,
+            "pages": result_pages,
         }
 
     except Exception as e:
@@ -122,7 +125,7 @@ def extract_text_pages(filepath: str, source_file: str = None) -> dict:
         }
 
 
-def extract_ocr_pages(filepath: str, source_file: str = None) -> dict:
+def extract_ocr_pages(filepath: str, source_file: str = None, pages: list = None) -> dict:
     """
     4단계: 스캔형 PDF에서 페이지별로 EasyOCR로 텍스트를 인식하고
     글자 수 가중 평균으로 페이지 대표 신뢰도를 계산한다.
@@ -149,6 +152,8 @@ def extract_ocr_pages(filepath: str, source_file: str = None) -> dict:
     ────────────────────────────────────────────────────────────────────
 
     source_file: 결과 객체에 기록할 상대 경로. None이면 filepath 그대로 사용.
+    pages: 처리할 페이지 번호(1부터 시작) 목록. None이면 전체 페이지를 처리한다.
+           parse_pdf()는 classify_pdf() 판별 결과 중 "scan" 페이지 번호만 넘겨서 호출한다.
     """
     if source_file is None:
         source_file = filepath
@@ -161,12 +166,15 @@ def extract_ocr_pages(filepath: str, source_file: str = None) -> dict:
         if len(doc) == 0:
             raise ValueError("페이지가 없는 빈 PDF입니다.")
 
+        target_pages = pages if pages is not None else range(1, len(doc) + 1)
+
         # EasyOCR Reader 초기화 (한국어+영어, CPU 전용)
         # 모델 파일을 메모리에 올리는 작업이라 처음 한 번만 오래 걸린다.
         reader = easyocr.Reader(['ko', 'en'], gpu=False, verbose=False)
 
-        pages = []
-        for page_num, page in enumerate(doc, start=1):
+        result_pages = []
+        for page_num in target_pages:
+            page = doc[page_num - 1]
 
             # ── 페이지 → 이미지 변환 ────────────────────────────────────
             # Matrix(2,2): 해상도를 원본의 2배로 키운다.
@@ -211,7 +219,7 @@ def extract_ocr_pages(filepath: str, source_file: str = None) -> dict:
                 # 마크다운 변환 X — 그건 ② 송승현 담당
                 page_text = "\n".join(text for _, text, _ in raw)
 
-            pages.append({
+            result_pages.append({
                 "page": page_num,
                 "text": page_text,
                 "method": "ocr",
@@ -225,7 +233,7 @@ def extract_ocr_pages(filepath: str, source_file: str = None) -> dict:
             "source_file": source_file,
             "status": "success",
             "error": None,
-            "pages": pages,
+            "pages": result_pages,
         }
 
     except Exception as e:
@@ -242,116 +250,64 @@ def parse_pdf(filepath: str, source_file: str = None) -> dict:
     최종 입구 함수: PDF 경로 하나를 받아 CLAUDE.md 4번 형식의 결과 객체를 반환한다.
 
     ── 내부 처리 흐름 ───────────────────────────────────────────────────
-    이 함수 하나가 2~5단계를 순서대로 처리한다.
+    로직을 직접 다시 구현하지 않고, 2~4단계 함수를 그대로 호출해 조립한다
+    (같은 판별/추출 로직이 이 파일 여러 곳에 중복되는 것을 막기 위함).
 
-    1. PDF 파일을 연다.
-       → 열 수 없으면 status="failed" 객체를 바로 반환 (프로그램 멈추지 않음)
+    1. classify_pdf()로 페이지별 텍스트형/스캔형을 먼저 판별한다 (2단계).
+       → 파일을 열 수 없으면 여기서 바로 status="failed"로 끝난다.
+    2. "text"로 판별된 페이지 번호만 모아 extract_text_pages()에 넘긴다 (3단계).
+    3. "scan"으로 판별된 페이지 번호만 모아 extract_ocr_pages()에 넘긴다 (4~5단계).
+       → 스캔 페이지가 하나도 없으면 이 단계 자체를 건너뛰어 EasyOCR을 로드하지 않는다.
+    4. 두 결과를 원래 페이지 번호 순서로 합쳐 반환한다.
 
-    2. 페이지를 하나씩 돌면서 판별 → 추출을 이어서 처리한다:
-
-       get_text()로 텍스트 레이어를 확인 (2단계)
-         │
-         ├── 글자가 충분히 있음 → "텍스트형"
-         │     텍스트를 그대로 꺼낸다 (3단계)
-         │     method="text",  ocr_confidence=null,  flagged=false
-         │
-         └── 글자가 없거나 너무 짧음 → "스캔형"
-               페이지를 이미지로 변환 → EasyOCR 실행 (4단계)
-               글자 수 가중 평균으로 신뢰도 계산
-               0.7 미만이면 flagged=true (5단계)
-               method="ocr"
-
-    3. 모든 페이지 결과를 pages 리스트에 모아 반환 (6단계)
-
-    ⭐ EasyOCR Reader는 스캔 페이지가 처음 나올 때 딱 한 번만 켜진다.
-       텍스트형 PDF만 처리할 때는 EasyOCR이 아예 로드되지 않아 속도가 빠르다.
+    ⭐ EasyOCR Reader는 extract_ocr_pages() 내부에서, 스캔 페이지가 있을 때만
+       한 번 초기화된다. 텍스트형 PDF만 있으면 EasyOCR이 아예 로드되지 않는다.
     ─────────────────────────────────────────────────────────────────────
     """
     if source_file is None:
         source_file = filepath
 
-    try:
-        doc = fitz.open(filepath)
+    classified = classify_pdf(filepath)
+    if classified["status"] == "failed":
+        return _failed_result(source_file, classified["error"])
 
-        if not doc.is_pdf:
-            raise ValueError("PDF 형식이 아닌 파일입니다.")
-        if len(doc) == 0:
-            raise ValueError("페이지가 없는 빈 PDF입니다.")
+    text_page_nums = [p["page"] for p in classified["pages"] if p["type"] == "text"]
+    scan_page_nums = [p["page"] for p in classified["pages"] if p["type"] == "scan"]
 
-        reader = None  # 스캔 페이지가 나올 때 처음 한 번만 초기화
+    pages_by_num = {}
 
-        pages = []
-        for page_num, page in enumerate(doc, start=1):
+    if text_page_nums:
+        text_result = extract_text_pages(filepath, source_file, pages=text_page_nums)
+        if text_result["status"] == "failed":
+            return _failed_result(source_file, text_result["error"])
+        for page in text_result["pages"]:
+            pages_by_num[page["page"]] = page
 
-            # ── 판별: 텍스트 레이어 유무 확인 (2단계) ───────────────────
-            # get_text() 결과를 변수에 담아 두면, 텍스트형일 때 다시 호출 안 해도 된다.
-            page_text_raw = page.get_text()
-            is_text_page = len(page_text_raw.strip()) >= TEXT_THRESHOLD
+    if scan_page_nums:
+        ocr_result = extract_ocr_pages(filepath, source_file, pages=scan_page_nums)
+        if ocr_result["status"] == "failed":
+            return _failed_result(source_file, ocr_result["error"])
+        for page in ocr_result["pages"]:
+            pages_by_num[page["page"]] = page
 
-            if is_text_page:
-                # ── 텍스트형 경로 (3단계) ─────────────────────────────
-                pages.append({
-                    "page": page_num,
-                    "text": page_text_raw,  # 날것 그대로 (마크다운 변환 X)
-                    "method": "text",
-                    "ocr_confidence": None,
-                    "flagged": False,
-                })
+    ordered_pages = [pages_by_num[num] for num in sorted(pages_by_num)]
 
-            else:
-                # ── 스캔형 경로 (4단계 + 5단계) ──────────────────────
-                # Reader 초기화: 스캔 페이지가 처음 등장하는 순간 한 번만 실행
-                if reader is None:
-                    reader = easyocr.Reader(['ko', 'en'], gpu=False, verbose=False)
+    return {
+        "source_file": source_file,
+        "status": "success",
+        "error": None,
+        "pages": ordered_pages,
+    }
 
-                # 페이지 → numpy 이미지 배열 (2배 해상도)
-                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-                img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
-                    pix.height, pix.width, pix.n
-                )
-                if pix.n == 4:      # RGBA이면 알파 채널 제거
-                    img = img[:, :, :3]
 
-                raw = reader.readtext(img)
-
-                # 글자 수 가중 평균 계산 (4단계)
-                total_chars = sum(len(txt) for _, txt, _ in raw)
-
-                if total_chars == 0:
-                    # 빈 페이지(백지·도면 등): 글자를 전혀 못 읽음
-                    ocr_confidence = 0.0
-                    flagged = True
-                    ocr_text = ""
-                else:
-                    weighted_sum = sum(len(txt) * conf for _, txt, conf in raw)
-                    ocr_confidence = float(round(weighted_sum / total_chars, 4))
-                    flagged = bool(ocr_confidence < 0.7)  # 5단계 기준
-                    ocr_text = "\n".join(txt for _, txt, _ in raw)
-
-                pages.append({
-                    "page": page_num,
-                    "text": ocr_text,
-                    "method": "ocr",
-                    "ocr_confidence": ocr_confidence,
-                    "flagged": flagged,
-                })
-
-        doc.close()
-        return {
-            "source_file": source_file,
-            "status": "success",
-            "error": None,
-            "pages": pages,
-        }
-
-    except Exception as e:
-        err_msg = str(e)
-        # fitz가 파일을 열지 못할 때 나오는 영문 메시지를 한국어로 교체
-        if "Failed to open" in err_msg or "cannot open" in err_msg.lower():
-            err_msg = "PDF를 열 수 없음 (파일이 손상되었거나 형식이 올바르지 않습니다)"
-        return {
-            "source_file": source_file,
-            "status": "failed",
-            "error": err_msg,
-            "pages": [],
-        }
+def _failed_result(source_file: str, err_msg: str) -> dict:
+    """classify_pdf/extract_text_pages/extract_ocr_pages 중 어디서 실패하든 동일한 형식의 실패 결과를 만든다."""
+    # fitz/pdfplumber가 파일을 열지 못할 때 나오는 영문 메시지를 한국어로 교체
+    if "Failed to open" in err_msg or "cannot open" in err_msg.lower():
+        err_msg = "PDF를 열 수 없음 (파일이 손상되었거나 형식이 올바르지 않습니다)"
+    return {
+        "source_file": source_file,
+        "status": "failed",
+        "error": err_msg,
+        "pages": [],
+    }
