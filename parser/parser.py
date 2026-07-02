@@ -5,8 +5,7 @@
 #   4단계: extract_ocr_pages  — 스캔형 PDF OCR 인식 + 신뢰도 계산
 import io
 
-import fitz         # PyMuPDF (extract_ocr_pages의 페이지->이미지 변환에 아직 사용 — STEP 5 보고 참고)
-import pdfplumber   # PDF 텍스트 추출 (MIT) — classify_pdf()부터 순차 교체 중
+import pdfplumber   # PDF 텍스트 추출 + 페이지 렌더링 (MIT, 렌더링 백엔드 pypdfium2) — PyMuPDF 완전 대체
 import camelot      # PDF 표 추출 (MIT, 기본 백엔드 pdfium) — STEP 4에서 추가
 import easyocr      # OCR 엔진
 import numpy as np  # 이미지 배열 변환용
@@ -17,6 +16,16 @@ from img2table.ocr import EasyOCR as Img2TableEasyOCR
 # 페이지에 이 글자 수 이상이면 "텍스트형"으로 판별한다.
 # 너무 짧으면 스캔 PDF의 메타데이터 잡음(공백·제어문자)일 수 있어서 10자로 걸러낸다.
 TEXT_THRESHOLD = 10
+
+# EasyOCR 신뢰도가 이 값 미만이면 flagged=True로 표시한다.
+# ── 미결 과제 (2026-07-03) ────────────────────────────────────────────
+# 이 값은 원래 PyMuPDF로 페이지를 이미지화하던 시절 정해진 임의 기준이었다.
+# STEP 5에서 페이지->이미지 렌더링을 PyMuPDF에서 pdfplumber(pypdfium2)로 바꾸면서,
+# 똑같은 글자를 똑같이 읽어도 신뢰도 수치 자체가 전반적으로 더 낮게 나오는 경향을
+# 확인했다 (예: 같은 스캔 더미가 0.71 -> 0.56~0.66). 버그가 아니라 기준선 이동이다.
+# 실제 문서를 투입해 flagged 비율을 관찰한 뒤 이 값을 재조정할 필요가 있을 수 있다.
+# ─────────────────────────────────────────────────────────────────────
+OCR_CONFIDENCE_THRESHOLD = 0.7
 
 
 def classify_pdf(filepath: str) -> dict:
@@ -233,87 +242,75 @@ def extract_ocr_pages(filepath: str, source_file: str = None, pages: list = None
         source_file = filepath
 
     try:
-        doc = fitz.open(filepath)
+        with pdfplumber.open(filepath) as pdf:
+            if len(pdf.pages) == 0:
+                raise ValueError("페이지가 없는 빈 PDF입니다.")
 
-        if not doc.is_pdf:
-            raise ValueError("PDF 형식이 아닌 파일입니다.")
-        if len(doc) == 0:
-            raise ValueError("페이지가 없는 빈 PDF입니다.")
+            target_pages = pages if pages is not None else range(1, len(pdf.pages) + 1)
 
-        target_pages = pages if pages is not None else range(1, len(doc) + 1)
+            # EasyOCR Reader 초기화 (한국어+영어, CPU 전용)
+            # 모델 파일을 메모리에 올리는 작업이라 처음 한 번만 오래 걸린다.
+            reader = easyocr.Reader(['ko', 'en'], gpu=False, verbose=False)
 
-        # EasyOCR Reader 초기화 (한국어+영어, CPU 전용)
-        # 모델 파일을 메모리에 올리는 작업이라 처음 한 번만 오래 걸린다.
-        reader = easyocr.Reader(['ko', 'en'], gpu=False, verbose=False)
+            # img2table도 내부적으로 EasyOCR을 쓰는데, 그냥 두면 자체적으로 reader를
+            # 하나 더 만들어(약 1.8초 + 메모리 중복) 3GB RAM 제약에 불리하다.
+            # img2table.ocr.EasyOCR.__init__은 self.lang / self.reader 두 속성만 쓰므로,
+            # __new__로 생성자를 건너뛰고 위에서 이미 만든 reader를 그대로 주입해 재사용한다.
+            img2table_ocr = Img2TableEasyOCR.__new__(Img2TableEasyOCR)
+            img2table_ocr.lang = ['ko', 'en']
+            img2table_ocr.reader = reader
 
-        # img2table도 내부적으로 EasyOCR을 쓰는데, 그냥 두면 자체적으로 reader를
-        # 하나 더 만들어(약 1.8초 + 메모리 중복) 3GB RAM 제약에 불리하다.
-        # img2table.ocr.EasyOCR.__init__은 self.lang / self.reader 두 속성만 쓰므로,
-        # __new__로 생성자를 건너뛰고 위에서 이미 만든 reader를 그대로 주입해 재사용한다.
-        img2table_ocr = Img2TableEasyOCR.__new__(Img2TableEasyOCR)
-        img2table_ocr.lang = ['ko', 'en']
-        img2table_ocr.reader = reader
+            result_pages = []
+            for page_num in target_pages:
+                page = pdf.pages[page_num - 1]
 
-        result_pages = []
-        for page_num in target_pages:
-            page = doc[page_num - 1]
+                # ── 페이지 → 이미지 변환 (PyMuPDF 대신 pdfplumber/pypdfium2 사용) ──
+                # resolution=144: 72dpi 기준 2배 해상도 (예전 PyMuPDF Matrix(2,2)와 동등).
+                # antialias=True: 꺼두면 EasyOCR 신뢰도가 더 떨어짐을 실측으로 확인함
+                # (예: scan 더미 기준 antialias 끄면 0.56, 켜면 0.66로 fitz의 0.71에 더 근접).
+                page_image = page.to_image(resolution=144, antialias=True)
+                img = np.array(page_image.original.convert("RGB"))
 
-            # ── 페이지 → 이미지 변환 ────────────────────────────────────
-            # Matrix(2,2): 해상도를 원본의 2배로 키운다.
-            # OCR은 해상도가 낮으면 글자를 못 알아보는 경우가 많다.
-            mat = fitz.Matrix(2, 2)
-            pix = page.get_pixmap(matrix=mat)
+                # ── EasyOCR 실행 ─────────────────────────────────────────────
+                # raw: [(bbox, text, confidence), ...] 형태의 리스트
+                # bbox는 좌표(사용 안 함), text는 인식된 글자, confidence는 신뢰도
+                raw = reader.readtext(img)
 
-            # PyMuPDF가 주는 픽셀 데이터를 numpy 배열로 변환한다.
-            # pix.n == 채널 수 (보통 3=RGB, 드물게 4=RGBA)
-            img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
-                pix.height, pix.width, pix.n
-            )
-            # EasyOCR은 RGB 3채널만 받으므로, RGBA이면 알파 채널을 제거한다.
-            if pix.n == 4:
-                img = img[:, :, :3]
+                # ── 글자 수 가중 평균 계산 ───────────────────────────────────
+                total_chars = sum(len(text) for _, text, _ in raw)
 
-            # ── EasyOCR 실행 ─────────────────────────────────────────────
-            # raw: [(bbox, text, confidence), ...] 형태의 리스트
-            # bbox는 좌표(사용 안 함), text는 인식된 글자, confidence는 신뢰도
-            raw = reader.readtext(img)
+                if total_chars == 0:
+                    # 인식된 글자가 전혀 없는 페이지 (백지, 도면만 있는 경우)
+                    ocr_confidence = 0.0
+                    flagged = True   # 글자를 못 읽었으니 신뢰할 수 없음
+                    page_text = ""
+                else:
+                    # 가중합 = 각 블록의 (글자수 × 신뢰도) 를 모두 더함
+                    weighted_sum = sum(len(text) * conf for _, text, conf in raw)
+                    ocr_confidence = weighted_sum / total_chars
 
-            # ── 글자 수 가중 평균 계산 ───────────────────────────────────
-            total_chars = sum(len(text) for _, text, _ in raw)
+                    # ocr_confidence가 OCR_CONFIDENCE_THRESHOLD 미만이면 못 믿을 페이지로 판정한다.
+                    # 정확히 threshold는 합격(false). "미만"이므로 < 를 쓴다.
+                    # bool()로 감싸는 이유: EasyOCR 신뢰도가 numpy.float64 타입이라
+                    # 비교 결과가 numpy.bool_로 나오면 json.dumps()가 오류를 낸다.
+                    # (신뢰도 계산·threshold 기준은 표 유무와 무관하게 이 페이지 전체 OCR 품질을
+                    #  나타내야 하므로, 아래 표 통합과 별개로 raw 전체 기준으로 그대로 유지한다.)
+                    flagged = bool(ocr_confidence < OCR_CONFIDENCE_THRESHOLD)
 
-            if total_chars == 0:
-                # 인식된 글자가 전혀 없는 페이지 (백지, 도면만 있는 경우)
-                ocr_confidence = 0.0
-                flagged = True   # 글자를 못 읽었으니 신뢰할 수 없음
-                page_text = ""
-            else:
-                # 가중합 = 각 블록의 (글자수 × 신뢰도) 를 모두 더함
-                weighted_sum = sum(len(text) * conf for _, text, conf in raw)
-                ocr_confidence = weighted_sum / total_chars
+                    # 표가 있으면 img2table로 인식해 마크다운으로 바꾸고, 표 안 블록은
+                    # 일반 텍스트에서 제외한다 (텍스트형 페이지의 2.1 설계와 같은 원칙을
+                    # 스캔 페이지에도 동일하게 적용 — 표 내용이 이중으로 들어가지 않게 함).
+                    page_text = _ocr_page_text_with_tables(raw, img, img2table_ocr)
 
-                # ocr_confidence < 0.7 이면 못 믿을 페이지로 판정한다.
-                # 정확히 0.7은 합격(false). "미만"이므로 < 를 쓴다.
-                # bool()로 감싸는 이유: EasyOCR 신뢰도가 numpy.float64 타입이라
-                # 비교 결과가 numpy.bool_로 나오면 json.dumps()가 오류를 낸다.
-                # (신뢰도 계산·0.7 기준은 표 유무와 무관하게 이 페이지 전체 OCR 품질을
-                #  나타내야 하므로, 아래 표 통합과 별개로 raw 전체 기준으로 그대로 유지한다.)
-                flagged = bool(ocr_confidence < 0.7)
+                result_pages.append({
+                    "page": page_num,
+                    "text": page_text,
+                    "method": "ocr",
+                    # float()로 감싸는 이유: numpy.float64는 JSON 직렬화 불가
+                    "ocr_confidence": float(round(ocr_confidence, 4)),
+                    "flagged": flagged,
+                })
 
-                # 표가 있으면 img2table로 인식해 마크다운으로 바꾸고, 표 안 블록은
-                # 일반 텍스트에서 제외한다 (텍스트형 페이지의 2.1 설계와 같은 원칙을
-                # 스캔 페이지에도 동일하게 적용 — 표 내용이 이중으로 들어가지 않게 함).
-                page_text = _ocr_page_text_with_tables(raw, img, img2table_ocr)
-
-            result_pages.append({
-                "page": page_num,
-                "text": page_text,
-                "method": "ocr",
-                # float()로 감싸는 이유: numpy.float64는 JSON 직렬화 불가
-                "ocr_confidence": float(round(ocr_confidence, 4)),
-                "flagged": flagged,
-            })
-
-        doc.close()
         return {
             "source_file": source_file,
             "status": "success",
@@ -425,7 +422,7 @@ def parse_pdf(filepath: str, source_file: str = None) -> dict:
 
 def _failed_result(source_file: str, err_msg: str) -> dict:
     """classify_pdf/extract_text_pages/extract_ocr_pages 중 어디서 실패하든 동일한 형식의 실패 결과를 만든다."""
-    # fitz/pdfplumber가 파일을 열지 못할 때 나오는 영문 메시지를 한국어로 교체
+    # PDF를 열지 못할 때 나오는 영문 에러 메시지를 한국어로 교체
     if "Failed to open" in err_msg or "cannot open" in err_msg.lower():
         err_msg = "PDF를 열 수 없음 (파일이 손상되었거나 형식이 올바르지 않습니다)"
     return {
