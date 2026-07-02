@@ -3,8 +3,9 @@
 #   2단계: classify_pdf      — 텍스트형/스캔형 판별
 #   3단계: extract_text_pages — 텍스트형 PDF 본문 추출
 #   4단계: extract_ocr_pages  — 스캔형 PDF OCR 인식 + 신뢰도 계산
-import fitz         # PyMuPDF (extract_text_pages/extract_ocr_pages에서 아직 사용 — STEP 3~5에서 교체 예정)
+import fitz         # PyMuPDF (extract_ocr_pages에서 아직 사용 — STEP 5에서 교체 예정)
 import pdfplumber   # PDF 텍스트 추출 (MIT) — classify_pdf()부터 순차 교체 중
+import camelot      # PDF 표 추출 (MIT, 기본 백엔드 pdfium) — STEP 4에서 추가
 import easyocr      # OCR 엔진
 import numpy as np  # 이미지 배열 변환용
 
@@ -66,6 +67,11 @@ def extract_text_pages(filepath: str, source_file: str = None, pages: list = Non
     pages: 처리할 페이지 번호(1부터 시작) 목록. None이면 전체 페이지를 처리한다.
            parse_pdf()는 classify_pdf() 판별 결과 중 "text" 페이지 번호만 넘겨서 호출한다.
 
+    표가 있는 페이지는 camelot으로 표 영역(bbox)을 감지해 그 안의 글자를
+    pdfplumber 텍스트 추출에서 제외하고, 표는 마크다운 파이프 표로 변환해
+    페이지 텍스트 끝에 붙인다 (설계서 2.1/2.2). 표가 없는 페이지는
+    지금까지와 동일하게 페이지 전체를 그대로 추출한다.
+
     반환값 (CLAUDE.md 4번 출력 약속 형식):
     {
         "source_file": "경로/파일명.pdf",
@@ -74,7 +80,7 @@ def extract_text_pages(filepath: str, source_file: str = None, pages: list = Non
         "pages": [
             {
                 "page": 1,
-                "text": "추출된 날것 텍스트",
+                "text": "추출된 날것 텍스트 (+ 표가 있으면 마크다운 표가 끝에 붙음)",
                 "method": "text",
                 "ocr_confidence": null,
                 "flagged": false
@@ -95,9 +101,7 @@ def extract_text_pages(filepath: str, source_file: str = None, pages: list = Non
             result_pages = []
             for page_num in target_pages:
                 page = pdf.pages[page_num - 1]
-                # 날것 그대로 추출한다. 마크다운 변환 X (그건 ② 송승현 담당)
-                # 표 안 글자 제외(2.1 설계)는 아직 하지 않는다 — camelot 연동은 STEP 4.
-                text = page.extract_text() or ""
+                text = _extract_page_text(filepath, page, page_num)
                 result_pages.append({
                     "page": page_num,
                     "text": text,
@@ -120,6 +124,62 @@ def extract_text_pages(filepath: str, source_file: str = None, pages: list = Non
             "error": str(e),
             "pages": [],
         }
+
+
+def _extract_page_text(filepath: str, page, page_num: int) -> str:
+    """
+    한 페이지의 텍스트를 뽑되, 표가 있으면 표 영역을 제외한 텍스트 + 마크다운 표를 합쳐 반환한다.
+
+    1. camelot으로 이 페이지에 표가 있는지 감지한다 (flavor="lattice" — 격자선 있는 표 기준.
+       격자선이 없는 표는 이번 구현 범위 밖이다).
+    2. 표가 없으면: 조기 반환 — pdfplumber로 페이지 전체를 그대로 추출하고 끝낸다.
+       (표가 없는 페이지에서 카멜롯 처리를 더 하지 않기 위함 — 자원 절약)
+    3. 표가 있으면: camelot 좌표(bbox)를 pdfplumber 좌표로 변환해 그 영역을 제외한
+       텍스트를 뽑고, 표는 마크다운으로 변환해 페이지 끝에 붙인다.
+    """
+    try:
+        tables = camelot.read_pdf(filepath, pages=str(page_num), flavor="lattice")
+    except Exception:
+        # camelot이 이 페이지에서 실패해도(예: 표처럼 보이는 선이 없음) 페이지 전체가
+        # 죽으면 안 된다 — 표가 없는 것으로 간주하고 일반 텍스트 추출로 넘어간다.
+        tables = []
+
+    if len(tables) == 0:
+        return page.extract_text() or ""
+
+    # 좌표계 변환 (설계서 2.1 주의사항):
+    #   camelot  = 왼쪽 아래가 원점, y는 위로 갈수록 커짐
+    #   pdfplumber = 왼쪽 위가 원점, top은 아래로 갈수록 커짐
+    #   => pdfplumber_top = page_height - camelot_y
+    page_height = page.height
+
+    # 표가 여러 개면 화면에 보이는 순서(위→아래)로 정렬한다 (camelot y1이 클수록 더 위쪽).
+    ordered_tables = sorted(tables, key=lambda t: t._bbox[3], reverse=True)
+
+    cropped = page
+    markdown_blocks = []
+    for table in ordered_tables:
+        x0, y0, x1, y1 = table._bbox
+        bbox_for_pdfplumber = (x0, page_height - y1, x1, page_height - y0)
+        cropped = cropped.outside_bbox(bbox_for_pdfplumber)  # 표 영역 안의 글자를 제외
+        markdown_blocks.append(_table_df_to_markdown(table.df))
+
+    outside_text = cropped.extract_text() or ""
+    # 정확한 위치 복원 대신, 표 밖 텍스트 뒤에 표들을 순서대로 붙인다 (설계서 2.1.4 — 허용된 방식).
+    return (outside_text + "\n\n" + "\n\n".join(markdown_blocks)).strip()
+
+
+def _table_df_to_markdown(df) -> str:
+    """camelot이 뽑은 표(DataFrame)를 마크다운 파이프 표로 변환한다 (설계서 2.2).
+    첫 행을 헤더로 승격하고, 빈 셀은 빈 문자열로, 셀 안 개행은 공백으로 바꿔
+    파이프 표가 깨지지 않게 한다."""
+    df = df.copy()
+    df.columns = df.iloc[0]
+    df = df.iloc[1:]
+    df = df.fillna("").map(
+        lambda cell: str(cell).replace("\n", " ").replace("\r", " ") if isinstance(cell, str) else cell
+    )
+    return df.to_markdown(index=False)
 
 
 def extract_ocr_pages(filepath: str, source_file: str = None, pages: list = None) -> dict:
