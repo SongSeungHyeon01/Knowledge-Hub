@@ -86,29 +86,26 @@ def extract_text_pages(filepath: str, source_file: str = None, pages: list = Non
         source_file = filepath
 
     try:
-        doc = fitz.open(filepath)
+        with pdfplumber.open(filepath) as pdf:
+            if len(pdf.pages) == 0:
+                raise ValueError("페이지가 없는 빈 PDF입니다.")
 
-        if not doc.is_pdf:
-            raise ValueError("PDF 형식이 아닌 파일입니다.")
-        if len(doc) == 0:
-            raise ValueError("페이지가 없는 빈 PDF입니다.")
+            target_pages = pages if pages is not None else range(1, len(pdf.pages) + 1)
 
-        target_pages = pages if pages is not None else range(1, len(doc) + 1)
+            result_pages = []
+            for page_num in target_pages:
+                page = pdf.pages[page_num - 1]
+                # 날것 그대로 추출한다. 마크다운 변환 X (그건 ② 송승현 담당)
+                # 표 안 글자 제외(2.1 설계)는 아직 하지 않는다 — camelot 연동은 STEP 4.
+                text = page.extract_text() or ""
+                result_pages.append({
+                    "page": page_num,
+                    "text": text,
+                    "method": "text",
+                    "ocr_confidence": None,   # 텍스트 직접 추출이라 신뢰도 없음
+                    "flagged": False,          # 텍스트형은 항상 false
+                })
 
-        result_pages = []
-        for page_num in target_pages:
-            page = doc[page_num - 1]
-            # 날것 그대로 추출한다. 마크다운 변환 X (그건 ② 송승현 담당)
-            text = page.get_text()
-            result_pages.append({
-                "page": page_num,
-                "text": text,
-                "method": "text",
-                "ocr_confidence": None,   # 텍스트 직접 추출이라 신뢰도 없음
-                "flagged": False,          # 텍스트형은 항상 false
-            })
-
-        doc.close()
         return {
             "source_file": source_file,
             "status": "success",
