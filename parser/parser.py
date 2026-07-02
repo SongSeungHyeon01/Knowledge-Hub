@@ -3,11 +3,16 @@
 #   2단계: classify_pdf      — 텍스트형/스캔형 판별
 #   3단계: extract_text_pages — 텍스트형 PDF 본문 추출
 #   4단계: extract_ocr_pages  — 스캔형 PDF OCR 인식 + 신뢰도 계산
-import fitz         # PyMuPDF (extract_ocr_pages에서 아직 사용 — STEP 5에서 교체 예정)
+import io
+
+import fitz         # PyMuPDF (extract_ocr_pages의 페이지->이미지 변환에 아직 사용 — STEP 5 보고 참고)
 import pdfplumber   # PDF 텍스트 추출 (MIT) — classify_pdf()부터 순차 교체 중
 import camelot      # PDF 표 추출 (MIT, 기본 백엔드 pdfium) — STEP 4에서 추가
 import easyocr      # OCR 엔진
 import numpy as np  # 이미지 배열 변환용
+from PIL import Image as PILImage
+from img2table.document import Image as Img2TableImage  # 스캔 이미지 내 표 인식 (MIT) — STEP 5에서 추가
+from img2table.ocr import EasyOCR as Img2TableEasyOCR
 
 # 페이지에 이 글자 수 이상이면 "텍스트형"으로 판별한다.
 # 너무 짧으면 스캔 PDF의 메타데이터 잡음(공백·제어문자)일 수 있어서 10자로 걸러낸다.
@@ -136,6 +141,18 @@ def _extract_page_text(filepath: str, page, page_num: int) -> str:
        (표가 없는 페이지에서 카멜롯 처리를 더 하지 않기 위함 — 자원 절약)
     3. 표가 있으면: camelot 좌표(bbox)를 pdfplumber 좌표로 변환해 그 영역을 제외한
        텍스트를 뽑고, 표는 마크다운으로 변환해 페이지 끝에 붙인다.
+
+    ── 성능 메모 (2026-07-03, STEP 4 리뷰에서 논의) ─────────────────────────
+    표가 없는 페이지도 camelot 감지 자체(페이지당 약 0.2초)는 피할 수 없다.
+    "파일 전체를 한 번에 camelot으로 스캔해 페이지별로 나누는" 방식이 더 빠르지만,
+    지금은 일부러 하지 않는다:
+      1) STEP 2~3에서 이미 검증을 마친 "페이지 단위 처리" 구조를 크게 흔드는
+         리팩터링이라, 검증된 부분을 다시 위험에 빠뜨린다.
+      2) 이 파싱은 문서 업로드 시점에 한 번 도는 배치 작업이라 사용자가 실시간으로
+         기다리는 구간이 아니다 (검색 응답 5분 이내 같은 실사용 성공 기준과 무관).
+      3) 실제 운영에서 이 부분이 병목이라고 측정된 적이 없다.
+    실운영에서 느려짐이 실제로 확인되면 그때 다시 검토한다.
+    ─────────────────────────────────────────────────────────────────────
     """
     try:
         tables = camelot.read_pdf(filepath, pages=str(page_num), flavor="lattice")
@@ -229,6 +246,14 @@ def extract_ocr_pages(filepath: str, source_file: str = None, pages: list = None
         # 모델 파일을 메모리에 올리는 작업이라 처음 한 번만 오래 걸린다.
         reader = easyocr.Reader(['ko', 'en'], gpu=False, verbose=False)
 
+        # img2table도 내부적으로 EasyOCR을 쓰는데, 그냥 두면 자체적으로 reader를
+        # 하나 더 만들어(약 1.8초 + 메모리 중복) 3GB RAM 제약에 불리하다.
+        # img2table.ocr.EasyOCR.__init__은 self.lang / self.reader 두 속성만 쓰므로,
+        # __new__로 생성자를 건너뛰고 위에서 이미 만든 reader를 그대로 주입해 재사용한다.
+        img2table_ocr = Img2TableEasyOCR.__new__(Img2TableEasyOCR)
+        img2table_ocr.lang = ['ko', 'en']
+        img2table_ocr.reader = reader
+
         result_pages = []
         for page_num in target_pages:
             page = doc[page_num - 1]
@@ -270,11 +295,14 @@ def extract_ocr_pages(filepath: str, source_file: str = None, pages: list = None
                 # 정확히 0.7은 합격(false). "미만"이므로 < 를 쓴다.
                 # bool()로 감싸는 이유: EasyOCR 신뢰도가 numpy.float64 타입이라
                 # 비교 결과가 numpy.bool_로 나오면 json.dumps()가 오류를 낸다.
+                # (신뢰도 계산·0.7 기준은 표 유무와 무관하게 이 페이지 전체 OCR 품질을
+                #  나타내야 하므로, 아래 표 통합과 별개로 raw 전체 기준으로 그대로 유지한다.)
                 flagged = bool(ocr_confidence < 0.7)
 
-                # 블록들을 줄바꿈으로 이어붙여 날것 텍스트로 만든다.
-                # 마크다운 변환 X — 그건 ② 송승현 담당
-                page_text = "\n".join(text for _, text, _ in raw)
+                # 표가 있으면 img2table로 인식해 마크다운으로 바꾸고, 표 안 블록은
+                # 일반 텍스트에서 제외한다 (텍스트형 페이지의 2.1 설계와 같은 원칙을
+                # 스캔 페이지에도 동일하게 적용 — 표 내용이 이중으로 들어가지 않게 함).
+                page_text = _ocr_page_text_with_tables(raw, img, img2table_ocr)
 
             result_pages.append({
                 "page": page_num,
@@ -300,6 +328,44 @@ def extract_ocr_pages(filepath: str, source_file: str = None, pages: list = None
             "error": str(e),
             "pages": [],
         }
+
+
+def _ocr_page_text_with_tables(raw, img, img2table_ocr) -> str:
+    """
+    스캔 페이지의 OCR 결과에 표가 있으면 img2table로 표를 인식해 마크다운으로 바꾸고,
+    표 영역 안에 있던 OCR 블록은 일반 텍스트에서 제외해 중복을 막는다 (설계서 2.3).
+
+    camelot/pdfplumber 조합(설계서 2.1)과 달리, EasyOCR의 블록 좌표와 img2table의
+    표 좌표는 애초에 같은 이미지의 픽셀 좌표계를 공유하므로 좌표 변환이 필요 없다.
+
+    raw: reader.readtext(img)의 결과 [(bbox, text, confidence), ...]
+    img: OCR에 사용한 numpy 이미지 (img2table 표 감지에도 그대로 재사용)
+    img2table_ocr: reader를 재사용하도록 만든 img2table EasyOCR 래퍼
+    """
+    try:
+        pil_img = PILImage.fromarray(img)
+        buf = io.BytesIO()
+        pil_img.save(buf, format="PNG")
+        tables = Img2TableImage(src=buf.getvalue()).extract_tables(ocr=img2table_ocr, min_confidence=30)
+    except Exception:
+        # img2table이 실패해도(예: 표처럼 보이는 구조 없음) 페이지 전체가 죽으면 안 된다.
+        tables = []
+
+    if not tables:
+        return "\n".join(text for _, text, _ in raw)
+
+    def _block_center_in_any_table(bbox_points):
+        xs = [p[0] for p in bbox_points]
+        ys = [p[1] for p in bbox_points]
+        cx, cy = sum(xs) / len(xs), sum(ys) / len(ys)
+        return any(t.bbox.x1 <= cx <= t.bbox.x2 and t.bbox.y1 <= cy <= t.bbox.y2 for t in tables)
+
+    outside_lines = [text for bbox, text, _ in raw if not _block_center_in_any_table(bbox)]
+    # 화면에 보이는 순서(위→아래)로 표 정렬
+    ordered_tables = sorted(tables, key=lambda t: t.bbox.y1)
+    markdown_blocks = [_table_df_to_markdown(t.df) for t in ordered_tables]
+
+    return ("\n".join(outside_lines) + "\n\n" + "\n\n".join(markdown_blocks)).strip()
 
 
 def parse_pdf(filepath: str, source_file: str = None) -> dict:
