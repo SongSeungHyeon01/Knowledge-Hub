@@ -1,7 +1,13 @@
 # [설치 방법] torch CPU 버전은 아래 명령어로 설치하세요 (일반 pip install 하면 GPU 버전이 깔릴 수 있음):
 # pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
-PyMuPDF==1.27.2.3
+PyMuPDF==1.27.2.3  # AGPL 라이선스 문제로 교체 중 — 코드가 아직 이 라이브러리를 쓰고 있어 임시 유지, STEP 7에서 완전 제거 예정
 easyocr==1.7.2
 numpy==2.4.4
 torch==2.12.1+cpu
+
+# ↓ PyMuPDF 대체 라이브러리 (전부 MIT/Apache/BSD 계열)
+pdfplumber==0.11.10        # MIT — 텍스트 추출
+camelot-py==2.0.0          # MIT — 표 추출 (기본 백엔드 pdfium, Ghostscript 불필요)
+img2table[easyocr]==2.0.0  # MIT — 스캔 이미지 내 표 인식
+tabulate==0.10.0           # MIT — 표 → 마크다운 변환 보조
