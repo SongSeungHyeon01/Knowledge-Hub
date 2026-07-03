@@ -1,15 +1,14 @@
 // App.jsx — 앱 전체 레이아웃 (접히는 사이드바)
+// 관리자 화면은 별도 탭 없이 검색 탭 내 Drawer로 통합 (07/02 회의 확정)
 
 import { Layout, Menu } from 'antd'
 import {
   UploadOutlined,
-  DashboardOutlined,
   SearchOutlined,
   BookOutlined,
 } from '@ant-design/icons'
 import { useState, useEffect } from 'react'
 import UploadPage from './UploadPage'
-import AdminPage from './AdminPage'
 import SearchPage from './SearchPage'
 
 const { Sider, Content } = Layout
@@ -36,9 +35,8 @@ export default function App() {
   }, [current])
 
   const menuItems = [
-    { key: 'upload', icon: <UploadOutlined />,    label: '문서 업로드' },
-    { key: 'search', icon: <SearchOutlined />,    label: '문서 검색' },
-    { key: 'admin',  icon: <DashboardOutlined />, label: '관리자' },
+    { key: 'upload', icon: <UploadOutlined />, label: '문서 업로드' },
+    { key: 'search', icon: <SearchOutlined />, label: '문서 검색' },
   ]
 
   return (
@@ -87,8 +85,7 @@ export default function App() {
       <Layout>
         <Content style={{ background: '#f5f5f5', minHeight: '100vh' }}>
           {current === 'upload' && <UploadPage onNavigate={setCurrent} />}
-          {current === 'search' && <SearchPage />}
-          {current === 'admin'  && <AdminPage onNavigate={setCurrent} />}
+          {current === 'search' && <SearchPage onNavigate={setCurrent} />}
         </Content>
       </Layout>
     </Layout>

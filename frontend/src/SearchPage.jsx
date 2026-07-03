@@ -1,18 +1,20 @@
 // SearchPage.jsx — 검색 화면
 // 검색어 입력 + 최근 검색어 + 카테고리 필터 + alpha 슬라이더 + 결과 카드
+// 관리자 기능은 우상단 톱니 아이콘 → Drawer로 접근 (07/02 회의: 별도 탭 제거)
 
 import { useState, useEffect, useRef } from 'react'
 import {
   Input, Slider, Button, Card, Tag, Typography,
-  Space, Divider, Empty, Spin, Row, Col, Radio, List, Pagination, Tooltip, Alert, Select
+  Space, Divider, Empty, Spin, Row, Col, Radio, List, Pagination, Tooltip, Alert, Select, Drawer
 } from 'antd'
 import {
   SearchOutlined, FileTextOutlined, HistoryOutlined, CloseOutlined,
   FilePdfOutlined, FileWordOutlined, FilePptOutlined, FileExcelOutlined,
   FileImageOutlined, FileMarkdownOutlined, FileOutlined, DownloadOutlined,
-  RobotOutlined,
+  RobotOutlined, SettingOutlined,
 } from '@ant-design/icons'
 import axios from 'axios'
+import AdminPage from './AdminPage'
 
 const { Title, Text, Paragraph } = Typography
 
@@ -75,10 +77,11 @@ const FILE_TYPE_ICON = {
   txt:  <FileTextOutlined style={{ color: '#8c8c8c' }} />,
 }
 
-export default function SearchPage() {
-  const [tipVisible, setTipVisible] = useState(
+export default function SearchPage({ onNavigate }) {
+  const [tipVisible,  setTipVisible]  = useState(
     () => localStorage.getItem('km_tip_closed') !== 'true'
   )
+  const [adminOpen,   setAdminOpen]   = useState(false)
 
   // 관리자 검색 기록에서 넘어온 경우 바로 검색 실행
   const [pendingSearch] = useState(() => {
@@ -251,7 +254,19 @@ export default function SearchPage() {
 
   return (
     <div style={{ padding: 32, maxWidth: 860, margin: '0 auto' }}>
-      <Title level={2}>문서 검색</Title>
+      {/* 헤더: 제목 + 관리자 버튼 */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+        <Title level={2} style={{ margin: 0 }}>문서 검색</Title>
+        <Tooltip title="관리자">
+          <Button
+            icon={<SettingOutlined />}
+            shape="circle"
+            type="text"
+            style={{ color: '#8c8c8c' }}
+            onClick={() => setAdminOpen(true)}
+          />
+        </Tooltip>
+      </div>
 
       {/* ── 검색 팁 가이드 (처음 방문 시만 표시) ────────────────── */}
       {tipVisible && (
@@ -660,6 +675,19 @@ export default function SearchPage() {
           description="검색어를 입력하고 검색 버튼을 누르세요"
         />
       )}
+
+      {/* ── 관리자 Drawer (우상단 톱니 → 열림) ──────────────────── */}
+      <Drawer
+        title="관리자"
+        placement="right"
+        width={Math.min(window.innerWidth, 960)}
+        open={adminOpen}
+        onClose={() => setAdminOpen(false)}
+        destroyOnClose
+        styles={{ body: { padding: 0, background: '#f5f5f5' } }}
+      >
+        <AdminPage onNavigate={(tab) => { setAdminOpen(false); onNavigate?.(tab) }} />
+      </Drawer>
     </div>
   )
 }
