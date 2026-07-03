@@ -4,30 +4,30 @@
 import asyncio
 import os
 import json
+import hashlib
 import numpy as np
 from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, Query, Body, BackgroundTasks
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware  # CORS 설정용
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete as sa_delete
 from typing import Literal
 from datetime import datetime, timedelta
 
 from sqlalchemy import text
 
-from database import engine, get_db, Base
-from models import Document, SearchLog
+from database import engine, get_db, Base, AsyncSessionLocal
+from models import Document, SearchLog, Chunk
 from contextlib import asynccontextmanager
 from core.parser import parse_pdf                   # NEVER MODIFY — import only
 from core.docling_parser import parse_document      # 신규 멀티포맷 파서
 
-# 업로드된 파일을 저장할 폴더 경로
-_BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_DIR  = os.environ.get("UPLOAD_DIR", os.path.join(_BASE_DIR, "uploads"))
+# ── 경로 설정 — env var 우선, 없으면 코드 파일 기준 상대 경로 ─────────────────
+_BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR   = os.environ.get("DATA_DIR", os.path.join(_BASE_DIR, "data"))
+UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
+PARSED_DIR = os.path.join(DATA_DIR, "parsed")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-# 파싱 결과 JSON을 저장할 폴더 경로 (문서 상세 보기에서 사용)
-PARSED_DIR  = os.path.join(UPLOAD_DIR, "parsed")
 os.makedirs(PARSED_DIR, exist_ok=True)
 
 # 지원 파일 형식 목록
@@ -36,13 +36,27 @@ SUPPORTED_EXTENSIONS = {
     '.hwp', '.hwpx', '.txt', '.md', '.png', '.jpg', '.jpeg',
 }
 
-# 파일 크기 상한 (200MB — Docling이 대용량도 페이지 단위로 처리)
-MAX_UPLOAD_SIZE = 200 * 1024 * 1024
+# 파일 크기 상한 (500MB — OOM 방지 1MB 스트리밍)
+MAX_UPLOAD_SIZE = 500 * 1024 * 1024
+
+
+# ── turbovec 인덱스 (전역, 지연 초기화) ──────────────────────────────────────
+_vec_index = None   # turbovec.IdMapIndex or None (설치 안 됐을 때)
+
+def _get_vec_index():
+    global _vec_index
+    if _vec_index is None:
+        try:
+            import turbovec
+            _vec_index = turbovec.IdMapIndex(dim=384, bit_width=4)
+        except ImportError:
+            pass
+    return _vec_index
 
 
 @asynccontextmanager
 async def lifespan(_):
-    """서버 시작 시 DB 테이블 생성 + 스키마 마이그레이션."""
+    """서버 시작 시 DB 테이블 생성 + 스키마 마이그레이션 + turbovec 재구성."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         migrations = [
@@ -50,22 +64,42 @@ async def lifespan(_):
             "ALTER TABLE documents ADD COLUMN original_path VARCHAR",
             "ALTER TABLE documents ADD COLUMN title VARCHAR",
             "ALTER TABLE documents ADD COLUMN memo TEXT",
+            "ALTER TABLE documents ADD COLUMN sha256 VARCHAR(64)",
         ]
         for stmt in migrations:
             try:
                 await conn.execute(text(stmt))
             except Exception:
                 pass  # 이미 존재하는 컬럼 → 정상적으로 무시
+
+    # turbovec 인덱스 재구성 (DB CHUNKS에서 임베딩 로드)
+    idx = _get_vec_index()
+    if idx is not None:
+        async with AsyncSessionLocal() as sess:
+            rows = (await sess.execute(
+                select(Chunk).where(Chunk.embedding != None)
+            )).scalars().all()
+            count = 0
+            for row in rows:
+                try:
+                    vec = np.frombuffer(row.embedding, dtype=np.float32)
+                    idx.add(int(row.id), vec)
+                    count += 1
+                except Exception:
+                    pass
+        print(f"[startup] turbovec 재구성 완료: {count}개 벡터")
+
     yield
 
 
 # FastAPI 앱 객체를 만듭니다
 app = FastAPI(lifespan=lifespan)
 
-# CORS 설정: 프론트엔드(localhost:5173)에서 백엔드로 요청을 보낼 수 있게 허용합니다
+# CORS 설정: 환경변수로 allowed origins 확장 (기본값: localhost:5173)
+_cors_origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "http://localhost:5173").split(",")]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # Vite 개발 서버 주소
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -120,6 +154,20 @@ def _get_embed_model():
     return _embed_model
 
 
+# ── kiwipiepy 형태소 분석기 (지연 로딩) ──────────────────────────────────────
+_kiwi = None
+
+def _get_kiwi():
+    global _kiwi
+    if _kiwi is None:
+        try:
+            from kiwipiepy import Kiwi
+            _kiwi = Kiwi()
+        except ImportError:
+            pass
+    return _kiwi
+
+
 def _best_page_for_tokens(pages: list, tokens: list) -> int:
     """토큰이 가장 많이 등장하는 페이지 번호를 반환합니다."""
     if not pages or not tokens:
@@ -134,7 +182,15 @@ def _best_page_for_tokens(pages: list, tokens: list) -> int:
 
 
 def _tokenize_bm25(text: str) -> list:
-    """BM25 코퍼스/쿼리 토크나이저: 구두점 분리 + 조사 제거 확장."""
+    """BM25 코퍼스/쿼리 토크나이저: kiwipiepy 형태소 분석 우선, regex fallback."""
+    kiwi = _get_kiwi()
+    if kiwi is not None:
+        try:
+            keep = {'NNG', 'NNP', 'VV', 'VA', 'SL', 'NR'}
+            return [t.form.lower() for t in kiwi.tokenize(text) if t.tag in keep and len(t.form) >= 2]
+        except Exception:
+            pass
+    # regex fallback
     import re
     raw = [t.lower() for t in re.split(r'[\s,;:.!?()\[\]{}/"\'<>=]+', text) if len(t) >= 2]
     result = []
@@ -164,7 +220,7 @@ def _build_chunks(pages: list, max_len: int = 400) -> tuple:
 
 
 def _generate_embeddings_sync(doc_id: int, pages: list):
-    """임베딩 생성 + 디스크 저장 (동기 — asyncio.to_thread로 호출)."""
+    """임베딩 생성 + 디스크 저장 (동기 — asyncio.to_thread로 호출). 호환성 유지용."""
     model = _get_embed_model()
     if model is None:
         return
@@ -188,8 +244,59 @@ def _generate_embeddings_sync(doc_id: int, pages: list):
 
 
 async def _embed_background(doc_id: int, pages: list):
-    """백그라운드 임베딩 생성 (async wrapper)."""
+    """백그라운드 임베딩 생성 (async wrapper). 호환성 유지용."""
     await asyncio.to_thread(_generate_embeddings_sync, doc_id, pages)
+
+
+async def _ingest_chunks_to_db(doc_id: int, pages: list):
+    """청크 분할 → MiniLM 임베딩 → CHUNKS 테이블 저장 → turbovec 색인."""
+    model = _get_embed_model()
+    chunks, pnums = _build_chunks(pages)
+    if not chunks:
+        return
+
+    # 임베딩 생성
+    if model is not None:
+        embs = await asyncio.to_thread(
+            model.encode, chunks,
+            batch_size=32, normalize_embeddings=True, show_progress_bar=False
+        )
+        embs = embs.astype(np.float32)
+    else:
+        embs = None
+
+    # npz 저장 (BM25 fallback용 — 기존 호환성)
+    if embs is not None:
+        npz_path = os.path.join(PARSED_DIR, f"{doc_id}_emb.npz")
+        np.savez_compressed(npz_path,
+            embeddings=embs,
+            chunks=np.array(chunks, dtype=object),
+            pnums=np.array(pnums, dtype=np.int32))
+
+    # DB에 Chunk 저장 + turbovec 색인
+    idx = _get_vec_index()
+    async with AsyncSessionLocal() as sess:
+        # 기존 청크 삭제 (재시도 시)
+        await sess.execute(
+            sa_delete(Chunk).where(Chunk.doc_id == doc_id)
+        )
+        for i, (text, pnum) in enumerate(zip(chunks, pnums)):
+            emb_bytes = embs[i].tobytes() if embs is not None else None
+            chunk_row = Chunk(doc_id=doc_id, text=text, page_num=pnum, chunk_idx=i, embedding=emb_bytes)
+            sess.add(chunk_row)
+        await sess.flush()  # IDs 확보
+        await sess.commit()
+        # turbovec에 추가
+        if idx is not None and embs is not None:
+            refreshed = (await sess.execute(
+                select(Chunk).where(Chunk.doc_id == doc_id).order_by(Chunk.chunk_idx)
+            )).scalars().all()
+            for row, vec in zip(refreshed, embs):
+                try:
+                    idx.add(int(row.id), vec)
+                except Exception:
+                    pass
+    print(f"[ingest] doc_id={doc_id}: {len(chunks)}청크 저장 완료")
 
 
 # "/" 주소로 접속하면 이 함수가 실행됩니다
@@ -235,12 +342,28 @@ async def 파일_업로드(
         return {"source_file": file.filename, "status": "failed",
                 "error": f"지원하지 않는 형식입니다 ({ext}). 지원 형식: {supported}", "pages": []}
 
-    # ── 검사 3: 파일 크기 제한 (200MB) ──────────────────────────────────
-    contents = await file.read()
-    if len(contents) > MAX_UPLOAD_SIZE:
-        mb = round(len(contents) / (1024 * 1024), 1)
-        return {"source_file": file.filename, "status": "failed",
-                "error": f"파일 크기 초과 ({mb}MB). 최대 200MB까지 지원합니다", "pages": []}
+    # ── 검사 3: 파일 크기 제한 — 1MB 스트리밍 (OOM 방지, 최대 500MB) ──────
+    hasher = hashlib.sha256()
+    chunks_data = []
+    total = 0
+    while True:
+        chunk_bytes = await file.read(1024 * 1024)
+        if not chunk_bytes:
+            break
+        total += len(chunk_bytes)
+        if total > MAX_UPLOAD_SIZE:
+            mb = round(total / (1024 * 1024), 1)
+            return {"source_file": file.filename, "status": "failed",
+                    "error": f"파일 크기 초과 ({mb}MB). 최대 {MAX_UPLOAD_SIZE // (1024*1024)}MB까지 지원합니다", "pages": []}
+        hasher.update(chunk_bytes)
+        chunks_data.append(chunk_bytes)
+    sha256_hex = hasher.hexdigest()
+    contents = b"".join(chunks_data)
+
+    # ── SHA-256 중복 체크 — 이미 같은 내용의 파일이 있으면 409 ──────────
+    dup = (await db.execute(select(Document).where(Document.sha256 == sha256_hex))).scalar_one_or_none()
+    if dup is not None:
+        raise HTTPException(status_code=409, detail=f"동일한 파일이 이미 존재합니다 (id={dup.id}, '{dup.filename}')")
 
     # ── 저장 경로 결정 — original_path 있으면 디렉토리 구조 보존 ─────────
     # 경로 순회 공격 방지: '..' './' 절대경로 등 제거
@@ -288,6 +411,7 @@ async def 파일_업로드(
         error         = result.get("error"),
         page_count    = len(result.get("pages", [])),
         has_flagged   = has_flagged,
+        sha256        = sha256_hex,
     )
     db.add(doc)
     await db.commit()
@@ -298,9 +422,9 @@ async def 파일_업로드(
     with open(parsed_path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
 
-    # 임베딩 생성 (응답 후 백그라운드에서 실행 — 검색 품질 향상)
+    # 임베딩 생성 + Chunk DB 저장 (응답 후 백그라운드에서 실행)
     if result.get("status") == "success":
-        background_tasks.add_task(_embed_background, doc.id, result.get("pages", []))
+        background_tasks.add_task(_ingest_chunks_to_db, doc.id, result.get("pages", []))
 
     return result
 
@@ -345,6 +469,25 @@ async def 문서_삭제(doc_id: int, db: AsyncSession = Depends(get_db)):
     parsed_path = os.path.join(PARSED_DIR, f"{doc_id}.json")
     if os.path.exists(parsed_path):
         os.remove(parsed_path)
+
+    # Chunks 삭제 + turbovec 제거
+    chunk_ids = (await db.execute(
+        select(Chunk.id).where(Chunk.doc_id == doc_id)
+    )).scalars().all()
+    await db.execute(sa_delete(Chunk).where(Chunk.doc_id == doc_id))
+
+    idx = _get_vec_index()
+    if idx is not None:
+        for cid in chunk_ids:
+            try:
+                idx.remove(int(cid))
+            except Exception:
+                pass
+
+    # npz 삭제
+    npz_path = os.path.join(PARSED_DIR, f"{doc_id}_emb.npz")
+    if os.path.exists(npz_path):
+        os.remove(npz_path)
 
     # DB에서도 삭제합니다
     await db.delete(doc)
@@ -445,9 +588,9 @@ async def 문서_재시도(doc_id: int, background_tasks: BackgroundTasks, db: A
     with open(parsed_path, "w", encoding="utf-8") as f:
         json.dump(parse_result, f, ensure_ascii=False, indent=2)
 
-    # 임베딩 재생성
+    # 임베딩 재생성 + Chunk DB 저장
     if parse_result.get("status") == "success":
-        background_tasks.add_task(_embed_background, doc.id, parse_result.get("pages", []))
+        background_tasks.add_task(_ingest_chunks_to_db, doc.id, parse_result.get("pages", []))
 
     return {
         "id":          doc.id,
@@ -623,29 +766,79 @@ async def 실제_검색_실행(q: str, alpha: float, category, db: AsyncSession)
     sem_chunks: dict   = {}   # doc_id → 가장 유사한 청크 텍스트 (스니펫용)
     sem_pages:  dict   = {}   # doc_id → 가장 유사한 청크의 페이지 번호
     if alpha > 0.0:
-        try:
-            model = _get_embed_model()
-            if model is not None:
-                q_emb = (await asyncio.to_thread(
-                    model.encode, [q],
-                    normalize_embeddings=True,
-                    show_progress_bar=False,
-                ))[0]
-                for doc in docs:
-                    emb_path = os.path.join(PARSED_DIR, f"{doc.id}_emb.npz")
-                    if not os.path.exists(emb_path):
-                        continue
-                    data     = np.load(emb_path, allow_pickle=True)
-                    embs     = data["embeddings"]          # [N, 384] float32 L2-정규화
-                    sims     = embs @ q_emb                # 코사인 유사도
-                    best_idx = int(np.argmax(sims))
-                    sem_scores[doc.id] = float(sims[best_idx])
-                    if "chunks" in data:
-                        sem_chunks[doc.id] = str(data["chunks"][best_idx])
-                    if "pnums" in data:
-                        sem_pages[doc.id]  = int(data["pnums"][best_idx])
-        except Exception as e:
-            print(f"[search] 시맨틱 오류: {e}")
+        idx = _get_vec_index()
+        model = _get_embed_model()
+        if idx is not None and model is not None:
+            q_emb = (await asyncio.to_thread(
+                model.encode, [q], normalize_embeddings=True, show_progress_bar=False
+            ))[0].astype(np.float32)
+            try:
+                vec_ids, vec_scores = idx.search(q_emb, k=min(50, 200))
+                # chunk_ids → doc_id 매핑
+                if vec_ids is not None and len(vec_ids) > 0:
+                    chunk_rows = (await db.execute(
+                        select(Chunk.id, Chunk.doc_id, Chunk.text, Chunk.page_num)
+                        .where(Chunk.id.in_([int(i) for i in vec_ids]))
+                    )).all()
+                    id_to_row = {row.id: row for row in chunk_rows}
+                    for cid, score in zip(vec_ids, vec_scores):
+                        row = id_to_row.get(int(cid))
+                        if row is None:
+                            continue
+                        did = row.doc_id
+                        if float(score) > sem_scores.get(did, -1):
+                            sem_scores[did] = float(score)
+                            sem_chunks[did] = row.text
+                            sem_pages[did]  = row.page_num
+            except Exception as e:
+                print(f"[search] turbovec 오류, numpy fallback: {e}")
+                # numpy .npz fallback
+                if model is not None:
+                    try:
+                        q_emb_np = (await asyncio.to_thread(
+                            model.encode, [q],
+                            normalize_embeddings=True,
+                            show_progress_bar=False,
+                        ))[0]
+                        for doc in docs:
+                            emb_path = os.path.join(PARSED_DIR, f"{doc.id}_emb.npz")
+                            if not os.path.exists(emb_path):
+                                continue
+                            data     = np.load(emb_path, allow_pickle=True)
+                            embs     = data["embeddings"]
+                            sims     = embs @ q_emb_np
+                            best_idx = int(np.argmax(sims))
+                            sem_scores[doc.id] = float(sims[best_idx])
+                            if "chunks" in data:
+                                sem_chunks[doc.id] = str(data["chunks"][best_idx])
+                            if "pnums" in data:
+                                sem_pages[doc.id]  = int(data["pnums"][best_idx])
+                    except Exception as e2:
+                        print(f"[search] 시맨틱 오류: {e2}")
+        else:
+            # turbovec 없으면 기존 npz 방식 fallback
+            try:
+                if model is not None:
+                    q_emb = (await asyncio.to_thread(
+                        model.encode, [q],
+                        normalize_embeddings=True,
+                        show_progress_bar=False,
+                    ))[0]
+                    for doc in docs:
+                        emb_path = os.path.join(PARSED_DIR, f"{doc.id}_emb.npz")
+                        if not os.path.exists(emb_path):
+                            continue
+                        data     = np.load(emb_path, allow_pickle=True)
+                        embs     = data["embeddings"]
+                        sims     = embs @ q_emb
+                        best_idx = int(np.argmax(sims))
+                        sem_scores[doc.id] = float(sims[best_idx])
+                        if "chunks" in data:
+                            sem_chunks[doc.id] = str(data["chunks"][best_idx])
+                        if "pnums" in data:
+                            sem_pages[doc.id]  = int(data["pnums"][best_idx])
+            except Exception as e:
+                print(f"[search] 시맨틱 오류: {e}")
 
     # ── 6. 후보 선정 ─────────────────────────────────────────────────────────
     SEM_THR = 0.25   # 코사인 유사도 임계값
@@ -812,6 +1005,22 @@ async def 문서_일괄_삭제(ids: list[int] = Body(...), db: AsyncSession = De
             parsed_path = os.path.join(PARSED_DIR, f"{doc.id}.json")
             if os.path.exists(parsed_path):
                 os.remove(parsed_path)
+            # Chunks 삭제 + turbovec 제거
+            chunk_ids = (await db.execute(
+                select(Chunk.id).where(Chunk.doc_id == doc_id)
+            )).scalars().all()
+            await db.execute(sa_delete(Chunk).where(Chunk.doc_id == doc_id))
+            idx = _get_vec_index()
+            if idx is not None:
+                for cid in chunk_ids:
+                    try:
+                        idx.remove(int(cid))
+                    except Exception:
+                        pass
+            # npz 삭제
+            npz_path = os.path.join(PARSED_DIR, f"{doc_id}_emb.npz")
+            if os.path.exists(npz_path):
+                os.remove(npz_path)
             await db.delete(doc)
             deleted.append(doc_id)
     await db.commit()
