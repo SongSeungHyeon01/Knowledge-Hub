@@ -447,10 +447,23 @@ def parse_pdf(filepath: str, source_file: str = None) -> dict:
 
 
 def _failed_result(source_file: str, err_msg: str) -> dict:
-    """classify_pdf/extract_text_pages/extract_ocr_pages 중 어디서 실패하든 동일한 형식의 실패 결과를 만든다."""
-    # PDF를 열지 못할 때 나오는 영문 에러 메시지를 한국어로 교체
-    if "Failed to open" in err_msg or "cannot open" in err_msg.lower():
-        err_msg = "PDF를 열 수 없음 (파일이 손상되었거나 형식이 올바르지 않습니다)"
+    """classify_pdf/extract_text_pages/extract_ocr_pages 중 어디서 실패하든 동일한 형식의 실패 결과를 만든다.
+    라이브러리(pdfplumber/pdfminer)가 던지는 영문 에러를, 코딩 초보 사용자가 이해할 한국어로 바꾼다."""
+    low = err_msg.lower()
+    # (1) 파일이 아예 없는 경우 (경로 오타 등) — 손상과는 원인이 달라 따로 안내한다.
+    #     실제 문자열 예: "[Errno 2] No such file or directory: '...'"
+    if "no such file" in low or "errno 2" in low:
+        err_msg = "PDF 파일을 찾을 수 없습니다 (파일 경로가 올바른지 확인하세요)"
+    # (2) 파일은 있으나 열 수 없는 경우: 손상되었거나 PDF 형식이 아님.
+    #     실제로 라이브러리가 내는 문자열들을 모두 매칭한다:
+    #       "No /Root object! - Is this really a PDF?" (0바이트·비PDF)
+    #       "Unexpected EOF"                            (앞부분만 남고 잘린 파일)
+    #       "Failed to open" / "cannot open"            (일반적 열기 실패)
+    elif ("No /Root object" in err_msg or "Unexpected EOF" in err_msg
+          or "Is this really a PDF" in err_msg or "Failed to open" in err_msg
+          or "cannot open" in low or "not a pdf" in low):
+        err_msg = "PDF를 열 수 없습니다 (파일이 손상되었거나 형식이 올바르지 않습니다)"
+    # (3) 그 외(예: 우리 코드가 낸 한국어 "페이지가 없는 빈 PDF입니다.")는 그대로 둔다.
     return {
         "source_file": source_file,
         "status": "failed",
