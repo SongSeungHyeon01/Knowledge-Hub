@@ -114,15 +114,28 @@ def extract_text_pages(filepath: str, source_file: str = None, pages: list = Non
 
             result_pages = []
             for page_num in target_pages:
-                page = pdf.pages[page_num - 1]
-                text = _extract_page_text(filepath, page, page_num)
-                result_pages.append({
-                    "page": page_num,
-                    "text": text,
-                    "method": "text",
-                    "ocr_confidence": None,   # 텍스트 직접 추출이라 신뢰도 없음
-                    "flagged": False,          # 텍스트형은 항상 false
-                })
+                # 페이지 단위 예외 격리: 한 페이지가 깨져도 파일 전체를 버리지 않는다.
+                # 실패한 페이지는 출력 형식(5개 키)을 그대로 유지한 채 flagged=True로 남겨,
+                # 나머지 정상 페이지는 살리고 이 페이지만 검토 대상으로 표시한다.
+                # (파일 자체를 못 여는 경우는 이 루프 바깥 try/except에서 status=failed로 처리된다)
+                try:
+                    page = pdf.pages[page_num - 1]
+                    text = _extract_page_text(filepath, page, page_num)
+                    result_pages.append({
+                        "page": page_num,
+                        "text": text,
+                        "method": "text",
+                        "ocr_confidence": None,   # 텍스트 직접 추출이라 신뢰도 없음
+                        "flagged": False,          # 정상 텍스트형은 false
+                    })
+                except Exception as e:
+                    result_pages.append({
+                        "page": page_num,
+                        "text": f"[페이지 {page_num} 처리 실패: {type(e).__name__} - {e}]",
+                        "method": "text",
+                        "ocr_confidence": None,
+                        "flagged": True,           # 실패 페이지는 검토 필요
+                    })
 
         return {
             "source_file": source_file,
@@ -262,54 +275,67 @@ def extract_ocr_pages(filepath: str, source_file: str = None, pages: list = None
 
             result_pages = []
             for page_num in target_pages:
-                page = pdf.pages[page_num - 1]
+                # 페이지 단위 예외 격리: 한 페이지의 OCR/렌더링이 깨져도 파일 전체를 버리지 않는다.
+                # 실패한 페이지는 출력 형식(5개 키)을 그대로 유지한 채 flagged=True로 남겨,
+                # 나머지 정상 페이지는 살리고 이 페이지만 검토 대상으로 표시한다.
+                # (파일 자체를 못 여는 경우는 이 루프 바깥 try/except에서 status=failed로 처리된다)
+                try:
+                    page = pdf.pages[page_num - 1]
 
-                # ── 페이지 → 이미지 변환 (PyMuPDF 대신 pdfplumber/pypdfium2 사용) ──
-                # resolution=144: 72dpi 기준 2배 해상도 (예전 PyMuPDF Matrix(2,2)와 동등).
-                # antialias=True: 꺼두면 EasyOCR 신뢰도가 더 떨어짐을 실측으로 확인함
-                # (예: scan 더미 기준 antialias 끄면 0.56, 켜면 0.66로 fitz의 0.71에 더 근접).
-                page_image = page.to_image(resolution=144, antialias=True)
-                img = np.array(page_image.original.convert("RGB"))
+                    # ── 페이지 → 이미지 변환 (PyMuPDF 대신 pdfplumber/pypdfium2 사용) ──
+                    # resolution=144: 72dpi 기준 2배 해상도 (예전 PyMuPDF Matrix(2,2)와 동등).
+                    # antialias=True: 꺼두면 EasyOCR 신뢰도가 더 떨어짐을 실측으로 확인함
+                    # (예: scan 더미 기준 antialias 끄면 0.56, 켜면 0.66로 fitz의 0.71에 더 근접).
+                    page_image = page.to_image(resolution=144, antialias=True)
+                    img = np.array(page_image.original.convert("RGB"))
 
-                # ── EasyOCR 실행 ─────────────────────────────────────────────
-                # raw: [(bbox, text, confidence), ...] 형태의 리스트
-                # bbox는 좌표(사용 안 함), text는 인식된 글자, confidence는 신뢰도
-                raw = reader.readtext(img)
+                    # ── EasyOCR 실행 ─────────────────────────────────────────────
+                    # raw: [(bbox, text, confidence), ...] 형태의 리스트
+                    # bbox는 좌표(사용 안 함), text는 인식된 글자, confidence는 신뢰도
+                    raw = reader.readtext(img)
 
-                # ── 글자 수 가중 평균 계산 ───────────────────────────────────
-                total_chars = sum(len(text) for _, text, _ in raw)
+                    # ── 글자 수 가중 평균 계산 ───────────────────────────────────
+                    total_chars = sum(len(text) for _, text, _ in raw)
 
-                if total_chars == 0:
-                    # 인식된 글자가 전혀 없는 페이지 (백지, 도면만 있는 경우)
-                    ocr_confidence = 0.0
-                    flagged = True   # 글자를 못 읽었으니 신뢰할 수 없음
-                    page_text = ""
-                else:
-                    # 가중합 = 각 블록의 (글자수 × 신뢰도) 를 모두 더함
-                    weighted_sum = sum(len(text) * conf for _, text, conf in raw)
-                    ocr_confidence = weighted_sum / total_chars
+                    if total_chars == 0:
+                        # 인식된 글자가 전혀 없는 페이지 (백지, 도면만 있는 경우)
+                        ocr_confidence = 0.0
+                        flagged = True   # 글자를 못 읽었으니 신뢰할 수 없음
+                        page_text = ""
+                    else:
+                        # 가중합 = 각 블록의 (글자수 × 신뢰도) 를 모두 더함
+                        weighted_sum = sum(len(text) * conf for _, text, conf in raw)
+                        ocr_confidence = weighted_sum / total_chars
 
-                    # ocr_confidence가 OCR_CONFIDENCE_THRESHOLD 미만이면 못 믿을 페이지로 판정한다.
-                    # 정확히 threshold는 합격(false). "미만"이므로 < 를 쓴다.
-                    # bool()로 감싸는 이유: EasyOCR 신뢰도가 numpy.float64 타입이라
-                    # 비교 결과가 numpy.bool_로 나오면 json.dumps()가 오류를 낸다.
-                    # (신뢰도 계산·threshold 기준은 표 유무와 무관하게 이 페이지 전체 OCR 품질을
-                    #  나타내야 하므로, 아래 표 통합과 별개로 raw 전체 기준으로 그대로 유지한다.)
-                    flagged = bool(ocr_confidence < OCR_CONFIDENCE_THRESHOLD)
+                        # ocr_confidence가 OCR_CONFIDENCE_THRESHOLD 미만이면 못 믿을 페이지로 판정한다.
+                        # 정확히 threshold는 합격(false). "미만"이므로 < 를 쓴다.
+                        # bool()로 감싸는 이유: EasyOCR 신뢰도가 numpy.float64 타입이라
+                        # 비교 결과가 numpy.bool_로 나오면 json.dumps()가 오류를 낸다.
+                        # (신뢰도 계산·threshold 기준은 표 유무와 무관하게 이 페이지 전체 OCR 품질을
+                        #  나타내야 하므로, 아래 표 통합과 별개로 raw 전체 기준으로 그대로 유지한다.)
+                        flagged = bool(ocr_confidence < OCR_CONFIDENCE_THRESHOLD)
 
-                    # 표가 있으면 img2table로 인식해 마크다운으로 바꾸고, 표 안 블록은
-                    # 일반 텍스트에서 제외한다 (텍스트형 페이지의 2.1 설계와 같은 원칙을
-                    # 스캔 페이지에도 동일하게 적용 — 표 내용이 이중으로 들어가지 않게 함).
-                    page_text = _ocr_page_text_with_tables(raw, img, img2table_ocr)
+                        # 표가 있으면 img2table로 인식해 마크다운으로 바꾸고, 표 안 블록은
+                        # 일반 텍스트에서 제외한다 (텍스트형 페이지의 2.1 설계와 같은 원칙을
+                        # 스캔 페이지에도 동일하게 적용 — 표 내용이 이중으로 들어가지 않게 함).
+                        page_text = _ocr_page_text_with_tables(raw, img, img2table_ocr)
 
-                result_pages.append({
-                    "page": page_num,
-                    "text": page_text,
-                    "method": "ocr",
-                    # float()로 감싸는 이유: numpy.float64는 JSON 직렬화 불가
-                    "ocr_confidence": float(round(ocr_confidence, 4)),
-                    "flagged": flagged,
-                })
+                    result_pages.append({
+                        "page": page_num,
+                        "text": page_text,
+                        "method": "ocr",
+                        # float()로 감싸는 이유: numpy.float64는 JSON 직렬화 불가
+                        "ocr_confidence": float(round(ocr_confidence, 4)),
+                        "flagged": flagged,
+                    })
+                except Exception as e:
+                    result_pages.append({
+                        "page": page_num,
+                        "text": f"[페이지 {page_num} 처리 실패: {type(e).__name__} - {e}]",
+                        "method": "ocr",
+                        "ocr_confidence": 0.0,      # 못 읽었으므로 최저 신뢰도
+                        "flagged": True,            # 실패 페이지는 검토 필요
+                    })
 
         return {
             "source_file": source_file,
