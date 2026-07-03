@@ -10,3 +10,7 @@ pdfplumber==0.11.10        # MIT — 텍스트 추출
 camelot-py==2.0.0          # MIT — 표 추출 (기본 백엔드 pdfium, Ghostscript 불필요)
 img2table[easyocr]==2.0.0  # MIT — 스캔 이미지 내 표 인식
 tabulate==0.10.0           # MIT — 표 → 마크다운 변환 보조
+
+# ↓ parser.py가 직접 import/사용하는 라이브러리 (전에는 다른 패키지에 딸려 설치돼 목록에서 빠져 있었음)
+pillow==12.3.0             # HPND(허용) — from PIL import Image (스캔 이미지 처리)
+pandas==3.0.3              # BSD-3(허용) — 표(DataFrame) → 마크다운 변환
