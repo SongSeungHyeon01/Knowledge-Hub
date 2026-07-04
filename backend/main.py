@@ -363,9 +363,16 @@ async def _ingest_chunks_to_db(doc_id: int, pages: list):
     print(f"[ingest] doc_id={doc_id}: {len(chunks)}청크 저장 완료")
 
 
-# "/" 주소로 접속하면 이 함수가 실행됩니다
+# "/" 주소로 접속하면 이 함수가 실행됩니다.
+# 배포(통합 서빙) 시: 프론트 빌드 산출물(backend/static/index.html)이 있으면 화면을 돌려주고,
+# 로컬 개발처럼 static이 없으면 기존 확인 메시지를 돌려줍니다.
+_STATIC_DIR = os.path.join(_BASE_DIR, "static")
+
 @app.get("/")
 def 서버_확인():
+    index_html = os.path.join(_STATIC_DIR, "index.html")
+    if os.path.exists(index_html):
+        return FileResponse(index_html, media_type="text/html")
     return {"message": "서버 켜졌어요"}
 
 # GET /upload/check?filename=... — 같은 파일명이 이미 있는지 확인합니다
@@ -1330,3 +1337,14 @@ async def ai_ask(
         return {"answer": data.get("response", ""), "model": data.get("model", OLLAMA_MODEL)}
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"AI 답변 생성 실패: {e}")
+
+
+# ── 프론트 정적 서빙 (배포용 통합 서빙) ──────────────────────────────────────
+# Dockerfile이 React 빌드 산출물(dist/)을 backend/static/에 복사해 넣는다.
+# 이 mount는 "파일 맨 끝"에 있어야 한다 — FastAPI는 등록 순서대로 매칭하므로
+# 위의 API 라우트들(/upload, /search, /admin/* 등)이 항상 먼저 잡히고,
+# 그 외 경로(/assets/*.js 등)만 정적 파일로 처리된다.
+# 로컬 개발처럼 static/ 폴더가 없으면 아무것도 하지 않는다 (기존 동작 유지).
+if os.path.isdir(_STATIC_DIR):
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="frontend")
