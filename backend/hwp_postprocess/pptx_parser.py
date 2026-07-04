@@ -1,4 +1,4 @@
-﻿"""PPTX íŒŒì„œ â€” LibreOffice headless â†’ PDF â†’ ìœ¤ì¤€ì„œ PDF íŒŒì´í”„ë¼ì¸ ì—°ê²°"""
+"""PPTX 파서 — LibreOffice headless → PDF → 윤준서 PDF 파이프라인 연결"""
 import os
 import shutil
 
@@ -8,9 +8,9 @@ from hwp_postprocess._libreoffice import convert
 
 def parse(file_path: str) -> ParseResult:
     """
-    PPTX â†’ LibreOffice headless â†’ PDF ë³€í™˜ í›„ ìœ¤ì¤€ì„œì˜ PDF íŒŒì´í”„ë¼ì¸ìœ¼ë¡œ ì²˜ë¦¬.
-    Linux í™˜ê²½ì—ì„œ EMF(Windows ì „ìš© ë²¡í„° ì´ë¯¸ì§€)ë¥¼ LibreOfficeê°€ ìžì²´ ë Œë”ë§í•´
-    pdfplumber + camelot + EasyOCR íŒŒì´í”„ë¼ì¸ìœ¼ë¡œ ì²˜ë¦¬í•  ìˆ˜ ìžˆê²Œ í•œë‹¤.
+    PPTX → LibreOffice headless → PDF 변환 후 윤준서의 PDF 파이프라인으로 처리.
+    Linux 환경에서 EMF(Windows 전용 벡터 이미지)를 LibreOffice가 자체 렌더링해
+    pdfplumber + camelot + EasyOCR 파이프라인으로 처리할 수 있게 한다.
     """
     source = str(file_path)
     pdf_path: str | None = None
@@ -18,13 +18,13 @@ def parse(file_path: str) -> ParseResult:
     try:
         pdf_path = convert(source, "pdf")
         result = _call_pdf_pipeline(pdf_path)
-        # source_file ì€ ì›ë³¸ PPTX ê²½ë¡œë¡œ ë®ì–´ì“´ë‹¤
+        # source_file 은 원본 PPTX 경로로 덮어쓴다
         result.source_file = source
         return result
     except Exception as e:
         return ParseResult(source_file=source, status=ParseStatus.FAILED, error=str(e))
     finally:
-        # LibreOffice ê°€ ìƒì„±í•œ ìž„ì‹œ ë””ë ‰í„°ë¦¬ ì •ë¦¬
+        # LibreOffice 가 생성한 임시 디렉터리 정리
         if pdf_path:
             tmp_dir = os.path.dirname(pdf_path)
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -32,16 +32,16 @@ def parse(file_path: str) -> ParseResult:
 
 def _call_pdf_pipeline(pdf_path: str) -> ParseResult:
     """
-    ìœ¤ì¤€ì„œ ë‹´ë‹¹ PDF íŒŒì´í”„ë¼ì¸ì„ í˜¸ì¶œí•œë‹¤.
-    ìœ¤ì¤€ì„œê°€ pipeline/pdf/pdf_parser.py ë¥¼ êµ¬í˜„í•˜ë©´ ì•„ëž˜ import ê°€ ë™ìž‘í•œë‹¤.
+    윤준서 담당 PDF 파이프라인을 호출한다.
+    윤준서가 pipeline/pdf/pdf_parser.py 를 구현하면 아래 import 가 동작한다.
     """
     try:
         from hwp_postprocess.pdf_parser import parse_pdf
         return parse_pdf(pdf_path)
     except ImportError:
         raise RuntimeError(
-            "PDF íŒŒì´í”„ë¼ì¸ ë¯¸êµ¬í˜„: "
-            "app/services/pipeline/pdf/pdf_parser.py ì˜ parse_pdf() ë¥¼ êµ¬í˜„í•˜ì„¸ìš” (ë‹´ë‹¹: ìœ¤ì¤€ì„œ)."
+            "PDF 파이프라인 미구현: "
+            "app/services/pipeline/pdf/pdf_parser.py 의 parse_pdf() 를 구현하세요 (담당: 윤준서)."
         )
 
 

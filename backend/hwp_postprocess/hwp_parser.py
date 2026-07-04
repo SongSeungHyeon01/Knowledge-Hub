@@ -1,4 +1,4 @@
-﻿"""HWP íŒŒì„œ â€” LibreOffice headless â†’ DOCX â†’ python-docx"""
+"""HWP 파서 — LibreOffice headless → DOCX → python-docx"""
 import os
 import shutil
 
@@ -9,9 +9,9 @@ from hwp_postprocess import docx_parser
 
 def parse(file_path: str) -> ParseResult:
     """
-    HWP â†’ LibreOffice headless â†’ DOCX â†’ python-docx íŒŒì´í”„ë¼ì¸.
-    pyhwp ëŠ” AGPL-3.0(ë„¤íŠ¸ì›Œí¬ ì„œë¹„ìŠ¤ ì†ŒìŠ¤ ê³µê°œ ì˜ë¬´)ìœ¼ë¡œ ë¯¸ì±„íƒ, LibreOffice ë‹¨ì¼ ê²½ë¡œ ì‚¬ìš©.
-    ë³€í™˜ ì‹¤íŒ¨ ì‹œ status=FAILED + error ë©”ì‹œì§€ ë°˜í™˜ (ì˜ˆì™¸ë¥¼ ìƒìœ„ë¡œ ì „íŒŒí•˜ì§€ ì•ŠìŒ).
+    HWP → LibreOffice headless → DOCX → python-docx 파이프라인.
+    pyhwp 는 AGPL-3.0(네트워크 서비스 소스 공개 의무)으로 미채택, LibreOffice 단일 경로 사용.
+    변환 실패 시 status=FAILED + error 메시지 반환 (예외를 상위로 전파하지 않음).
     """
     source = str(file_path)
     docx_path: str | None = None
@@ -19,7 +19,7 @@ def parse(file_path: str) -> ParseResult:
     try:
         docx_path = convert(source, "docx")
         result = docx_parser.parse(docx_path)
-        result.source_file = source  # ì›ë³¸ HWP ê²½ë¡œë¡œ ë³µì›
+        result.source_file = source  # 원본 HWP 경로로 복원
         return result
     except Exception as e:
         return ParseResult(source_file=source, status=ParseStatus.FAILED, error=str(e))
