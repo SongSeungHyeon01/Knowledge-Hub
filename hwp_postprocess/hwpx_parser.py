@@ -1,11 +1,11 @@
-"""HWPX 파서 — zipfile + lxml, section*.xml 직접 파싱"""
+﻿"""HWPX íŒŒì„œ â€” zipfile + lxml, section*.xml ì§ì ‘ íŒŒì‹±"""
 import io
 import zipfile
 from pathlib import Path
 
 from lxml import etree
 
-from app.services.parsing.models import ParseResult, PageResult, ParseStatus
+from hwp_postprocess.models import ParseResult, PageResult, ParseStatus
 
 
 def parse(file_path: str) -> ParseResult:
@@ -20,7 +20,7 @@ def parse(file_path: str) -> ParseResult:
                 return ParseResult(
                     source_file=source,
                     status=ParseStatus.FAILED,
-                    error="section*.xml 파일을 찾을 수 없습니다.",
+                    error="section*.xml íŒŒì¼ì„ ì°¾ì„ ìˆ˜ ì—†ìŠµë‹ˆë‹¤.",
                 )
 
             pages: list[PageResult] = []
@@ -34,18 +34,18 @@ def parse(file_path: str) -> ParseResult:
         return ParseResult(
             source_file=source,
             status=ParseStatus.FAILED,
-            error="유효하지 않은 HWPX 파일입니다.",
+            error="ìœ íš¨í•˜ì§€ ì•Šì€ HWPX íŒŒì¼ìž…ë‹ˆë‹¤.",
         )
     except Exception as e:
         return ParseResult(source_file=source, status=ParseStatus.FAILED, error=str(e))
 
 
 def _parse_section(xml_bytes: bytes) -> str:
-    """section*.xml 한 개를 파싱해 Markdown 문자열로 반환한다."""
+    """section*.xml í•œ ê°œë¥¼ íŒŒì‹±í•´ Markdown ë¬¸ìžì—´ë¡œ ë°˜í™˜í•œë‹¤."""
     try:
         root = etree.fromstring(xml_bytes)
     except etree.XMLSyntaxError as e:
-        return f"(XML 파싱 오류: {e})"
+        return f"(XML íŒŒì‹± ì˜¤ë¥˜: {e})"
 
     blocks: list[str] = []
 
@@ -64,7 +64,7 @@ def _parse_section(xml_bytes: bytes) -> str:
 
 
 def _get_para_text(para_elem) -> str:
-    """단락 요소에서 모든 <t> 텍스트를 추출한다."""
+    """ë‹¨ë½ ìš”ì†Œì—ì„œ ëª¨ë“  <t> í…ìŠ¤íŠ¸ë¥¼ ì¶”ì¶œí•œë‹¤."""
     texts: list[str] = []
     for elem in para_elem.iter():
         if _localname(elem.tag) == "t" and elem.text:
@@ -73,7 +73,7 @@ def _get_para_text(para_elem) -> str:
 
 
 def _get_table_rows(tbl_elem) -> list[list[str]]:
-    """표 요소에서 행·셀 텍스트를 추출한다."""
+    """í‘œ ìš”ì†Œì—ì„œ í–‰Â·ì…€ í…ìŠ¤íŠ¸ë¥¼ ì¶”ì¶œí•œë‹¤."""
     rows: list[list[str]] = []
     for tr in tbl_elem:
         if _localname(tr.tag) != "tr":
@@ -108,3 +108,4 @@ def _rows_to_markdown(rows: list[list[str]]) -> str:
 
 def _localname(tag: str) -> str:
     return tag.split("}")[-1] if "}" in tag else tag
+

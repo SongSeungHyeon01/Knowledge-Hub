@@ -1,7 +1,7 @@
-"""Office 파일 파서 디스패처 (송승현 담당: DOCX, PPTX, XLSX, HWP, HWPX)"""
+﻿"""Office íŒŒì¼ íŒŒì„œ ë””ìŠ¤íŒ¨ì²˜ (ì†¡ìŠ¹í˜„ ë‹´ë‹¹: DOCX, PPTX, XLSX, HWP, HWPX)"""
 from pathlib import Path
 
-from app.services.parsing.models import ParseResult, ParseStatus
+from hwp_postprocess.models import ParseResult, ParseStatus
 
 _EXT_TO_MODULE = {
     ".docx": "app.services.pipeline.office.docx_parser",
@@ -14,7 +14,7 @@ _EXT_TO_MODULE = {
 
 
 def parse(file_path: str) -> ParseResult:
-    """파일 확장자를 보고 적합한 파서로 라우팅한다."""
+    """íŒŒì¼ í™•ìž¥ìžë¥¼ ë³´ê³  ì í•©í•œ íŒŒì„œë¡œ ë¼ìš°íŒ…í•œë‹¤."""
     ext = Path(file_path).suffix.lower()
     module_name = _EXT_TO_MODULE.get(ext)
 
@@ -22,7 +22,7 @@ def parse(file_path: str) -> ParseResult:
         return ParseResult(
             source_file=str(file_path),
             status=ParseStatus.FAILED,
-            error=f"지원하지 않는 파일 형식: {ext}",
+            error=f"ì§€ì›í•˜ì§€ ì•ŠëŠ” íŒŒì¼ í˜•ì‹: {ext}",
         )
 
     import importlib
@@ -32,7 +32,7 @@ def parse(file_path: str) -> ParseResult:
         return ParseResult(
             source_file=str(file_path),
             status=ParseStatus.FAILED,
-            error=f"파서 모듈 임포트 실패 ({module_name}): {e}",
+            error=f"íŒŒì„œ ëª¨ë“ˆ ìž„í¬íŠ¸ ì‹¤íŒ¨ ({module_name}): {e}",
         )
 
     return mod.parse(file_path)
@@ -40,3 +40,4 @@ def parse(file_path: str) -> ParseResult:
 
 def supported_extensions() -> list[str]:
     return list(_EXT_TO_MODULE.keys())
+

@@ -1,13 +1,13 @@
-"""XLSX 파서 — openpyxl → 시트별 Markdown 테이블"""
+﻿"""XLSX íŒŒì„œ â€” openpyxl â†’ ì‹œíŠ¸ë³„ Markdown í…Œì´ë¸”"""
 from openpyxl import load_workbook
 
-from app.services.parsing.models import ParseResult, PageResult, ParseStatus
+from hwp_postprocess.models import ParseResult, PageResult, ParseStatus
 
 
 def parse(file_path: str) -> ParseResult:
     source = str(file_path)
     try:
-        # data_only=True: 수식 대신 캐시된 값을 읽는다
+        # data_only=True: ìˆ˜ì‹ ëŒ€ì‹  ìºì‹œëœ ê°’ì„ ì½ëŠ”ë‹¤
         wb = load_workbook(file_path, data_only=True)
         pages: list[PageResult] = []
 
@@ -17,7 +17,7 @@ def parse(file_path: str) -> ParseResult:
             pages.append(PageResult(page_num=idx, markdown=md))
 
         if not pages:
-            return ParseResult(source_file=source, status=ParseStatus.FAILED, error="시트 없음")
+            return ParseResult(source_file=source, status=ParseStatus.FAILED, error="ì‹œíŠ¸ ì—†ìŒ")
 
         return ParseResult(source_file=source, status=ParseStatus.OK, pages=pages)
     except Exception as e:
@@ -29,12 +29,12 @@ def _sheet_to_markdown(ws, sheet_name: str) -> str:
 
     for row in ws.iter_rows():
         cells = [str(cell.value) if cell.value is not None else "" for cell in row]
-        # 완전히 빈 행 제외
+        # ì™„ì „ížˆ ë¹ˆ í–‰ ì œì™¸
         if any(c.strip() for c in cells):
             rows.append([c.replace("|", "\\|").replace("\n", " ") for c in cells])
 
     if not rows:
-        return f"## {sheet_name}\n\n(빈 시트)"
+        return f"## {sheet_name}\n\n(ë¹ˆ ì‹œíŠ¸)"
 
     max_cols = max(len(r) for r in rows)
     rows = [r + [""] * (max_cols - len(r)) for r in rows]
@@ -46,3 +46,4 @@ def _sheet_to_markdown(ws, sheet_name: str) -> str:
         lines.append("| " + " | ".join(row) + " |")
 
     return "\n".join(lines)
+

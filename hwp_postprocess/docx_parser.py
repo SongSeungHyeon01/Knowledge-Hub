@@ -1,11 +1,11 @@
-"""DOCX 파서 — python-docx + embedded 이미지 EasyOCR+img2table"""
+﻿"""DOCX íŒŒì„œ â€” python-docx + embedded ì´ë¯¸ì§€ EasyOCR+img2table"""
 from docx import Document
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 from docx.oxml.ns import qn
 
-from app.services.parsing.models import ParseResult, PageResult, ParseStatus
-from app.services.pipeline.office._image_ocr import extract_image_markdown
+from hwp_postprocess.models import ParseResult, PageResult, ParseStatus
+from hwp_postprocess._image_ocr import extract_image_markdown
 
 
 def parse(file_path: str) -> ParseResult:
@@ -40,7 +40,7 @@ def _doc_to_markdown(doc: Document) -> str:
                 else:
                     blocks.append(text)
 
-            # 단락 내 embedded 이미지
+            # ë‹¨ë½ ë‚´ embedded ì´ë¯¸ì§€
             for img_bytes in _get_para_images(child, doc.part):
                 md = extract_image_markdown(img_bytes)
                 if md:
@@ -105,3 +105,5 @@ def _heading_level(style_name: str) -> int:
         if str(i) in style_name:
             return i
     return 2
+
+

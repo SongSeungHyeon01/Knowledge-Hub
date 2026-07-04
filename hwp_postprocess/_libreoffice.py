@@ -4,6 +4,19 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+_WINDOWS_SOFFICE = r"C:\Program Files\LibreOffice\program\soffice.exe"
+
+
+def _find_soffice() -> str | None:
+    """libreoffice 또는 soffice 실행 파일 경로를 반환. 없으면 None."""
+    for cmd in ("libreoffice", "soffice"):
+        found = shutil.which(cmd)
+        if found:
+            return found
+    if Path(_WINDOWS_SOFFICE).exists():
+        return _WINDOWS_SOFFICE
+    return None
+
 
 def convert(src_path: str, target_fmt: str) -> str:
     """
@@ -19,7 +32,8 @@ def convert(src_path: str, target_fmt: str) -> str:
     Raises:
         RuntimeError: LibreOffice 미설치 또는 변환 실패
     """
-    if shutil.which("libreoffice") is None:
+    soffice = _find_soffice()
+    if soffice is None:
         raise RuntimeError(
             "LibreOffice가 설치되어 있지 않습니다. "
             "Dockerfile에 'libreoffice' 패키지가 포함되어 있는지 확인하세요."
@@ -31,7 +45,7 @@ def convert(src_path: str, target_fmt: str) -> str:
     try:
         result = subprocess.run(
             [
-                "libreoffice",
+                soffice,
                 f"-env:UserInstallation=file://{lo_profile}",
                 "--headless",
                 "--convert-to", target_fmt,
