@@ -22,6 +22,17 @@ from contextlib import asynccontextmanager
 from core.parser import parse_pdf                   # 백엔드 배포 정본 파서 — 최신 parser 브랜치(parser/parser.py) 기준, import only
 from core.office_adapter import parse_non_pdf       # 비-PDF 입구: ② hwp_postprocess 정본 + TXT/MD 리더
 
+# ③ 김태훈 검색 정본 (backend/search/search.py) — 알고리즘 구성요소만 가져다 쓴다.
+#   채택: 섹션 헤더 우선 청킹 / 언어감지 토크나이저 / 비대칭 RRF k / 영↔한 동의어 보강
+#   저장은 설계도 C5 규칙(PostgreSQL CHUNKS PK = turbovec 벡터 ID 1:1)대로 이 파일이 담당.
+#   (_로 시작하는 이름도 가져오는 이유: ③ 정본의 내부 상수·함수를 재구현 없이 그대로
+#    재사용하기 위함 — 값을 바꾸지 말 것)
+from search.search import (
+    chunk_text as _sb_chunk_text,        # 섹션 헤더 우선 청킹 (PRD 기준)
+    _augment_ko_to_en, _augment_en_to_ko,  # 영↔한 기술용어 쿼리 보강
+    _RRF_K_BM25, _RRF_K_VEC,             # 비대칭 RRF k (BM25=30, 벡터=60)
+)
+
 # ── 경로 설정 — env var 우선, 없으면 코드 파일 기준 상대 경로 ─────────────────
 _BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR   = os.environ.get("DATA_DIR", os.path.join(_BASE_DIR, "data"))
@@ -156,18 +167,20 @@ def _get_embed_model():
     return _embed_model
 
 
-# ── kiwipiepy 형태소 분석기 (지연 로딩) ──────────────────────────────────────
-_kiwi = None
+# ── ③ 정본 BM25 토크나이저 (지연 로딩) ──────────────────────────────────────
+# BM25Indexer 인스턴스를 토크나이저로만 사용한다 (색인 저장 기능은 쓰지 않음 —
+# 저장은 DB CHUNKS가 담당). 언어 감지 + 영어 불용어 + 기술 토큰(1.8V, 0x60) 지원.
+_search_indexer = None
 
-def _get_kiwi():
-    global _kiwi
-    if _kiwi is None:
+def _get_search_indexer():
+    global _search_indexer
+    if _search_indexer is None:
         try:
-            from kiwipiepy import Kiwi
-            _kiwi = Kiwi()
-        except ImportError:
-            pass
-    return _kiwi
+            from search.search import BM25Indexer
+            _search_indexer = BM25Indexer()   # 내부에서 Kiwi 로드 (첫 호출만 느림)
+        except Exception as e:
+            print(f"[search] ③ 토크나이저 로드 실패: {e}")
+    return _search_indexer
 
 
 def _best_page_for_tokens(pages: list, tokens: list) -> int:
@@ -183,16 +196,18 @@ def _best_page_for_tokens(pages: list, tokens: list) -> int:
     return best_page
 
 
-def _tokenize_bm25(text: str) -> list:
-    """BM25 코퍼스/쿼리 토크나이저: kiwipiepy 형태소 분석 우선, regex fallback."""
-    kiwi = _get_kiwi()
-    if kiwi is not None:
+def _tokenize_bm25(text: str, is_query: bool = False) -> list:
+    """BM25 토크나이저 — ③ 정본(BM25Indexer)에 위임. 실패 시 regex fallback.
+    is_query=True면 쿼리 전용 토크나이저(한/영 동시 추출)를 쓴다."""
+    indexer = _get_search_indexer()
+    if indexer is not None:
         try:
-            keep = {'NNG', 'NNP', 'VV', 'VA', 'SL', 'NR'}
-            return [t.form.lower() for t in kiwi.tokenize(text) if t.tag in keep and len(t.form) >= 2]
+            if is_query:
+                return indexer._tokenize_query(text)
+            return indexer._tokenize(text)
         except Exception:
             pass
-    # regex fallback
+    # regex fallback (③ 토크나이저 로드 실패 시에만)
     import re
     raw = [t.lower() for t in re.split(r'[\s,;:.!?()\[\]{}/"\'<>=]+', text) if len(t) >= 2]
     result = []
@@ -204,20 +219,46 @@ def _tokenize_bm25(text: str) -> list:
     return result
 
 
-def _build_chunks(pages: list, max_len: int = 400) -> tuple:
-    """페이지 텍스트를 청크로 분할. (chunks, pnums) 반환."""
-    chunks, pnums = [], []
+def _build_chunks(pages: list) -> tuple:
+    """페이지 텍스트를 ③ 정본 청킹(섹션 헤더 우선, 400자/80자 오버랩)으로 분할.
+    (chunks, pnums) 반환.
+
+    - flagged 페이지(저신뢰 OCR)는 인덱싱에서 제외한다 — ③ 정본 정책.
+      관리자가 /admin/flagged에서 텍스트를 수정하면 flagged가 풀려 재인덱싱 대상이 된다.
+    - ③ chunk_text는 문서 전체를 이어붙여 청킹하므로(섹션이 페이지에 걸칠 수 있음),
+      각 페이지의 시작 위치(offset)를 기록해 두었다가 청크의 char_start로
+      "이 청크가 몇 페이지에서 시작했는지"를 역산한다 (검색 결과 출처 표시용).
+    """
+    import bisect
+
+    page_texts = []
+    offsets    = []   # (이어붙인 문자열에서의 시작 위치, 페이지 번호)
+    pos = 0
     for page in pages:
-        text = page.get("text", "").strip()
+        if page.get("flagged"):
+            continue   # 저신뢰 페이지 제외 (오인식 텍스트가 검색 품질을 떨어뜨림)
+        text = (page.get("text") or "").strip()
         if not text:
             continue
         pnum = page.get("page_num") or page.get("page", 0)
-        step = max_len - 50
-        for i in range(0, len(text), step):
-            c = text[i:i + max_len].strip()
-            if len(c) >= 20:
-                chunks.append(c)
-                pnums.append(pnum)
+        offsets.append((pos, pnum))
+        page_texts.append(text)
+        pos += len(text) + 1   # 아래 "\n".join의 개행 1자 보정
+
+    if not page_texts:
+        return [], []
+
+    joined = "\n".join(page_texts)
+    raw_chunks = _sb_chunk_text("doc", joined)   # doc_id는 chunk_id 생성용 — 여기선 미사용
+
+    chunks, pnums = [], []
+    starts = [off for off, _ in offsets]
+    for c in raw_chunks:
+        if len(c["text"]) < 20:   # 지나치게 짧은 조각은 색인 가치 없음 (기존 기준 유지)
+            continue
+        i = bisect.bisect_right(starts, c["char_start"]) - 1
+        pnums.append(offsets[max(i, 0)][1])
+        chunks.append(c["text"])
     return chunks, pnums
 
 
@@ -749,7 +790,13 @@ async def 실제_검색_실행(q: str, alpha: float, category, db: AsyncSession)
             if all_chunk_items:
                 corpus     = [_tokenize_bm25(t) for _, t in all_chunk_items]
                 bm25       = BM25Okapi(corpus)
-                q_tokens   = _tokenize_bm25(q)
+                # ③ 정본: 영↔한 기술용어 동의어 보강 (한국어 쿼리→영어 문서,
+                # 영어 쿼리→한국어 문서 BM25 매칭 지원) + 쿼리 전용 토크나이저
+                if any('가' <= c <= '힣' for c in q):
+                    bm25_q = _augment_ko_to_en(q)
+                else:
+                    bm25_q = _augment_en_to_ko(q)
+                q_tokens   = _tokenize_bm25(bm25_q, is_query=True)
                 raw_scores = bm25.get_scores(q_tokens)
                 for i, (did, _) in enumerate(all_chunk_items):
                     s = float(raw_scores[i])
@@ -856,8 +903,10 @@ async def 실제_검색_실행(q: str, alpha: float, category, db: AsyncSession)
         return []
 
     # ── 7. RRF 융합 (Reciprocal Rank Fusion) ────────────────────────────────
+    # ③ 정본의 비대칭 k 채택: BM25 k=30(정확 매칭 rank 1 이점 강화), 벡터 k=60(표준).
+    # alpha 가중은 프론트 슬라이더(의미↔키워드 비중) 지원을 위해 유지 — ③ 정본에는
+    # 없는 백엔드 확장이며, alpha=0.5일 때 ③의 균등 합산과 같은 취지가 되도록 절반씩 배분.
     n = len(docs)
-    k = 60
 
     bm25_rank = {}
     if bm25_scores:
@@ -875,7 +924,7 @@ async def 실제_검색_실행(q: str, alpha: float, category, db: AsyncSession)
             continue
         br  = bm25_rank.get(doc.id, n + 1)
         sr  = sem_rank.get(doc.id, n + 1)
-        rrf = (1 - alpha) / (k + br) + alpha / (k + sr)
+        rrf = (1 - alpha) / (_RRF_K_BM25 + br) + alpha / (_RRF_K_VEC + sr)
 
         full_text = doc_info[doc.id]["full_text"]
         # 시맨틱 매칭 청크를 우선 스니펫으로 사용 (한국어 쿼리 → 영어 문서 대응)
