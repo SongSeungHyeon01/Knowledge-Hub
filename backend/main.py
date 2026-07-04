@@ -92,14 +92,23 @@ async def lifespan(_):
             rows = (await sess.execute(
                 select(Chunk).where(Chunk.embedding != None)
             )).scalars().all()
-            count = 0
+            # [수정 2026-07-04] turbovec IdMapIndex에는 add()가 없고 add_with_ids()
+            # (배치 전용)만 있다. 기존 idx.add(...)는 try/except에 삼켜져 조용히
+            # 전부 실패했음 → 벡터·id를 모아 한 번에 배치 등록한다. (C5: id=Chunk PK)
+            vecs, ids = [], []
             for row in rows:
                 try:
-                    vec = np.frombuffer(row.embedding, dtype=np.float32)
-                    idx.add(int(row.id), vec)
-                    count += 1
+                    vecs.append(np.frombuffer(row.embedding, dtype=np.float32))
+                    ids.append(int(row.id))
                 except Exception:
                     pass
+            count = 0
+            if vecs:
+                try:
+                    idx.add_with_ids(np.vstack(vecs), np.array(ids, dtype=np.uint64))
+                    count = len(ids)
+                except Exception as e:
+                    print(f"[startup] turbovec 재구성 실패: {e}")
         print(f"[startup] turbovec 재구성 완료: {count}개 벡터")
 
     yield
@@ -319,7 +328,18 @@ async def _ingest_chunks_to_db(doc_id: int, pages: list):
     # DB에 Chunk 저장 + turbovec 색인
     idx = _get_vec_index()
     async with AsyncSessionLocal() as sess:
-        # 기존 청크 삭제 (재시도 시)
+        # 기존 청크 삭제 (재시도 시) — C5 규칙: DB에서 지우는 청크는 turbovec에서도
+        # 함께 제거해야 한다. 안 그러면 삭제된 id의 "유령 벡터"가 인덱스에 남아
+        # 메모리를 차지하고, 검색 상위 k 자리를 뺏어 실제 결과를 밀어낸다.
+        old_ids = (await sess.execute(
+            select(Chunk.id).where(Chunk.doc_id == doc_id)
+        )).scalars().all()
+        if idx is not None:
+            for cid in old_ids:
+                try:
+                    idx.remove(int(cid))
+                except Exception:
+                    pass
         await sess.execute(
             sa_delete(Chunk).where(Chunk.doc_id == doc_id)
         )
@@ -329,16 +349,17 @@ async def _ingest_chunks_to_db(doc_id: int, pages: list):
             sess.add(chunk_row)
         await sess.flush()  # IDs 확보
         await sess.commit()
-        # turbovec에 추가
+        # turbovec에 추가 — add()는 없는 API. add_with_ids() 배치 등록 (C5: id=Chunk PK)
         if idx is not None and embs is not None:
             refreshed = (await sess.execute(
                 select(Chunk).where(Chunk.doc_id == doc_id).order_by(Chunk.chunk_idx)
             )).scalars().all()
-            for row, vec in zip(refreshed, embs):
+            new_ids = np.array([int(row.id) for row in refreshed], dtype=np.uint64)
+            if len(new_ids):
                 try:
-                    idx.add(int(row.id), vec)
-                except Exception:
-                    pass
+                    idx.add_with_ids(embs[:len(new_ids)], new_ids)
+                except Exception as e:
+                    print(f"[ingest] turbovec 색인 실패: {e}")
     print(f"[ingest] doc_id={doc_id}: {len(chunks)}청크 저장 완료")
 
 
@@ -822,7 +843,11 @@ async def 실제_검색_실행(q: str, alpha: float, category, db: AsyncSession)
                 model.encode, [q], normalize_embeddings=True, show_progress_bar=False
             ))[0].astype(np.float32)
             try:
-                vec_ids, vec_scores = idx.search(q_emb, k=min(50, 200))
+                # [수정 2026-07-04] turbovec search는 2차원 쿼리 배열을 받고
+                # (scores, ids) "순서"로 반환한다 — 기존 코드는 (ids, scores)로
+                # 거꾸로 받고 1차원을 넘겨서 시맨틱 경로가 항상 예외→fallback으로 빠졌음.
+                scores_2d, ids_2d = idx.search(q_emb.reshape(1, -1), 50)
+                vec_scores, vec_ids = scores_2d[0], ids_2d[0]
                 # chunk_ids → doc_id 매핑
                 if vec_ids is not None and len(vec_ids) > 0:
                     chunk_rows = (await db.execute(
@@ -1099,6 +1124,7 @@ async def 메모_수정(
 async def 페이지_텍스트_수정(
     doc_id: int,
     page_num: int,
+    background_tasks: BackgroundTasks,
     text: str = Body(..., embed=True),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1130,6 +1156,11 @@ async def 페이지_텍스트_수정(
     if doc:
         doc.has_flagged = has_flagged
         await db.commit()
+
+    # 재인덱싱 — flagged 페이지는 검색 인덱싱에서 제외되므로(③ 정본 정책),
+    # 관리자가 텍스트를 수정해 플래그가 풀린 페이지는 여기서 다시 색인해야
+    # "수정한 내용이 검색에 잡힌다". (이걸 빼먹으면 수정해도 검색에 안 나옴)
+    background_tasks.add_task(_ingest_chunks_to_db, doc_id, parse_data.get("pages", []))
 
     return {"doc_id": doc_id, "page_num": page_num, "has_flagged": has_flagged}
 

@@ -26,10 +26,17 @@ class Document(Base):
 
 
 # Chunk 테이블: 문서를 청크로 분할하여 저장합니다 (turbovec 벡터 ID와 1:1 대응)
+#
+# [수정 2026-07-04] id 타입을 with_variant로 분기하는 이유:
+#   PostgreSQL → BIGSERIAL (설계도 C5 규칙: 이 id가 곧 turbovec 벡터 ID(uint64))
+#   SQLite(로컬 개발) → INTEGER. SQLite는 BIGINT PK에 자동증가를 지원하지 않아
+#   기존 코드로는 로컬에서 청크 INSERT가 전부 "NOT NULL constraint failed"로 죽었음.
+_BigIntPK = BigInteger().with_variant(Integer, "sqlite")
+
 class Chunk(Base):
     __tablename__ = "chunks"
 
-    id        = Column(BigInteger, primary_key=True, autoincrement=True)  # turbovec 벡터 ID와 1:1
+    id        = Column(_BigIntPK, primary_key=True, autoincrement=True)   # turbovec 벡터 ID와 1:1
     doc_id    = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
     text      = Column(Text, nullable=False)                              # 청크 텍스트
     page_num  = Column(Integer, default=0)                                # 원본 페이지 번호
