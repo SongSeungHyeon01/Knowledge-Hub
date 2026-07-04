@@ -74,3 +74,4 @@ temp_demo/
 backend/data/
 
 backend/static/
+node_modules/
