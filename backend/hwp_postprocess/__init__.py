@@ -8,6 +8,9 @@ from hwp_postprocess.models import ParseResult, ParseStatus
 _EXT_TO_MODULE = {
     ".docx": "hwp_postprocess.docx_parser",
     ".pptx": "hwp_postprocess.pptx_parser",
+    # [통합 수정 2026-07-04] .ppt 추가 — LibreOffice는 구형 ppt도 PDF 변환 가능한데
+    # 목록에서만 빠져 있었음 (백엔드 업로드 지원 목록에 .ppt가 이미 존재)
+    ".ppt":  "hwp_postprocess.pptx_parser",
     ".xlsx": "hwp_postprocess.xlsx_parser",
     ".xls":  "hwp_postprocess.xlsx_parser",
     ".hwp":  "hwp_postprocess.hwp_parser",

@@ -20,7 +20,7 @@ from database import engine, get_db, Base, AsyncSessionLocal
 from models import Document, SearchLog, Chunk
 from contextlib import asynccontextmanager
 from core.parser import parse_pdf                   # 백엔드 배포 정본 파서 — 최신 parser 브랜치(parser/parser.py) 기준, import only
-from core.docling_parser import parse_document      # 신규 멀티포맷 파서
+from core.office_adapter import parse_non_pdf       # 비-PDF 입구: ② hwp_postprocess 정본 + TXT/MD 리더
 
 # ── 경로 설정 — env var 우선, 없으면 코드 파일 기준 상대 경로 ─────────────────
 _BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
@@ -31,9 +31,11 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(PARSED_DIR, exist_ok=True)
 
 # 지원 파일 형식 목록
+# (png/jpg 단독 이미지는 미지원으로 정리 — 2026-07-04 결정. 문서 속 이미지는
+#  PDF OCR 경로·DOCX embedded 이미지 OCR로 이미 처리된다)
 SUPPORTED_EXTENSIONS = {
     '.pdf', '.docx', '.pptx', '.ppt', '.xlsx', '.xls',
-    '.hwp', '.hwpx', '.txt', '.md', '.png', '.jpg', '.jpeg',
+    '.hwp', '.hwpx', '.txt', '.md',
 }
 
 # 파일 크기 상한 (500MB — OOM 방지 1MB 스트리밍)
@@ -390,12 +392,12 @@ async def 파일_업로드(
 
     # ── 파서 호출 ────────────────────────────────────────────────────────
     # PDF: core/parser.py parse_pdf 사용 (pdfplumber + camelot + EasyOCR 파이프라인)
-    # 그 외: core/docling_parser.py parse_document 사용 (Docling 설치 시 자동 전환)
+    # 그 외: ② hwp_postprocess 정본 (docx/pptx/xlsx/hwp/hwpx) + TXT/MD 리더
     file_type = ext.lstrip('.')
     if ext == '.pdf':
         result = parse_pdf(filepath=save_path, source_file=file.filename)
     else:
-        result = parse_document(filepath=save_path, source_file=file.filename, file_type=file_type)
+        result = parse_non_pdf(filepath=save_path, source_file=file.filename, ext=ext)
 
     # ── DB에 문서 정보 저장 ──────────────────────────────────────────────
     has_flagged = any(p.get("flagged") for p in result.get("pages", []))
@@ -564,13 +566,13 @@ async def 문서_재시도(doc_id: int, background_tasks: BackgroundTasks, db: A
     if not os.path.exists(doc.saved_path):
         raise HTTPException(status_code=400, detail="원본 파일이 없어서 재시도할 수 없습니다")
 
-    # 파서 재호출 — PDF는 parse_pdf, 나머지는 parse_document
+    # 파서 재호출 — PDF는 parse_pdf, 나머지는 parse_non_pdf (② 정본 + TXT/MD)
     ext_retry    = os.path.splitext(doc.saved_path)[1].lower()
     file_type    = doc.file_type or ext_retry.lstrip('.')
     if ext_retry == '.pdf':
         parse_result = parse_pdf(filepath=doc.saved_path, source_file=doc.filename)
     else:
-        parse_result = parse_document(filepath=doc.saved_path, source_file=doc.filename, file_type=file_type)
+        parse_result = parse_non_pdf(filepath=doc.saved_path, source_file=doc.filename, ext=ext_retry)
 
     # DB 업데이트
     has_flagged = any(p.get("flagged") for p in parse_result.get("pages", []))
