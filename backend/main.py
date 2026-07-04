@@ -19,7 +19,7 @@ from sqlalchemy import text
 from database import engine, get_db, Base, AsyncSessionLocal
 from models import Document, SearchLog, Chunk
 from contextlib import asynccontextmanager
-from core.parser import parse_pdf                   # NEVER MODIFY — import only
+from core.parser import parse_pdf                   # 백엔드 배포 정본 파서 — 최신 parser 브랜치(parser/parser.py) 기준, import only
 from core.docling_parser import parse_document      # 신규 멀티포맷 파서
 
 # ── 경로 설정 — env var 우선, 없으면 코드 파일 기준 상대 경로 ─────────────────
@@ -389,7 +389,7 @@ async def 파일_업로드(
                 "error": "파일 저장 중 오류가 발생했습니다", "pages": []}
 
     # ── 파서 호출 ────────────────────────────────────────────────────────
-    # PDF: core/parser.py parse_pdf 사용 (PyMuPDF + EasyOCR, 기존 파이프라인)
+    # PDF: core/parser.py parse_pdf 사용 (pdfplumber + camelot + EasyOCR 파이프라인)
     # 그 외: core/docling_parser.py parse_document 사용 (Docling 설치 시 자동 전환)
     file_type = ext.lstrip('.')
     if ext == '.pdf':
