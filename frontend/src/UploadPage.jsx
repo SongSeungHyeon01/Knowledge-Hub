@@ -96,6 +96,30 @@ export default function UploadPage({ onNavigate }) {
   const updateFile = (id, patch) =>
     setFiles(prev => prev.map(f => f.id === id ? { ...f, ...patch } : f))
 
+  // 파싱 상태 폴링 — 업로드는 접수 즉시 응답하고(status='parsing'), 실제 파싱은
+  // 서버 백그라운드에서 진행되므로, docId로 /documents/{id}/status 를 2초마다 물어
+  // success/failed 로 바뀌면 목록을 갱신한다. (대용량 문서는 완료까지 오래 걸릴 수 있음)
+  const pollStatus = (localId, docId) => {
+    const started = Date.now()
+    const timer = setInterval(async () => {
+      try {
+        const r = await axios.get(`${API}/documents/${docId}/status`)
+        if (r.data.status !== 'parsing') {
+          clearInterval(timer)
+          updateFile(localId, {
+            status: r.data.status,
+            pages:  r.data.page_count ?? 0,
+            error:  r.data.error,
+          })
+        }
+      } catch {
+        // 일시적 네트워크 오류는 무시하고 다음 주기에 다시 시도
+      }
+      // 안전장치: 30분이 지나면 폴링을 멈춘다 (문서는 서버에서 계속 처리될 수 있음)
+      if (Date.now() - started > 30 * 60 * 1000) clearInterval(timer)
+    }, 2000)
+  }
+
   // 개별 항목 제거 (완료된 항목만)
   const removeFile = (id) =>
     setFiles(prev => prev.filter(f => f.id !== id))
@@ -143,12 +167,19 @@ export default function UploadPage({ onNavigate }) {
         },
       })
       const data = res.data
-      updateFile(id, {
-        percent: 100,
-        status:  data.status,
-        pages:   data.pages?.length ?? 0,
-        error:   data.error,
-      })
+      if (data.status === 'parsing' && data.id != null) {
+        // 접수됨 — 전송 100%, 이제 서버 파싱 대기(폴링으로 완료 감지)
+        updateFile(id, { percent: 100, status: 'parsing', docId: data.id, error: null })
+        pollStatus(id, data.id)
+      } else {
+        // 검사 단계 즉시 실패(지원 안 함·크기 초과 등) 또는 그 외 응답
+        updateFile(id, {
+          percent: 100,
+          status:  data.status ?? 'failed',
+          pages:   data.pages?.length ?? 0,
+          error:   data.error,
+        })
+      }
     } catch {
       updateFile(id, { percent: 100, status: 'failed', error: '서버 연결 오류' })
     }
@@ -329,13 +360,14 @@ export default function UploadPage({ onNavigate }) {
                   avatar={
                     <Avatar
                       icon={
-                        f.status === 'uploading'  ? <LoadingOutlined /> :
+                        (f.status === 'uploading' || f.status === 'parsing') ? <LoadingOutlined /> :
                         f.status === 'success'    ? <CheckCircleOutlined /> :
                                                     <CloseCircleOutlined />
                       }
                       style={{
                         backgroundColor:
                           f.status === 'uploading' ? '#1677ff' :
+                          f.status === 'parsing'   ? '#fa8c16' :
                           f.status === 'success'   ? '#52c41a' : '#ff4d4f',
                       }}
                     />
@@ -372,6 +404,20 @@ export default function UploadPage({ onNavigate }) {
                         status="active"
                         style={{ marginBottom: 0, maxWidth: 400 }}
                       />
+                    ) : f.status === 'parsing' ? (
+                      <span style={{
+                        display: 'inline-block',
+                        padding: '1px 10px',
+                        borderRadius: 10,
+                        fontSize: 11,
+                        fontWeight: 600,
+                        background: '#fff7e6',
+                        color: '#d46b08',
+                        border: '1px solid #ffd591',
+                      }}>
+                        <LoadingOutlined style={{ marginRight: 5 }} />
+                        파싱 중… (대용량 문서는 시간이 걸릴 수 있습니다)
+                      </span>
                     ) : (
                       <span style={{
                         display: 'inline-block',

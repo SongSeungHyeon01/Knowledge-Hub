@@ -85,6 +85,20 @@ async def lifespan(_):
             except Exception:
                 pass  # 이미 존재하는 컬럼 → 정상적으로 무시
 
+    # [비동기화 2026-07-05] 재시작으로 중단된 'parsing' 문서 정리.
+    # 파싱은 백그라운드 태스크라 서버가 재시작되면 진행 중이던 작업이 유실된다 →
+    # 'parsing' 상태로 영영 멈춘 문서가 남지 않도록 failed로 내려 재시도를 유도한다.
+    async with AsyncSessionLocal() as sess:
+        stuck = (await sess.execute(
+            select(Document).where(Document.status == "parsing")
+        )).scalars().all()
+        for d in stuck:
+            d.status = "failed"
+            d.error  = "서버 재시작으로 파싱이 중단되었습니다. 재시도해 주세요."
+        if stuck:
+            await sess.commit()
+            print(f"[startup] 중단된 parsing 문서 {len(stuck)}건을 failed로 정리")
+
     # turbovec 인덱스 재구성 (DB CHUNKS에서 임베딩 로드)
     idx = _get_vec_index()
     if idx is not None:
@@ -389,6 +403,69 @@ async def 중복_확인(filename: str = Query(...), db: AsyncSession = Depends(g
     return {"exists": False}
 
 
+# 파싱 동시 실행 제한 (2026-07-05):
+# 파싱은 CPU 집약이라 GIL을 점유한다. 여러 개를 동시에 스레드로 돌리면 이벤트 루프가
+# 굶어 API 응답이 급격히 느려진다(실측: 2개 동시 파싱 중 상태조회가 10초 초과).
+# GIL 때문에 동시 파싱은 처리량 이득도 없으므로, 세마포어로 "한 번에 하나만" 직렬화한다.
+# → 파싱 중에도 API가 안정적으로 응답(단일 파싱 시 실측 ~2.5초)하고, 대용량이 큐를 잡아도
+#   요청은 즉시 접수되고 다른 API는 계속 동작한다. (PARSE_CONCURRENCY로 조정 가능)
+#   더 큰 서버에서 진짜 병렬 파싱이 필요하면 ProcessPoolExecutor로 승격(별도 프로세스 = GIL 독립).
+_PARSE_CONCURRENCY = max(1, int(os.environ.get("PARSE_CONCURRENCY", "1")))
+_parse_semaphore = asyncio.Semaphore(_PARSE_CONCURRENCY)
+
+
+async def _parse_and_ingest(doc_id: int, save_path: str, source_file: str, ext: str):
+    """[비동기 파싱 파이프라인] 업로드/재시도 응답을 즉시 돌려준 뒤 백그라운드에서 실행된다.
+
+    ⭐ 왜 이렇게 하나 (2026-07-05):
+    파싱은 무겁다 — 페이지별 camelot 표 감지 때문에 대용량 PDF는 수십 분이 걸린다
+    (실측: 60쪽 57초, 1,950쪽 추정 ~50분). 예전처럼 업로드 요청 안에서 동기로 파싱하면
+    (1) 응답이 수십 분 지연돼 프록시·게이트웨이 타임아웃으로 업로드가 실패하고,
+    (2) 동기 함수가 이벤트 루프를 통째로 막아 파싱 동안 서버 전체가 멈춘다.
+    → 파싱을 asyncio.to_thread(스레드풀)로 돌려 이벤트 루프를 막지 않게 하고,
+      업로드 요청은 'parsing' 상태만 만들고 즉시 응답한다. 프론트는 상태를 폴링한다.
+
+    이 함수는 자체 DB 세션을 연다 — 요청 핸들러의 세션(db)은 응답과 함께 이미 닫히므로
+    백그라운드에서 재사용하면 안 된다.
+    """
+    # 세마포어로 한 번에 하나만 파싱 (위 주석 참고). 대기 중에도 요청·다른 API는 계속 동작.
+    async with _parse_semaphore:
+        try:
+            if ext == '.pdf':
+                result = await asyncio.to_thread(parse_pdf, save_path, source_file)
+            else:
+                result = await asyncio.to_thread(parse_non_pdf, save_path, source_file, ext)
+        except Exception as e:
+            result = {"source_file": source_file, "status": "failed",
+                      "error": f"파싱 중 예외가 발생했습니다: {e}", "pages": []}
+
+    has_flagged = any(p.get("flagged") for p in result.get("pages", []))
+
+    # 파싱 도중 문서가 삭제됐을 수도 있으니 존재 확인 후 갱신
+    async with AsyncSessionLocal() as sess:
+        doc = (await sess.execute(
+            select(Document).where(Document.id == doc_id)
+        )).scalar_one_or_none()
+        if doc is None:
+            return
+        doc.status      = result.get("status")
+        doc.error       = result.get("error")
+        doc.page_count  = len(result.get("pages", []))
+        doc.has_flagged = has_flagged
+        if result.get("status") == "success":
+            doc.title = _extract_title(result.get("pages", []))
+        await sess.commit()
+
+    # 파싱 결과 JSON 저장 (상세 보기·검색 본문 로드용)
+    parsed_path = os.path.join(PARSED_DIR, f"{doc_id}.json")
+    with open(parsed_path, "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
+
+    # 성공 시 임베딩 + Chunk 색인 (이 함수 자체가 이미 백그라운드라 직접 await)
+    if result.get("status") == "success":
+        await _ingest_chunks_to_db(doc_id, result.get("pages", []))
+
+
 # POST /upload — 파일을 받아 파싱하고 DB에 기록합니다
 # category:      문서 분류 (spec/research/presentation/report)
 # original_path: 폴더 업로드 시 원본 상대 경로 (예: 프로젝트A/자료/파일.pdf)
@@ -459,45 +536,55 @@ async def 파일_업로드(
         return {"source_file": file.filename, "status": "failed",
                 "error": "파일 저장 중 오류가 발생했습니다", "pages": []}
 
-    # ── 파서 호출 ────────────────────────────────────────────────────────
-    # PDF: core/parser.py parse_pdf 사용 (pdfplumber + camelot + EasyOCR 파이프라인)
-    # 그 외: ② hwp_postprocess 정본 (docx/pptx/xlsx/hwp/hwpx) + TXT/MD 리더
+    # ── 문서 레코드를 'parsing' 상태로 즉시 생성 후 응답 ─────────────────
+    # [비동기화 2026-07-05] 파싱은 여기서 하지 않고 백그라운드(_parse_and_ingest)로 넘긴다.
+    # 대용량 PDF도 업로드 요청이 즉시 끝나 타임아웃·이벤트루프 블로킹을 피한다.
+    # 프론트는 반환된 id로 /documents/{id}/status 를 폴링해 완료를 확인한다.
     file_type = ext.lstrip('.')
-    if ext == '.pdf':
-        result = parse_pdf(filepath=save_path, source_file=file.filename)
-    else:
-        result = parse_non_pdf(filepath=save_path, source_file=file.filename, ext=ext)
-
-    # ── DB에 문서 정보 저장 ──────────────────────────────────────────────
-    has_flagged = any(p.get("flagged") for p in result.get("pages", []))
-
     doc = Document(
         filename      = file.filename,
-        title         = _extract_title(result.get("pages", [])) if result.get("status") == "success" else None,
+        title         = None,
         saved_path    = save_path,
         file_type     = file_type,
         original_path = original_path,
         category      = category,
-        status        = result.get("status"),
-        error         = result.get("error"),
-        page_count    = len(result.get("pages", [])),
-        has_flagged   = has_flagged,
+        status        = "parsing",   # parsing → (백그라운드) → success | failed
+        error         = None,
+        page_count    = 0,
+        has_flagged   = False,
         sha256        = sha256_hex,
     )
     db.add(doc)
     await db.commit()
     await db.refresh(doc)  # auto-increment id 가져오기
 
-    # 파싱 결과를 JSON 파일로 저장합니다 — 상세 보기에서 페이지 텍스트를 읽어옵니다
-    parsed_path = os.path.join(PARSED_DIR, f"{doc.id}.json")
-    with open(parsed_path, "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
+    # 응답 후 백그라운드에서 파싱 → 상태 갱신 → JSON 저장 → 임베딩 색인
+    background_tasks.add_task(_parse_and_ingest, doc.id, save_path, file.filename, ext)
 
-    # 임베딩 생성 + Chunk DB 저장 (응답 후 백그라운드에서 실행)
-    if result.get("status") == "success":
-        background_tasks.add_task(_ingest_chunks_to_db, doc.id, result.get("pages", []))
+    return {
+        "id":       doc.id,
+        "filename": file.filename,
+        "status":   "parsing",
+        "error":    None,
+        "message":  "업로드 접수됨 — 파싱이 백그라운드에서 진행됩니다.",
+    }
 
-    return result
+
+# GET /documents/{doc_id}/status — 업로드/재파싱 진행 상태 폴링용 (가벼운 응답)
+# 프론트 업로드 화면이 2초 간격으로 호출해 parsing → success/failed 전환을 감지한다.
+@app.get("/documents/{doc_id}/status")
+async def 문서_상태(doc_id: int, db: AsyncSession = Depends(get_db)):
+    doc = (await db.execute(select(Document).where(Document.id == doc_id))).scalar_one_or_none()
+    if doc is None:
+        raise HTTPException(status_code=404, detail="해당 문서를 찾을 수 없습니다")
+    return {
+        "id":          doc.id,
+        "filename":    doc.filename,
+        "status":      doc.status,        # parsing | success | failed
+        "page_count":  doc.page_count,
+        "has_flagged": doc.has_flagged,
+        "error":       doc.error,
+    }
 
 
 # GET /files/{doc_id} — 원본 파일을 다운로드합니다
@@ -635,41 +722,22 @@ async def 문서_재시도(doc_id: int, background_tasks: BackgroundTasks, db: A
     if not os.path.exists(doc.saved_path):
         raise HTTPException(status_code=400, detail="원본 파일이 없어서 재시도할 수 없습니다")
 
-    # 파서 재호출 — PDF는 parse_pdf, 나머지는 parse_non_pdf (② 정본 + TXT/MD)
-    ext_retry    = os.path.splitext(doc.saved_path)[1].lower()
-    file_type    = doc.file_type or ext_retry.lstrip('.')
-    if ext_retry == '.pdf':
-        parse_result = parse_pdf(filepath=doc.saved_path, source_file=doc.filename)
-    else:
-        parse_result = parse_non_pdf(filepath=doc.saved_path, source_file=doc.filename, ext=ext_retry)
-
-    # DB 업데이트
-    has_flagged = any(p.get("flagged") for p in parse_result.get("pages", []))
-    doc.status     = parse_result.get("status")
-    doc.error      = parse_result.get("error")
-    doc.page_count = len(parse_result.get("pages", []))
-    doc.has_flagged = has_flagged
-    if parse_result.get("status") == "success":
-        doc.title = _extract_title(parse_result.get("pages", []))
+    # [비동기화 2026-07-05] 재파싱도 동기로 하지 않는다 — 'parsing'으로 표시하고
+    # 백그라운드(_parse_and_ingest)로 넘겨 즉시 응답한다. (대용량 재시도 블로킹 방지)
+    ext_retry = os.path.splitext(doc.saved_path)[1].lower()
+    doc.status      = "parsing"
+    doc.error       = None
+    doc.has_flagged = False
     await db.commit()
     await db.refresh(doc)
 
-    # 파싱 결과 JSON 저장 (상세 보기용)
-    parsed_path = os.path.join(PARSED_DIR, f"{doc.id}.json")
-    with open(parsed_path, "w", encoding="utf-8") as f:
-        json.dump(parse_result, f, ensure_ascii=False, indent=2)
-
-    # 임베딩 재생성 + Chunk DB 저장
-    if parse_result.get("status") == "success":
-        background_tasks.add_task(_ingest_chunks_to_db, doc.id, parse_result.get("pages", []))
+    background_tasks.add_task(_parse_and_ingest, doc.id, doc.saved_path, doc.filename, ext_retry)
 
     return {
-        "id":          doc.id,
-        "filename":    doc.filename,
-        "status":      doc.status,
-        "page_count":  doc.page_count,
-        "has_flagged": doc.has_flagged,
-        "error":       doc.error,
+        "id":       doc.id,
+        "filename": doc.filename,
+        "status":   "parsing",
+        "message":  "재파싱 접수됨 — 백그라운드에서 진행됩니다.",
     }
 
 
