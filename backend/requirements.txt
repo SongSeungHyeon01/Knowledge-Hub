@@ -1,0 +1,40 @@
+# ── 서버 / DB ────────────────────────────────────────────────────────────────
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+sqlalchemy[asyncio]>=2.0.0
+aiosqlite>=0.20.0
+asyncpg>=0.29.0
+python-multipart>=0.0.9
+# aiofiles·alembic은 현재 코드에서 미사용이라 제거 (2026-07-04 C6 점검).
+# alembic은 설계도의 "Lifespan 7단계(alembic→…)" 도입 시 다시 추가할 것.
+
+# ── 검색 / 임베딩 ────────────────────────────────────────────────────────────
+sentence-transformers>=2.7.0
+rank-bm25>=0.2.2
+turbovec>=0.1.0
+kiwipiepy>=0.18.0
+
+# ── PDF 파서 (core/parser.py) — parser/requirements.txt와 정확히 일치 유지 ──
+# [설치 방법] torch CPU 버전은 아래 명령어로 설치하세요 (일반 pip install 하면 GPU 버전이 깔릴 수 있음):
+# pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+easyocr==1.7.2
+numpy==2.4.4
+torch==2.12.1+cpu
+
+# ↓ PyMuPDF 대체 라이브러리 (전부 MIT/Apache/BSD 계열)
+pdfplumber==0.11.10        # MIT — 텍스트 추출
+camelot-py==2.0.0          # MIT — 표 추출 (기본 백엔드 pdfium, Ghostscript 불필요)
+img2table[easyocr]==2.0.0  # MIT — 스캔 이미지 내 표 인식
+tabulate==0.10.0           # MIT — 표 → 마크다운 변환 보조
+
+# ↓ parser.py가 직접 import/사용하는 라이브러리 (전에는 다른 패키지에 딸려 설치돼 목록에서 빠져 있었음)
+pillow==12.3.0             # HPND(허용) — from PIL import Image (스캔 이미지 처리)
+pandas==3.0.3              # BSD-3(허용) — 표(DataFrame) → 마크다운 변환
+
+# ── 비-PDF 파서 (hwp_postprocess/ — ② 송승현 정본) ──────────────────────────
+# HWP·PPTX는 시스템에 LibreOffice 설치 필요 (Dockerfile에서 처리, pip 패키지 아님)
+python-docx>=1.1.0         # DOCX 파싱 (+ HWP→DOCX 변환 결과 파싱)
+openpyxl>=3.1.2            # XLSX/XLS 파싱
+lxml>=5.0.0                # HWPX 내부 XML 파싱
+# python-pptx는 운영 코드에서 미사용 (PPTX는 LibreOffice→PDF 경유).
+# hwp_postprocess/test_office_parsers.py 실행 시에만 별도 설치: pip install python-pptx

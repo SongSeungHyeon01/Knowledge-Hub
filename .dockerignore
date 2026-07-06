@@ -1,0 +1,18 @@
+# 도커 이미지에 들어가면 안 되는 것들 (빌드 컨텍스트에서 제외)
+.git/
+**/__pycache__/
+**/*.pyc
+
+# 로컬 가상환경·노드 모듈 (이미지 안에서 새로 설치한다)
+**/venv/
+**/node_modules/
+
+# 로컬 런타임 데이터·테스트 산출물
+backend/data/
+backend/static/
+*.db
+frontend/dist/
+
+# 문서·개발 보조 (이미지에 불필요)
+*.md
+!backend/**/*.md
