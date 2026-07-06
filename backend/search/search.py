@@ -14,6 +14,7 @@ searcher.delete_document(doc_id)        # 문서 삭제
 """
 
 import json
+import os
 import pickle
 import re
 import numpy as np
@@ -27,7 +28,14 @@ import turbovec
 
 # ── 경로 / 전역 상수 ─────────────────────────────────────────────────────────
 
-_DATA_DIR   = Path("data")
+# [수정 2026-07-06] cwd 기준 상대경로("data")였던 것을 main.py:38의 DATA_DIR 규칙과
+# 동일하게 통일한다 — main.py:38과 동일 규칙이므로 반드시 함께 변경할 것.
+# DATA_DIR 환경변수 우선, 없으면 backend/ 디렉토리(이 파일의 부모의 부모) 기준
+# 절대경로로 폴백 — 실행 시점 작업 디렉토리(cwd)에 좌우되지 않게 하기 위함.
+# 환경변수만 바꿔 배포 위치를 이식할 수 있어야 한다는 방침(환경 독립적 아키텍처) 때문에,
+# main.py가 보는 uploads/parsed와 이 검색 인덱스가 서로 다른 위치를 보는 일이 없어야 한다.
+_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # backend/search/ → backend/
+_DATA_DIR   = Path(os.environ.get("DATA_DIR", os.path.join(_BACKEND_DIR, "data")))
 _INDEX_PATH = _DATA_DIR / "index.tvim"
 _VEC_META   = _DATA_DIR / "vec_meta.json"
 _BM25_PATH  = _DATA_DIR / "bm25.pkl"

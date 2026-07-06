@@ -67,23 +67,70 @@ def _get_vec_index():
     return _vec_index
 
 
+# ── 정체 문서 주기적 스윕 (2026-07-06) ────────────────────────────────────────
+# 예외처리 방어막(_parse_and_ingest)을 넣었지만, 원본 상태반영과 그 복구 시도가
+# 같은 순간의 DB 커넥션 풀 고갈 피크에 둘 다 걸리면 문서가 "parsing"에 남을 수
+# 있다(재현 테스트에서 실측: 2건). 서버 재시작 없이도 이런 잔여 정체 문서를
+# 상시 자동 정리하는 안전망. 기존 lifespan의 "재시작 시 정체 문서 정리"는
+# 그대로 두고(재시작이라는 다른 상황에 대한 최종 안전망), 이 스윕을 추가로 얹는다.
+#
+# [임시 완화값 — 필요시 조정]
+_SWEEP_INTERVAL_SEC  = 5 * 60   # 스윕 실행 간격(초) — 5분마다
+_SWEEP_STALE_MINUTES = 10       # updated_at 기준 이만큼(분) 지난 parsing 문서는 정체로 간주
+
+async def _sweep_stale_parsing():
+    """updated_at 기준으로 오래 parsing에 머문 문서를 주기적으로 failed 처리한다.
+    스윕도 DB 세션을 쓰므로 예외가 나도 태스크가 죽지 않도록 try/except로 감싼다."""
+    while True:
+        try:
+            await asyncio.sleep(_SWEEP_INTERVAL_SEC)
+            cutoff = datetime.now() - timedelta(minutes=_SWEEP_STALE_MINUTES)
+            async with AsyncSessionLocal() as sess:
+                stale = (await sess.execute(
+                    select(Document).where(
+                        Document.status == "parsing",
+                        Document.updated_at < cutoff,
+                    )
+                )).scalars().all()
+                for d in stale:
+                    d.status = "failed"
+                    d.error  = "처리 시간 초과 — 자동 정리됨 (재시도 필요)"
+                if stale:
+                    await sess.commit()
+                    print(f"[sweep] 정체 문서 {len(stale)}건을 failed로 정리")
+        except asyncio.CancelledError:
+            raise  # 앱 종료 시 태스크 취소는 그대로 전파시켜 정상 종료되게 한다
+        except Exception as e:
+            print(f"[sweep] 정체 문서 정리 중 오류: {e}")
+
+
 @asynccontextmanager
 async def lifespan(_):
     """서버 시작 시 DB 테이블 생성 + 스키마 마이그레이션 + turbovec 재구성."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        migrations = [
-            "ALTER TABLE documents ADD COLUMN file_type VARCHAR",
-            "ALTER TABLE documents ADD COLUMN original_path VARCHAR",
-            "ALTER TABLE documents ADD COLUMN title VARCHAR",
-            "ALTER TABLE documents ADD COLUMN memo TEXT",
-            "ALTER TABLE documents ADD COLUMN sha256 VARCHAR(64)",
-        ]
-        for stmt in migrations:
-            try:
+
+    # [수정 2026-07-06] ALTER TABLE 5개를 engine.begin() 하나(트랜잭션 하나)에 묶지 않고
+    # 각각 독립 트랜잭션에서 실행한다. PostgreSQL은 트랜잭션 안에서 문장 하나가 에러(예:
+    # 컬럼 이미 존재)를 내면 그 트랜잭션 전체가 aborted 상태가 되어, 뒤이은 ALTER들이
+    # 같은 커넥션에서 전부 InFailedSqlTransaction으로 조용히 실패한다(SQLite는 문장별로
+    # 독립적이라 이 문제가 안 터져서 발견이 늦어짐). 독립 트랜잭션으로 나누면 한 문장이
+    # 실패해도 그 트랜잭션만 롤백되고 다음 ALTER는 깨끗한 새 트랜잭션에서 실행된다.
+    migrations = [
+        "ALTER TABLE documents ADD COLUMN file_type VARCHAR",
+        "ALTER TABLE documents ADD COLUMN original_path VARCHAR",
+        "ALTER TABLE documents ADD COLUMN title VARCHAR",
+        "ALTER TABLE documents ADD COLUMN memo TEXT",
+        "ALTER TABLE documents ADD COLUMN sha256 VARCHAR(64)",
+        "ALTER TABLE documents ADD COLUMN updated_at DATETIME",
+    ]
+    for stmt in migrations:
+        try:
+            async with engine.begin() as conn:
                 await conn.execute(text(stmt))
-            except Exception:
-                pass  # 이미 존재하는 컬럼 → 정상적으로 무시
+        except Exception as e:
+            # 이미 존재하는 컬럼이면 정상 — 그래도 어떤 ALTER가 왜 스킵됐는지는 남긴다.
+            print(f"[migration] '{stmt}' 스킵/실패: {e}")
 
     # [비동기화 2026-07-05] 재시작으로 중단된 'parsing' 문서 정리.
     # 파싱은 백그라운드 태스크라 서버가 재시작되면 진행 중이던 작업이 유실된다 →
@@ -125,7 +172,17 @@ async def lifespan(_):
                     print(f"[startup] turbovec 재구성 실패: {e}")
         print(f"[startup] turbovec 재구성 완료: {count}개 벡터")
 
+    sweep_task = asyncio.create_task(_sweep_stale_parsing())
+    print(f"[startup] 정체 문서 스윕 태스크 시작 (주기 {_SWEEP_INTERVAL_SEC}s, 기준 {_SWEEP_STALE_MINUTES}분)")
+
     yield
+
+    sweep_task.cancel()
+    try:
+        await sweep_task
+    except asyncio.CancelledError:
+        pass
+    print("[shutdown] 정체 문서 스윕 태스크 종료")
 
 
 # FastAPI 앱 객체를 만듭니다
@@ -173,7 +230,8 @@ def _stem_ko(word: str) -> str:
 
 
 # ── 임베딩 / BM25 / AI 설정 ──────────────────────────────────────────────────
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma3:4b")
+OLLAMA_MODEL    = os.environ.get("OLLAMA_MODEL", "gemma3:4b")
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 _embed_model  = None
 
 def _get_embed_model():
@@ -340,41 +398,48 @@ async def _ingest_chunks_to_db(doc_id: int, pages: list):
             pnums=np.array(pnums, dtype=np.int32))
 
     # DB에 Chunk 저장 + turbovec 색인
+    # [수정 2026-07-06] 이 시점은 이미 doc.status="success"로 커밋된 뒤일 수 있으므로
+    # 여기서 예외가 나도 status는 건드리지 않는다(건드리면 "성공했는데 실패로 뒤집힘"
+    # 이라는 또 다른 혼란이 생김). 대신 조용히 삼키지 않고 반드시 로그를 남겨, 색인이
+    # 누락된 문서(검색에 안 잡히는 문서)를 나중에 사람이 로그로 식별할 수 있게 한다.
     idx = _get_vec_index()
-    async with AsyncSessionLocal() as sess:
-        # 기존 청크 삭제 (재시도 시) — C5 규칙: DB에서 지우는 청크는 turbovec에서도
-        # 함께 제거해야 한다. 안 그러면 삭제된 id의 "유령 벡터"가 인덱스에 남아
-        # 메모리를 차지하고, 검색 상위 k 자리를 뺏어 실제 결과를 밀어낸다.
-        old_ids = (await sess.execute(
-            select(Chunk.id).where(Chunk.doc_id == doc_id)
-        )).scalars().all()
-        if idx is not None:
-            for cid in old_ids:
-                try:
-                    idx.remove(int(cid))
-                except Exception:
-                    pass
-        await sess.execute(
-            sa_delete(Chunk).where(Chunk.doc_id == doc_id)
-        )
-        for i, (text, pnum) in enumerate(zip(chunks, pnums)):
-            emb_bytes = embs[i].tobytes() if embs is not None else None
-            chunk_row = Chunk(doc_id=doc_id, text=text, page_num=pnum, chunk_idx=i, embedding=emb_bytes)
-            sess.add(chunk_row)
-        await sess.flush()  # IDs 확보
-        await sess.commit()
-        # turbovec에 추가 — add()는 없는 API. add_with_ids() 배치 등록 (C5: id=Chunk PK)
-        if idx is not None and embs is not None:
-            refreshed = (await sess.execute(
-                select(Chunk).where(Chunk.doc_id == doc_id).order_by(Chunk.chunk_idx)
+    try:
+        async with AsyncSessionLocal() as sess:
+            # 기존 청크 삭제 (재시도 시) — C5 규칙: DB에서 지우는 청크는 turbovec에서도
+            # 함께 제거해야 한다. 안 그러면 삭제된 id의 "유령 벡터"가 인덱스에 남아
+            # 메모리를 차지하고, 검색 상위 k 자리를 뺏어 실제 결과를 밀어낸다.
+            old_ids = (await sess.execute(
+                select(Chunk.id).where(Chunk.doc_id == doc_id)
             )).scalars().all()
-            new_ids = np.array([int(row.id) for row in refreshed], dtype=np.uint64)
-            if len(new_ids):
-                try:
-                    idx.add_with_ids(embs[:len(new_ids)], new_ids)
-                except Exception as e:
-                    print(f"[ingest] turbovec 색인 실패: {e}")
-    print(f"[ingest] doc_id={doc_id}: {len(chunks)}청크 저장 완료")
+            if idx is not None:
+                for cid in old_ids:
+                    try:
+                        idx.remove(int(cid))
+                    except Exception:
+                        pass
+            await sess.execute(
+                sa_delete(Chunk).where(Chunk.doc_id == doc_id)
+            )
+            for i, (text, pnum) in enumerate(zip(chunks, pnums)):
+                emb_bytes = embs[i].tobytes() if embs is not None else None
+                chunk_row = Chunk(doc_id=doc_id, text=text, page_num=pnum, chunk_idx=i, embedding=emb_bytes)
+                sess.add(chunk_row)
+            await sess.flush()  # IDs 확보
+            await sess.commit()
+            # turbovec에 추가 — add()는 없는 API. add_with_ids() 배치 등록 (C5: id=Chunk PK)
+            if idx is not None and embs is not None:
+                refreshed = (await sess.execute(
+                    select(Chunk).where(Chunk.doc_id == doc_id).order_by(Chunk.chunk_idx)
+                )).scalars().all()
+                new_ids = np.array([int(row.id) for row in refreshed], dtype=np.uint64)
+                if len(new_ids):
+                    try:
+                        idx.add_with_ids(embs[:len(new_ids)], new_ids)
+                    except Exception as e:
+                        print(f"[ingest] turbovec 색인 실패: {e}")
+        print(f"[ingest] doc_id={doc_id}: {len(chunks)}청크 저장 완료")
+    except Exception as e:
+        print(f"[ingest] doc_id={doc_id} 청킹/색인 실패(검색 누락 가능): {e}")
 
 
 # "/" 주소로 접속하면 이 함수가 실행됩니다.
@@ -441,20 +506,40 @@ async def _parse_and_ingest(doc_id: int, save_path: str, source_file: str, ext: 
 
     has_flagged = any(p.get("flagged") for p in result.get("pages", []))
 
-    # 파싱 도중 문서가 삭제됐을 수도 있으니 존재 확인 후 갱신
-    async with AsyncSessionLocal() as sess:
-        doc = (await sess.execute(
-            select(Document).where(Document.id == doc_id)
-        )).scalar_one_or_none()
-        if doc is None:
-            return
-        doc.status      = result.get("status")
-        doc.error       = result.get("error")
-        doc.page_count  = len(result.get("pages", []))
-        doc.has_flagged = has_flagged
-        if result.get("status") == "success":
-            doc.title = _extract_title(result.get("pages", []))
-        await sess.commit()
+    # [수정 2026-07-06] 이 블록에 try/except가 없으면, DB 커넥션 풀 고갈(QueuePool
+    # TimeoutError) 같은 예외가 여기서 나는 순간 백그라운드 태스크가 그대로 죽어
+    # doc.status가 "parsing"에 영구히 정체된다(재현 테스트에서 실제 관측됨). 어떤
+    # 경로로도 문서가 success/failed 중 하나로는 반드시 수렴하도록 방어막을 둔다.
+    try:
+        # 파싱 도중 문서가 삭제됐을 수도 있으니 존재 확인 후 갱신
+        async with AsyncSessionLocal() as sess:
+            doc = (await sess.execute(
+                select(Document).where(Document.id == doc_id)
+            )).scalar_one_or_none()
+            if doc is None:
+                return
+            doc.status      = result.get("status")
+            doc.error       = result.get("error")
+            doc.page_count  = len(result.get("pages", []))
+            doc.has_flagged = has_flagged
+            if result.get("status") == "success":
+                doc.title = _extract_title(result.get("pages", []))
+            await sess.commit()
+    except Exception:
+        # 결과 반영 자체가 실패 — "parsing" 영구 정체를 막기 위해 failed로 강제 복구 시도
+        try:
+            async with AsyncSessionLocal() as sess2:
+                doc2 = (await sess2.execute(
+                    select(Document).where(Document.id == doc_id)
+                )).scalar_one_or_none()
+                if doc2 is not None:
+                    doc2.status = "failed"
+                    doc2.error  = "결과 저장 중 오류가 발생했습니다 (재시도 필요)"
+                    await sess2.commit()
+        except Exception as e2:
+            # 복구 기록마저 실패 — 삼키지 않고 로그만 남기고, 태스크는 정상 종료시킨다.
+            print(f"[parse] doc_id={doc_id} 상태반영 실패, 복구도 실패: {e2}")
+        return
 
     # 파싱 결과 JSON 저장 (상세 보기·검색 본문 로드용)
     parsed_path = os.path.join(PARSED_DIR, f"{doc_id}.json")
@@ -570,8 +655,42 @@ async def 파일_업로드(
     }
 
 
+# GET /documents/statuses — 여러 문서 상태를 한 번에 조회 (배치 폴링용)
+# [추가 2026-07-06] 프론트가 문서마다 개별 GET /documents/{id}/status 를 각자
+# setInterval로 폴링하면, 동시 업로드 문서 수만큼 폴링 요청이 배로 늘어 SQLite
+# 커넥션 풀(기본 15개)을 순간적으로 고갈시킨다(실측: 더미 49개 동시 업로드 시
+# 폴링 요청 8,698회, QueuePool TimeoutError 발생). 여러 id를 한 세션의 IN 조회로
+# 묶어 폴링 요청 수 자체를 줄인다. 응답 필드는 기존 개별 엔드포인트와 동일.
+@app.get("/documents/statuses")
+async def 문서_상태_배치(ids: str, db: AsyncSession = Depends(get_db)):
+    # 숫자가 아닌 값(공백·오타 등)은 조용히 무시한다 — 폴링 입력값으로 500을 내지 않음
+    id_list = []
+    for part in ids.split(","):
+        part = part.strip()
+        if part.isdigit():
+            id_list.append(int(part))
+    if not id_list:
+        return []
+
+    docs = (await db.execute(
+        select(Document).where(Document.id.in_(id_list))
+    )).scalars().all()
+    return [
+        {
+            "id":          d.id,
+            "filename":    d.filename,
+            "status":      d.status,        # parsing | success | failed
+            "page_count":  d.page_count,
+            "has_flagged": d.has_flagged,
+            "error":       d.error,
+        }
+        for d in docs
+    ]
+
+
 # GET /documents/{doc_id}/status — 업로드/재파싱 진행 상태 폴링용 (가벼운 응답)
-# 프론트 업로드 화면이 2초 간격으로 호출해 parsing → success/failed 전환을 감지한다.
+# 프론트 업로드 화면은 배치 엔드포인트(/documents/statuses)를 사용한다.
+# 이 개별 엔드포인트는 다른 화면(예: 상세보기 단건 확인)에서 쓸 수 있어 유지한다.
 @app.get("/documents/{doc_id}/status")
 async def 문서_상태(doc_id: int, db: AsyncSession = Depends(get_db)):
     doc = (await db.execute(select(Document).where(Document.id == doc_id))).scalar_one_or_none()
@@ -1360,7 +1479,7 @@ async def ai_status():
     """Ollama 서버 가용 여부 및 Gemma 모델 확인."""
     import urllib.request, json as _json
     def _check():
-        req = urllib.request.Request("http://localhost:11434/api/tags")
+        req = urllib.request.Request(f"{OLLAMA_BASE_URL}/api/tags")
         with urllib.request.urlopen(req, timeout=2) as r:
             return _json.loads(r.read())
     try:
@@ -1394,7 +1513,7 @@ async def ai_ask(
             {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False}
         ).encode()
         req = urllib.request.Request(
-            "http://localhost:11434/api/generate",
+            f"{OLLAMA_BASE_URL}/api/generate",
             data=payload,
             headers={"Content-Type": "application/json"},
         )
