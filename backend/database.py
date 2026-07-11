@@ -8,8 +8,16 @@ from sqlalchemy.orm import sessionmaker, DeclarativeBase
 # DATABASE_URL 환경변수가 있으면 PostgreSQL, 없으면 SQLite fallback
 _raw_url = os.environ.get("DATABASE_URL", "")
 if _raw_url:
-    # Heroku 등 postgres:// 스킴을 asyncpg 드라이버 URL로 치환
-    if _raw_url.startswith("postgres://"):
+    # DATABASE_URL 스킴 정규화 — 플랫폼마다 다른 postgres 스킴을 asyncpg 드라이버로 통일한다.
+    # 이미 드라이버가 명시된 URL(postgresql+asyncpg:// 등)은 손대지 않는다.
+    # 더 긴 문자열(postgresql://)을 먼저 검사해 postgres://와 혼동되지 않게 한다.
+    if _raw_url.startswith("postgresql+"):
+        pass  # 이미 드라이버 지정됨 — 그대로 사용
+    elif _raw_url.startswith("postgresql://"):
+        # Railway 등 표준 스킴을 asyncpg 드라이버 URL로 치환
+        _raw_url = _raw_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    elif _raw_url.startswith("postgres://"):
+        # Heroku 등 구식 스킴을 asyncpg 드라이버 URL로 치환
         _raw_url = _raw_url.replace("postgres://", "postgresql+asyncpg://", 1)
     DATABASE_URL = _raw_url
     _is_postgres = True
