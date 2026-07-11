@@ -32,10 +32,18 @@ FROM python:3.11-slim
 #   libreoffice-writer  → HWP→DOCX 변환 (② hwp_parser)
 #   libreoffice-impress → PPT/PPTX→PDF 변환 (② pptx_parser)
 #   fonts-nanum         → 한글 폰트 (없으면 LibreOffice 변환 결과 한글이 깨짐)
+#   libgl1, libglib2.0-0 → img2table==2.0.0이 opencv-contrib-python>=4(GUI 빌드)를
+#                          하드 의존성으로 강제해서 생기는 요구사항. camelot·easyocr는
+#                          opencv-python-headless라 문제없지만, img2table 쪽 opencv가
+#                          설치되면 libGL.so.1 없이는 import 시점에 죽는다
+#                          (실제 배포 오류 원인: `ImportError: libGL.so.1: cannot open
+#                          shared object file` — core/parser.py의 `import camelot`에서 발생)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libreoffice-writer \
         libreoffice-impress \
         fonts-nanum \
+        libgl1 \
+        libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
