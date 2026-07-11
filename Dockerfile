@@ -55,6 +55,8 @@ COPY --from=frontend-build /front/dist ./static
 # DATA_DIR             업로드 원본·파싱 JSON 저장 위치 → Railway Volume(/data)
 # EASYOCR_MODULE_PATH  ① core/parser.py의 EasyOCR 모델 저장 루트
 #                      (실제 모델은 /data/easyocr/model 에 저장됨)
+#                      core/parser.py 코드는 저장 경로를 지정하지 않지만, EasyOCR
+#                      라이브러리(config.py)가 이 환경변수를 자동으로 읽어 적용한다
 # EASYOCR_MODEL_DIR    ② _image_ocr.py의 모델 폴더 — ①과 같은 폴더를 가리키게
 #                      맞춰서 모델(~500MB) 이중 다운로드를 막는다
 # HF_HOME              sentence-transformers(MiniLM ~470MB) 캐시 → Volume

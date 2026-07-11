@@ -19,6 +19,7 @@
    - MiniLM 임베딩 모델 캐시 (~470MB, `/data/hf_cache`)
 4. 별도 환경변수 설정 **불필요** (Dockerfile ENV에 기본값 포함). 필요 시:
    - `OLLAMA_MODEL` — Phase 2 (Gemma 4 12B) 전용, MVP에선 무시
+   - `OLLAMA_BASE_URL` — Ollama 서버 주소. 기본값 `http://localhost:11434`. 사내 폐쇄망에서 Ollama가 다른 호스트에 있을 때만 지정
    - `CORS_ORIGINS` — 통합 서빙이라 기본값으로 충분. 프론트를 분리 배포할 때만 설정
 
 ## 첫 기동 시 주의
