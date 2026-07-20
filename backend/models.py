@@ -22,14 +22,32 @@ class Document(Base):
     page_count    = Column(Integer, default=0)                      # 총 페이지 수
     has_flagged   = Column(Boolean, default=False)                  # OCR 저신뢰 페이지 있으면 True
     sha256        = Column(String(64), nullable=True, index=True)   # SHA-256 해시 (중복 체크용)
-    uploaded_at   = Column(DateTime, server_default=func.now())     # 업로드 시각 (자동 기록)
+    uploaded_at   = Column(DateTime, server_default=func.now())     # 업로드 시각 (자동 기록, 이후 불변)
+    # [수정 2026-07-06] 주기적 스윕이 "parsing이 얼마나 오래됐는지" 판정할 기준 컬럼.
+    # uploaded_at은 최초 업로드 시각으로 고정이라 재시도(retry) 시에는 갱신되지 않는다 —
+    # 그걸 기준으로 삼으면 방금 재시도를 시작한 문서를 "오래됐다"고 오판해 강제로
+    # failed 처리해버릴 수 있다. onupdate=func.now()로 해두면 ORM으로 이 행을 수정하고
+    # commit할 때마다(업로드/재시도/파싱결과반영 등 모든 지점에서) 자동으로 갱신된다.
+    updated_at    = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
 # Chunk 테이블: 문서를 청크로 분할하여 저장합니다 (turbovec 벡터 ID와 1:1 대응)
+#
+# [수정 2026-07-04] id 타입을 with_variant로 분기하는 이유:
+#   PostgreSQL → BIGSERIAL (설계도 C5 규칙: 이 id가 곧 turbovec 벡터 ID(uint64))
+#   SQLite(로컬 개발) → INTEGER. SQLite는 BIGINT PK에 자동증가를 지원하지 않아
+#   기존 코드로는 로컬에서 청크 INSERT가 전부 "NOT NULL constraint failed"로 죽었음.
+_BigIntPK = BigInteger().with_variant(Integer, "sqlite")
+
 class Chunk(Base):
     __tablename__ = "chunks"
+    # [수정 2026-07-06] SQLite는 이 옵션 없이는 삭제된 rowid를 재사용할 수 있어(테이블
+    # 최대값+1만 보장), turbovec에 남은 "죽은" 벡터 id와 새 청크 id가 충돌해 검색 결과가
+    # 오염될 위험이 있다. PostgreSQL의 BIGSERIAL/SERIAL(시퀀스)은 삭제된 값을 재사용하지
+    # 않으므로, SQLite에도 같은 "재사용 없음" 특성을 강제해 환경별 동작 차이를 없앤다.
+    __table_args__ = {"sqlite_autoincrement": True}
 
-    id        = Column(BigInteger, primary_key=True, autoincrement=True)  # turbovec 벡터 ID와 1:1
+    id        = Column(_BigIntPK, primary_key=True, autoincrement=True)   # turbovec 벡터 ID와 1:1
     doc_id    = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
     text      = Column(Text, nullable=False)                              # 청크 텍스트
     page_num  = Column(Integer, default=0)                                # 원본 페이지 번호

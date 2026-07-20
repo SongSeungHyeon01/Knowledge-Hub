@@ -19,8 +19,19 @@ from sqlalchemy import text
 from database import engine, get_db, Base, AsyncSessionLocal
 from models import Document, SearchLog, Chunk
 from contextlib import asynccontextmanager
-from core.parser import parse_pdf                   # NEVER MODIFY — import only
-from core.docling_parser import parse_document      # 신규 멀티포맷 파서
+from core.parser import parse_pdf                   # 백엔드 배포 정본 파서 — 최신 parser 브랜치(parser/parser.py) 기준, import only
+from core.office_adapter import parse_non_pdf       # 비-PDF 입구: ② hwp_postprocess 정본 + TXT/MD 리더
+
+# ③ 김태훈 검색 정본 (backend/search/search.py) — 알고리즘 구성요소만 가져다 쓴다.
+#   채택: 섹션 헤더 우선 청킹 / 언어감지 토크나이저 / 비대칭 RRF k / 영↔한 동의어 보강
+#   저장은 설계도 C5 규칙(PostgreSQL CHUNKS PK = turbovec 벡터 ID 1:1)대로 이 파일이 담당.
+#   (_로 시작하는 이름도 가져오는 이유: ③ 정본의 내부 상수·함수를 재구현 없이 그대로
+#    재사용하기 위함 — 값을 바꾸지 말 것)
+from search.search import (
+    chunk_text as _sb_chunk_text,        # 섹션 헤더 우선 청킹 (PRD 기준)
+    _augment_ko_to_en, _augment_en_to_ko,  # 영↔한 기술용어 쿼리 보강
+    _RRF_K_BM25, _RRF_K_VEC,             # 비대칭 RRF k (BM25=30, 벡터=60)
+)
 
 # ── 경로 설정 — env var 우선, 없으면 코드 파일 기준 상대 경로 ─────────────────
 _BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
@@ -31,9 +42,11 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(PARSED_DIR, exist_ok=True)
 
 # 지원 파일 형식 목록
+# (png/jpg 단독 이미지는 미지원으로 정리 — 2026-07-04 결정. 문서 속 이미지는
+#  PDF OCR 경로·DOCX embedded 이미지 OCR로 이미 처리된다)
 SUPPORTED_EXTENSIONS = {
     '.pdf', '.docx', '.pptx', '.ppt', '.xlsx', '.xls',
-    '.hwp', '.hwpx', '.txt', '.md', '.png', '.jpg', '.jpeg',
+    '.hwp', '.hwpx', '.txt', '.md',
 }
 
 # 파일 크기 상한 (500MB — OOM 방지 1MB 스트리밍)
@@ -54,23 +67,84 @@ def _get_vec_index():
     return _vec_index
 
 
+# ── 정체 문서 주기적 스윕 (2026-07-06) ────────────────────────────────────────
+# 예외처리 방어막(_parse_and_ingest)을 넣었지만, 원본 상태반영과 그 복구 시도가
+# 같은 순간의 DB 커넥션 풀 고갈 피크에 둘 다 걸리면 문서가 "parsing"에 남을 수
+# 있다(재현 테스트에서 실측: 2건). 서버 재시작 없이도 이런 잔여 정체 문서를
+# 상시 자동 정리하는 안전망. 기존 lifespan의 "재시작 시 정체 문서 정리"는
+# 그대로 두고(재시작이라는 다른 상황에 대한 최종 안전망), 이 스윕을 추가로 얹는다.
+#
+# [임시 완화값 — 필요시 조정]
+_SWEEP_INTERVAL_SEC  = 5 * 60   # 스윕 실행 간격(초) — 5분마다
+_SWEEP_STALE_MINUTES = 10       # updated_at 기준 이만큼(분) 지난 parsing 문서는 정체로 간주
+
+async def _sweep_stale_parsing():
+    """updated_at 기준으로 오래 parsing에 머문 문서를 주기적으로 failed 처리한다.
+    스윕도 DB 세션을 쓰므로 예외가 나도 태스크가 죽지 않도록 try/except로 감싼다."""
+    while True:
+        try:
+            await asyncio.sleep(_SWEEP_INTERVAL_SEC)
+            cutoff = datetime.now() - timedelta(minutes=_SWEEP_STALE_MINUTES)
+            async with AsyncSessionLocal() as sess:
+                stale = (await sess.execute(
+                    select(Document).where(
+                        Document.status == "parsing",
+                        Document.updated_at < cutoff,
+                    )
+                )).scalars().all()
+                for d in stale:
+                    d.status = "failed"
+                    d.error  = "처리 시간 초과 — 자동 정리됨 (재시도 필요)"
+                if stale:
+                    await sess.commit()
+                    print(f"[sweep] 정체 문서 {len(stale)}건을 failed로 정리")
+        except asyncio.CancelledError:
+            raise  # 앱 종료 시 태스크 취소는 그대로 전파시켜 정상 종료되게 한다
+        except Exception as e:
+            print(f"[sweep] 정체 문서 정리 중 오류: {e}")
+
+
 @asynccontextmanager
 async def lifespan(_):
     """서버 시작 시 DB 테이블 생성 + 스키마 마이그레이션 + turbovec 재구성."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        migrations = [
-            "ALTER TABLE documents ADD COLUMN file_type VARCHAR",
-            "ALTER TABLE documents ADD COLUMN original_path VARCHAR",
-            "ALTER TABLE documents ADD COLUMN title VARCHAR",
-            "ALTER TABLE documents ADD COLUMN memo TEXT",
-            "ALTER TABLE documents ADD COLUMN sha256 VARCHAR(64)",
-        ]
-        for stmt in migrations:
-            try:
+
+    # [수정 2026-07-06] ALTER TABLE 5개를 engine.begin() 하나(트랜잭션 하나)에 묶지 않고
+    # 각각 독립 트랜잭션에서 실행한다. PostgreSQL은 트랜잭션 안에서 문장 하나가 에러(예:
+    # 컬럼 이미 존재)를 내면 그 트랜잭션 전체가 aborted 상태가 되어, 뒤이은 ALTER들이
+    # 같은 커넥션에서 전부 InFailedSqlTransaction으로 조용히 실패한다(SQLite는 문장별로
+    # 독립적이라 이 문제가 안 터져서 발견이 늦어짐). 독립 트랜잭션으로 나누면 한 문장이
+    # 실패해도 그 트랜잭션만 롤백되고 다음 ALTER는 깨끗한 새 트랜잭션에서 실행된다.
+    migrations = [
+        "ALTER TABLE documents ADD COLUMN file_type VARCHAR",
+        "ALTER TABLE documents ADD COLUMN original_path VARCHAR",
+        "ALTER TABLE documents ADD COLUMN title VARCHAR",
+        "ALTER TABLE documents ADD COLUMN memo TEXT",
+        "ALTER TABLE documents ADD COLUMN sha256 VARCHAR(64)",
+        "ALTER TABLE documents ADD COLUMN updated_at DATETIME",
+    ]
+    for stmt in migrations:
+        try:
+            async with engine.begin() as conn:
                 await conn.execute(text(stmt))
-            except Exception:
-                pass  # 이미 존재하는 컬럼 → 정상적으로 무시
+        except Exception as e:
+            # 이미 존재하는 컬럼이면 정상 — 그래도 어떤 ALTER가 왜 스킵됐는지는 남긴다.
+            print(f"[migration] '{stmt}' 스킵/실패: {e}")
+
+    # [비동기화 2026-07-05] 재시작으로 중단된 'parsing' 문서 정리.
+    # 파싱은 백그라운드 태스크라 서버가 재시작되면 진행 중이던 작업이 유실된다 →
+    # 'parsing' 상태로 영영 멈춘 문서가 남지 않도록 failed로 내려 재시도를 유도한다.
+    async with AsyncSessionLocal() as sess:
+        stuck = (await sess.execute(
+            select(Document).where(Document.status == "parsing")
+        )).scalars().all()
+        for d in stuck:
+            d.status = "failed"
+            d.error  = "서버 재시작으로 파싱이 중단되었습니다. 재시도해 주세요."
+        if stuck:
+            await sess.commit()
+            print(f"[startup] 중단된 parsing 문서 {len(stuck)}건을 failed로 정리")
 
     # turbovec 인덱스 재구성 (DB CHUNKS에서 임베딩 로드)
     idx = _get_vec_index()
@@ -79,17 +153,36 @@ async def lifespan(_):
             rows = (await sess.execute(
                 select(Chunk).where(Chunk.embedding != None)
             )).scalars().all()
-            count = 0
+            # [수정 2026-07-04] turbovec IdMapIndex에는 add()가 없고 add_with_ids()
+            # (배치 전용)만 있다. 기존 idx.add(...)는 try/except에 삼켜져 조용히
+            # 전부 실패했음 → 벡터·id를 모아 한 번에 배치 등록한다. (C5: id=Chunk PK)
+            vecs, ids = [], []
             for row in rows:
                 try:
-                    vec = np.frombuffer(row.embedding, dtype=np.float32)
-                    idx.add(int(row.id), vec)
-                    count += 1
+                    vecs.append(np.frombuffer(row.embedding, dtype=np.float32))
+                    ids.append(int(row.id))
                 except Exception:
                     pass
+            count = 0
+            if vecs:
+                try:
+                    idx.add_with_ids(np.vstack(vecs), np.array(ids, dtype=np.uint64))
+                    count = len(ids)
+                except Exception as e:
+                    print(f"[startup] turbovec 재구성 실패: {e}")
         print(f"[startup] turbovec 재구성 완료: {count}개 벡터")
 
+    sweep_task = asyncio.create_task(_sweep_stale_parsing())
+    print(f"[startup] 정체 문서 스윕 태스크 시작 (주기 {_SWEEP_INTERVAL_SEC}s, 기준 {_SWEEP_STALE_MINUTES}분)")
+
     yield
+
+    sweep_task.cancel()
+    try:
+        await sweep_task
+    except asyncio.CancelledError:
+        pass
+    print("[shutdown] 정체 문서 스윕 태스크 종료")
 
 
 # FastAPI 앱 객체를 만듭니다
@@ -137,7 +230,8 @@ def _stem_ko(word: str) -> str:
 
 
 # ── 임베딩 / BM25 / AI 설정 ──────────────────────────────────────────────────
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma3:4b")
+OLLAMA_MODEL    = os.environ.get("OLLAMA_MODEL", "gemma3:4b")
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 _embed_model  = None
 
 def _get_embed_model():
@@ -154,18 +248,20 @@ def _get_embed_model():
     return _embed_model
 
 
-# ── kiwipiepy 형태소 분석기 (지연 로딩) ──────────────────────────────────────
-_kiwi = None
+# ── ③ 정본 BM25 토크나이저 (지연 로딩) ──────────────────────────────────────
+# BM25Indexer 인스턴스를 토크나이저로만 사용한다 (색인 저장 기능은 쓰지 않음 —
+# 저장은 DB CHUNKS가 담당). 언어 감지 + 영어 불용어 + 기술 토큰(1.8V, 0x60) 지원.
+_search_indexer = None
 
-def _get_kiwi():
-    global _kiwi
-    if _kiwi is None:
+def _get_search_indexer():
+    global _search_indexer
+    if _search_indexer is None:
         try:
-            from kiwipiepy import Kiwi
-            _kiwi = Kiwi()
-        except ImportError:
-            pass
-    return _kiwi
+            from search.search import BM25Indexer
+            _search_indexer = BM25Indexer()   # 내부에서 Kiwi 로드 (첫 호출만 느림)
+        except Exception as e:
+            print(f"[search] ③ 토크나이저 로드 실패: {e}")
+    return _search_indexer
 
 
 def _best_page_for_tokens(pages: list, tokens: list) -> int:
@@ -181,16 +277,18 @@ def _best_page_for_tokens(pages: list, tokens: list) -> int:
     return best_page
 
 
-def _tokenize_bm25(text: str) -> list:
-    """BM25 코퍼스/쿼리 토크나이저: kiwipiepy 형태소 분석 우선, regex fallback."""
-    kiwi = _get_kiwi()
-    if kiwi is not None:
+def _tokenize_bm25(text: str, is_query: bool = False) -> list:
+    """BM25 토크나이저 — ③ 정본(BM25Indexer)에 위임. 실패 시 regex fallback.
+    is_query=True면 쿼리 전용 토크나이저(한/영 동시 추출)를 쓴다."""
+    indexer = _get_search_indexer()
+    if indexer is not None:
         try:
-            keep = {'NNG', 'NNP', 'VV', 'VA', 'SL', 'NR'}
-            return [t.form.lower() for t in kiwi.tokenize(text) if t.tag in keep and len(t.form) >= 2]
+            if is_query:
+                return indexer._tokenize_query(text)
+            return indexer._tokenize(text)
         except Exception:
             pass
-    # regex fallback
+    # regex fallback (③ 토크나이저 로드 실패 시에만)
     import re
     raw = [t.lower() for t in re.split(r'[\s,;:.!?()\[\]{}/"\'<>=]+', text) if len(t) >= 2]
     result = []
@@ -202,20 +300,46 @@ def _tokenize_bm25(text: str) -> list:
     return result
 
 
-def _build_chunks(pages: list, max_len: int = 400) -> tuple:
-    """페이지 텍스트를 청크로 분할. (chunks, pnums) 반환."""
-    chunks, pnums = [], []
+def _build_chunks(pages: list) -> tuple:
+    """페이지 텍스트를 ③ 정본 청킹(섹션 헤더 우선, 400자/80자 오버랩)으로 분할.
+    (chunks, pnums) 반환.
+
+    - flagged 페이지(저신뢰 OCR)는 인덱싱에서 제외한다 — ③ 정본 정책.
+      관리자가 /admin/flagged에서 텍스트를 수정하면 flagged가 풀려 재인덱싱 대상이 된다.
+    - ③ chunk_text는 문서 전체를 이어붙여 청킹하므로(섹션이 페이지에 걸칠 수 있음),
+      각 페이지의 시작 위치(offset)를 기록해 두었다가 청크의 char_start로
+      "이 청크가 몇 페이지에서 시작했는지"를 역산한다 (검색 결과 출처 표시용).
+    """
+    import bisect
+
+    page_texts = []
+    offsets    = []   # (이어붙인 문자열에서의 시작 위치, 페이지 번호)
+    pos = 0
     for page in pages:
-        text = page.get("text", "").strip()
+        if page.get("flagged"):
+            continue   # 저신뢰 페이지 제외 (오인식 텍스트가 검색 품질을 떨어뜨림)
+        text = (page.get("text") or "").strip()
         if not text:
             continue
         pnum = page.get("page_num") or page.get("page", 0)
-        step = max_len - 50
-        for i in range(0, len(text), step):
-            c = text[i:i + max_len].strip()
-            if len(c) >= 20:
-                chunks.append(c)
-                pnums.append(pnum)
+        offsets.append((pos, pnum))
+        page_texts.append(text)
+        pos += len(text) + 1   # 아래 "\n".join의 개행 1자 보정
+
+    if not page_texts:
+        return [], []
+
+    joined = "\n".join(page_texts)
+    raw_chunks = _sb_chunk_text("doc", joined)   # doc_id는 chunk_id 생성용 — 여기선 미사용
+
+    chunks, pnums = [], []
+    starts = [off for off, _ in offsets]
+    for c in raw_chunks:
+        if len(c["text"]) < 20:   # 지나치게 짧은 조각은 색인 가치 없음 (기존 기준 유지)
+            continue
+        i = bisect.bisect_right(starts, c["char_start"]) - 1
+        pnums.append(offsets[max(i, 0)][1])
+        chunks.append(c["text"])
     return chunks, pnums
 
 
@@ -274,34 +398,60 @@ async def _ingest_chunks_to_db(doc_id: int, pages: list):
             pnums=np.array(pnums, dtype=np.int32))
 
     # DB에 Chunk 저장 + turbovec 색인
+    # [수정 2026-07-06] 이 시점은 이미 doc.status="success"로 커밋된 뒤일 수 있으므로
+    # 여기서 예외가 나도 status는 건드리지 않는다(건드리면 "성공했는데 실패로 뒤집힘"
+    # 이라는 또 다른 혼란이 생김). 대신 조용히 삼키지 않고 반드시 로그를 남겨, 색인이
+    # 누락된 문서(검색에 안 잡히는 문서)를 나중에 사람이 로그로 식별할 수 있게 한다.
     idx = _get_vec_index()
-    async with AsyncSessionLocal() as sess:
-        # 기존 청크 삭제 (재시도 시)
-        await sess.execute(
-            sa_delete(Chunk).where(Chunk.doc_id == doc_id)
-        )
-        for i, (text, pnum) in enumerate(zip(chunks, pnums)):
-            emb_bytes = embs[i].tobytes() if embs is not None else None
-            chunk_row = Chunk(doc_id=doc_id, text=text, page_num=pnum, chunk_idx=i, embedding=emb_bytes)
-            sess.add(chunk_row)
-        await sess.flush()  # IDs 확보
-        await sess.commit()
-        # turbovec에 추가
-        if idx is not None and embs is not None:
-            refreshed = (await sess.execute(
-                select(Chunk).where(Chunk.doc_id == doc_id).order_by(Chunk.chunk_idx)
+    try:
+        async with AsyncSessionLocal() as sess:
+            # 기존 청크 삭제 (재시도 시) — C5 규칙: DB에서 지우는 청크는 turbovec에서도
+            # 함께 제거해야 한다. 안 그러면 삭제된 id의 "유령 벡터"가 인덱스에 남아
+            # 메모리를 차지하고, 검색 상위 k 자리를 뺏어 실제 결과를 밀어낸다.
+            old_ids = (await sess.execute(
+                select(Chunk.id).where(Chunk.doc_id == doc_id)
             )).scalars().all()
-            for row, vec in zip(refreshed, embs):
-                try:
-                    idx.add(int(row.id), vec)
-                except Exception:
-                    pass
-    print(f"[ingest] doc_id={doc_id}: {len(chunks)}청크 저장 완료")
+            if idx is not None:
+                for cid in old_ids:
+                    try:
+                        idx.remove(int(cid))
+                    except Exception:
+                        pass
+            await sess.execute(
+                sa_delete(Chunk).where(Chunk.doc_id == doc_id)
+            )
+            for i, (text, pnum) in enumerate(zip(chunks, pnums)):
+                emb_bytes = embs[i].tobytes() if embs is not None else None
+                chunk_row = Chunk(doc_id=doc_id, text=text, page_num=pnum, chunk_idx=i, embedding=emb_bytes)
+                sess.add(chunk_row)
+            await sess.flush()  # IDs 확보
+            await sess.commit()
+            # turbovec에 추가 — add()는 없는 API. add_with_ids() 배치 등록 (C5: id=Chunk PK)
+            if idx is not None and embs is not None:
+                refreshed = (await sess.execute(
+                    select(Chunk).where(Chunk.doc_id == doc_id).order_by(Chunk.chunk_idx)
+                )).scalars().all()
+                new_ids = np.array([int(row.id) for row in refreshed], dtype=np.uint64)
+                if len(new_ids):
+                    try:
+                        idx.add_with_ids(embs[:len(new_ids)], new_ids)
+                    except Exception as e:
+                        print(f"[ingest] turbovec 색인 실패: {e}")
+        print(f"[ingest] doc_id={doc_id}: {len(chunks)}청크 저장 완료")
+    except Exception as e:
+        print(f"[ingest] doc_id={doc_id} 청킹/색인 실패(검색 누락 가능): {e}")
 
 
-# "/" 주소로 접속하면 이 함수가 실행됩니다
+# "/" 주소로 접속하면 이 함수가 실행됩니다.
+# 배포(통합 서빙) 시: 프론트 빌드 산출물(backend/static/index.html)이 있으면 화면을 돌려주고,
+# 로컬 개발처럼 static이 없으면 기존 확인 메시지를 돌려줍니다.
+_STATIC_DIR = os.path.join(_BASE_DIR, "static")
+
 @app.get("/")
 def 서버_확인():
+    index_html = os.path.join(_STATIC_DIR, "index.html")
+    if os.path.exists(index_html):
+        return FileResponse(index_html, media_type="text/html")
     return {"message": "서버 켜졌어요"}
 
 # GET /upload/check?filename=... — 같은 파일명이 이미 있는지 확인합니다
@@ -316,6 +466,89 @@ async def 중복_확인(filename: str = Query(...), db: AsyncSession = Depends(g
             "status": existing.status,
         }
     return {"exists": False}
+
+
+# 파싱 동시 실행 제한 (2026-07-05):
+# 파싱은 CPU 집약이라 GIL을 점유한다. 여러 개를 동시에 스레드로 돌리면 이벤트 루프가
+# 굶어 API 응답이 급격히 느려진다(실측: 2개 동시 파싱 중 상태조회가 10초 초과).
+# GIL 때문에 동시 파싱은 처리량 이득도 없으므로, 세마포어로 "한 번에 하나만" 직렬화한다.
+# → 파싱 중에도 API가 안정적으로 응답(단일 파싱 시 실측 ~2.5초)하고, 대용량이 큐를 잡아도
+#   요청은 즉시 접수되고 다른 API는 계속 동작한다. (PARSE_CONCURRENCY로 조정 가능)
+#   더 큰 서버에서 진짜 병렬 파싱이 필요하면 ProcessPoolExecutor로 승격(별도 프로세스 = GIL 독립).
+_PARSE_CONCURRENCY = max(1, int(os.environ.get("PARSE_CONCURRENCY", "1")))
+_parse_semaphore = asyncio.Semaphore(_PARSE_CONCURRENCY)
+
+
+async def _parse_and_ingest(doc_id: int, save_path: str, source_file: str, ext: str):
+    """[비동기 파싱 파이프라인] 업로드/재시도 응답을 즉시 돌려준 뒤 백그라운드에서 실행된다.
+
+    ⭐ 왜 이렇게 하나 (2026-07-05):
+    파싱은 무겁다 — 페이지별 camelot 표 감지 때문에 대용량 PDF는 수십 분이 걸린다
+    (실측: 60쪽 57초, 1,950쪽 추정 ~50분). 예전처럼 업로드 요청 안에서 동기로 파싱하면
+    (1) 응답이 수십 분 지연돼 프록시·게이트웨이 타임아웃으로 업로드가 실패하고,
+    (2) 동기 함수가 이벤트 루프를 통째로 막아 파싱 동안 서버 전체가 멈춘다.
+    → 파싱을 asyncio.to_thread(스레드풀)로 돌려 이벤트 루프를 막지 않게 하고,
+      업로드 요청은 'parsing' 상태만 만들고 즉시 응답한다. 프론트는 상태를 폴링한다.
+
+    이 함수는 자체 DB 세션을 연다 — 요청 핸들러의 세션(db)은 응답과 함께 이미 닫히므로
+    백그라운드에서 재사용하면 안 된다.
+    """
+    # 세마포어로 한 번에 하나만 파싱 (위 주석 참고). 대기 중에도 요청·다른 API는 계속 동작.
+    async with _parse_semaphore:
+        try:
+            if ext == '.pdf':
+                result = await asyncio.to_thread(parse_pdf, save_path, source_file)
+            else:
+                result = await asyncio.to_thread(parse_non_pdf, save_path, source_file, ext)
+        except Exception as e:
+            result = {"source_file": source_file, "status": "failed",
+                      "error": f"파싱 중 예외가 발생했습니다: {e}", "pages": []}
+
+    has_flagged = any(p.get("flagged") for p in result.get("pages", []))
+
+    # [수정 2026-07-06] 이 블록에 try/except가 없으면, DB 커넥션 풀 고갈(QueuePool
+    # TimeoutError) 같은 예외가 여기서 나는 순간 백그라운드 태스크가 그대로 죽어
+    # doc.status가 "parsing"에 영구히 정체된다(재현 테스트에서 실제 관측됨). 어떤
+    # 경로로도 문서가 success/failed 중 하나로는 반드시 수렴하도록 방어막을 둔다.
+    try:
+        # 파싱 도중 문서가 삭제됐을 수도 있으니 존재 확인 후 갱신
+        async with AsyncSessionLocal() as sess:
+            doc = (await sess.execute(
+                select(Document).where(Document.id == doc_id)
+            )).scalar_one_or_none()
+            if doc is None:
+                return
+            doc.status      = result.get("status")
+            doc.error       = result.get("error")
+            doc.page_count  = len(result.get("pages", []))
+            doc.has_flagged = has_flagged
+            if result.get("status") == "success":
+                doc.title = _extract_title(result.get("pages", []))
+            await sess.commit()
+    except Exception:
+        # 결과 반영 자체가 실패 — "parsing" 영구 정체를 막기 위해 failed로 강제 복구 시도
+        try:
+            async with AsyncSessionLocal() as sess2:
+                doc2 = (await sess2.execute(
+                    select(Document).where(Document.id == doc_id)
+                )).scalar_one_or_none()
+                if doc2 is not None:
+                    doc2.status = "failed"
+                    doc2.error  = "결과 저장 중 오류가 발생했습니다 (재시도 필요)"
+                    await sess2.commit()
+        except Exception as e2:
+            # 복구 기록마저 실패 — 삼키지 않고 로그만 남기고, 태스크는 정상 종료시킨다.
+            print(f"[parse] doc_id={doc_id} 상태반영 실패, 복구도 실패: {e2}")
+        return
+
+    # 파싱 결과 JSON 저장 (상세 보기·검색 본문 로드용)
+    parsed_path = os.path.join(PARSED_DIR, f"{doc_id}.json")
+    with open(parsed_path, "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
+
+    # 성공 시 임베딩 + Chunk 색인 (이 함수 자체가 이미 백그라운드라 직접 await)
+    if result.get("status") == "success":
+        await _ingest_chunks_to_db(doc_id, result.get("pages", []))
 
 
 # POST /upload — 파일을 받아 파싱하고 DB에 기록합니다
@@ -388,45 +621,89 @@ async def 파일_업로드(
         return {"source_file": file.filename, "status": "failed",
                 "error": "파일 저장 중 오류가 발생했습니다", "pages": []}
 
-    # ── 파서 호출 ────────────────────────────────────────────────────────
-    # PDF: core/parser.py parse_pdf 사용 (PyMuPDF + EasyOCR, 기존 파이프라인)
-    # 그 외: core/docling_parser.py parse_document 사용 (Docling 설치 시 자동 전환)
+    # ── 문서 레코드를 'parsing' 상태로 즉시 생성 후 응답 ─────────────────
+    # [비동기화 2026-07-05] 파싱은 여기서 하지 않고 백그라운드(_parse_and_ingest)로 넘긴다.
+    # 대용량 PDF도 업로드 요청이 즉시 끝나 타임아웃·이벤트루프 블로킹을 피한다.
+    # 프론트는 반환된 id로 /documents/{id}/status 를 폴링해 완료를 확인한다.
     file_type = ext.lstrip('.')
-    if ext == '.pdf':
-        result = parse_pdf(filepath=save_path, source_file=file.filename)
-    else:
-        result = parse_document(filepath=save_path, source_file=file.filename, file_type=file_type)
-
-    # ── DB에 문서 정보 저장 ──────────────────────────────────────────────
-    has_flagged = any(p.get("flagged") for p in result.get("pages", []))
-
     doc = Document(
         filename      = file.filename,
-        title         = _extract_title(result.get("pages", [])) if result.get("status") == "success" else None,
+        title         = None,
         saved_path    = save_path,
         file_type     = file_type,
         original_path = original_path,
         category      = category,
-        status        = result.get("status"),
-        error         = result.get("error"),
-        page_count    = len(result.get("pages", [])),
-        has_flagged   = has_flagged,
+        status        = "parsing",   # parsing → (백그라운드) → success | failed
+        error         = None,
+        page_count    = 0,
+        has_flagged   = False,
         sha256        = sha256_hex,
     )
     db.add(doc)
     await db.commit()
     await db.refresh(doc)  # auto-increment id 가져오기
 
-    # 파싱 결과를 JSON 파일로 저장합니다 — 상세 보기에서 페이지 텍스트를 읽어옵니다
-    parsed_path = os.path.join(PARSED_DIR, f"{doc.id}.json")
-    with open(parsed_path, "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
+    # 응답 후 백그라운드에서 파싱 → 상태 갱신 → JSON 저장 → 임베딩 색인
+    background_tasks.add_task(_parse_and_ingest, doc.id, save_path, file.filename, ext)
 
-    # 임베딩 생성 + Chunk DB 저장 (응답 후 백그라운드에서 실행)
-    if result.get("status") == "success":
-        background_tasks.add_task(_ingest_chunks_to_db, doc.id, result.get("pages", []))
+    return {
+        "id":       doc.id,
+        "filename": file.filename,
+        "status":   "parsing",
+        "error":    None,
+        "message":  "업로드 접수됨 — 파싱이 백그라운드에서 진행됩니다.",
+    }
 
-    return result
+
+# GET /documents/statuses — 여러 문서 상태를 한 번에 조회 (배치 폴링용)
+# [추가 2026-07-06] 프론트가 문서마다 개별 GET /documents/{id}/status 를 각자
+# setInterval로 폴링하면, 동시 업로드 문서 수만큼 폴링 요청이 배로 늘어 SQLite
+# 커넥션 풀(기본 15개)을 순간적으로 고갈시킨다(실측: 더미 49개 동시 업로드 시
+# 폴링 요청 8,698회, QueuePool TimeoutError 발생). 여러 id를 한 세션의 IN 조회로
+# 묶어 폴링 요청 수 자체를 줄인다. 응답 필드는 기존 개별 엔드포인트와 동일.
+@app.get("/documents/statuses")
+async def 문서_상태_배치(ids: str, db: AsyncSession = Depends(get_db)):
+    # 숫자가 아닌 값(공백·오타 등)은 조용히 무시한다 — 폴링 입력값으로 500을 내지 않음
+    id_list = []
+    for part in ids.split(","):
+        part = part.strip()
+        if part.isdigit():
+            id_list.append(int(part))
+    if not id_list:
+        return []
+
+    docs = (await db.execute(
+        select(Document).where(Document.id.in_(id_list))
+    )).scalars().all()
+    return [
+        {
+            "id":          d.id,
+            "filename":    d.filename,
+            "status":      d.status,        # parsing | success | failed
+            "page_count":  d.page_count,
+            "has_flagged": d.has_flagged,
+            "error":       d.error,
+        }
+        for d in docs
+    ]
+
+
+# GET /documents/{doc_id}/status — 업로드/재파싱 진행 상태 폴링용 (가벼운 응답)
+# 프론트 업로드 화면은 배치 엔드포인트(/documents/statuses)를 사용한다.
+# 이 개별 엔드포인트는 다른 화면(예: 상세보기 단건 확인)에서 쓸 수 있어 유지한다.
+@app.get("/documents/{doc_id}/status")
+async def 문서_상태(doc_id: int, db: AsyncSession = Depends(get_db)):
+    doc = (await db.execute(select(Document).where(Document.id == doc_id))).scalar_one_or_none()
+    if doc is None:
+        raise HTTPException(status_code=404, detail="해당 문서를 찾을 수 없습니다")
+    return {
+        "id":          doc.id,
+        "filename":    doc.filename,
+        "status":      doc.status,        # parsing | success | failed
+        "page_count":  doc.page_count,
+        "has_flagged": doc.has_flagged,
+        "error":       doc.error,
+    }
 
 
 # GET /files/{doc_id} — 원본 파일을 다운로드합니다
@@ -564,41 +841,22 @@ async def 문서_재시도(doc_id: int, background_tasks: BackgroundTasks, db: A
     if not os.path.exists(doc.saved_path):
         raise HTTPException(status_code=400, detail="원본 파일이 없어서 재시도할 수 없습니다")
 
-    # 파서 재호출 — PDF는 parse_pdf, 나머지는 parse_document
-    ext_retry    = os.path.splitext(doc.saved_path)[1].lower()
-    file_type    = doc.file_type or ext_retry.lstrip('.')
-    if ext_retry == '.pdf':
-        parse_result = parse_pdf(filepath=doc.saved_path, source_file=doc.filename)
-    else:
-        parse_result = parse_document(filepath=doc.saved_path, source_file=doc.filename, file_type=file_type)
-
-    # DB 업데이트
-    has_flagged = any(p.get("flagged") for p in parse_result.get("pages", []))
-    doc.status     = parse_result.get("status")
-    doc.error      = parse_result.get("error")
-    doc.page_count = len(parse_result.get("pages", []))
-    doc.has_flagged = has_flagged
-    if parse_result.get("status") == "success":
-        doc.title = _extract_title(parse_result.get("pages", []))
+    # [비동기화 2026-07-05] 재파싱도 동기로 하지 않는다 — 'parsing'으로 표시하고
+    # 백그라운드(_parse_and_ingest)로 넘겨 즉시 응답한다. (대용량 재시도 블로킹 방지)
+    ext_retry = os.path.splitext(doc.saved_path)[1].lower()
+    doc.status      = "parsing"
+    doc.error       = None
+    doc.has_flagged = False
     await db.commit()
     await db.refresh(doc)
 
-    # 파싱 결과 JSON 저장 (상세 보기용)
-    parsed_path = os.path.join(PARSED_DIR, f"{doc.id}.json")
-    with open(parsed_path, "w", encoding="utf-8") as f:
-        json.dump(parse_result, f, ensure_ascii=False, indent=2)
-
-    # 임베딩 재생성 + Chunk DB 저장
-    if parse_result.get("status") == "success":
-        background_tasks.add_task(_ingest_chunks_to_db, doc.id, parse_result.get("pages", []))
+    background_tasks.add_task(_parse_and_ingest, doc.id, doc.saved_path, doc.filename, ext_retry)
 
     return {
-        "id":          doc.id,
-        "filename":    doc.filename,
-        "status":      doc.status,
-        "page_count":  doc.page_count,
-        "has_flagged": doc.has_flagged,
-        "error":       doc.error,
+        "id":       doc.id,
+        "filename": doc.filename,
+        "status":   "parsing",
+        "message":  "재파싱 접수됨 — 백그라운드에서 진행됩니다.",
     }
 
 
@@ -747,7 +1005,13 @@ async def 실제_검색_실행(q: str, alpha: float, category, db: AsyncSession)
             if all_chunk_items:
                 corpus     = [_tokenize_bm25(t) for _, t in all_chunk_items]
                 bm25       = BM25Okapi(corpus)
-                q_tokens   = _tokenize_bm25(q)
+                # ③ 정본: 영↔한 기술용어 동의어 보강 (한국어 쿼리→영어 문서,
+                # 영어 쿼리→한국어 문서 BM25 매칭 지원) + 쿼리 전용 토크나이저
+                if any('가' <= c <= '힣' for c in q):
+                    bm25_q = _augment_ko_to_en(q)
+                else:
+                    bm25_q = _augment_en_to_ko(q)
+                q_tokens   = _tokenize_bm25(bm25_q, is_query=True)
                 raw_scores = bm25.get_scores(q_tokens)
                 for i, (did, _) in enumerate(all_chunk_items):
                     s = float(raw_scores[i])
@@ -773,7 +1037,11 @@ async def 실제_검색_실행(q: str, alpha: float, category, db: AsyncSession)
                 model.encode, [q], normalize_embeddings=True, show_progress_bar=False
             ))[0].astype(np.float32)
             try:
-                vec_ids, vec_scores = idx.search(q_emb, k=min(50, 200))
+                # [수정 2026-07-04] turbovec search는 2차원 쿼리 배열을 받고
+                # (scores, ids) "순서"로 반환한다 — 기존 코드는 (ids, scores)로
+                # 거꾸로 받고 1차원을 넘겨서 시맨틱 경로가 항상 예외→fallback으로 빠졌음.
+                scores_2d, ids_2d = idx.search(q_emb.reshape(1, -1), 50)
+                vec_scores, vec_ids = scores_2d[0], ids_2d[0]
                 # chunk_ids → doc_id 매핑
                 if vec_ids is not None and len(vec_ids) > 0:
                     chunk_rows = (await db.execute(
@@ -854,8 +1122,10 @@ async def 실제_검색_실행(q: str, alpha: float, category, db: AsyncSession)
         return []
 
     # ── 7. RRF 융합 (Reciprocal Rank Fusion) ────────────────────────────────
+    # ③ 정본의 비대칭 k 채택: BM25 k=30(정확 매칭 rank 1 이점 강화), 벡터 k=60(표준).
+    # alpha 가중은 프론트 슬라이더(의미↔키워드 비중) 지원을 위해 유지 — ③ 정본에는
+    # 없는 백엔드 확장이며, alpha=0.5일 때 ③의 균등 합산과 같은 취지가 되도록 절반씩 배분.
     n = len(docs)
-    k = 60
 
     bm25_rank = {}
     if bm25_scores:
@@ -873,7 +1143,7 @@ async def 실제_검색_실행(q: str, alpha: float, category, db: AsyncSession)
             continue
         br  = bm25_rank.get(doc.id, n + 1)
         sr  = sem_rank.get(doc.id, n + 1)
-        rrf = (1 - alpha) / (k + br) + alpha / (k + sr)
+        rrf = (1 - alpha) / (_RRF_K_BM25 + br) + alpha / (_RRF_K_VEC + sr)
 
         full_text = doc_info[doc.id]["full_text"]
         # 시맨틱 매칭 청크를 우선 스니펫으로 사용 (한국어 쿼리 → 영어 문서 대응)
@@ -1048,6 +1318,7 @@ async def 메모_수정(
 async def 페이지_텍스트_수정(
     doc_id: int,
     page_num: int,
+    background_tasks: BackgroundTasks,
     text: str = Body(..., embed=True),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1079,6 +1350,11 @@ async def 페이지_텍스트_수정(
     if doc:
         doc.has_flagged = has_flagged
         await db.commit()
+
+    # 재인덱싱 — flagged 페이지는 검색 인덱싱에서 제외되므로(③ 정본 정책),
+    # 관리자가 텍스트를 수정해 플래그가 풀린 페이지는 여기서 다시 색인해야
+    # "수정한 내용이 검색에 잡힌다". (이걸 빼먹으면 수정해도 검색에 안 나옴)
+    background_tasks.add_task(_ingest_chunks_to_db, doc_id, parse_data.get("pages", []))
 
     return {"doc_id": doc_id, "page_num": page_num, "has_flagged": has_flagged}
 
@@ -1203,7 +1479,7 @@ async def ai_status():
     """Ollama 서버 가용 여부 및 Gemma 모델 확인."""
     import urllib.request, json as _json
     def _check():
-        req = urllib.request.Request("http://localhost:11434/api/tags")
+        req = urllib.request.Request(f"{OLLAMA_BASE_URL}/api/tags")
         with urllib.request.urlopen(req, timeout=2) as r:
             return _json.loads(r.read())
     try:
@@ -1237,7 +1513,7 @@ async def ai_ask(
             {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False}
         ).encode()
         req = urllib.request.Request(
-            "http://localhost:11434/api/generate",
+            f"{OLLAMA_BASE_URL}/api/generate",
             data=payload,
             headers={"Content-Type": "application/json"},
         )
@@ -1248,3 +1524,14 @@ async def ai_ask(
         return {"answer": data.get("response", ""), "model": data.get("model", OLLAMA_MODEL)}
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"AI 답변 생성 실패: {e}")
+
+
+# ── 프론트 정적 서빙 (배포용 통합 서빙) ──────────────────────────────────────
+# Dockerfile이 React 빌드 산출물(dist/)을 backend/static/에 복사해 넣는다.
+# 이 mount는 "파일 맨 끝"에 있어야 한다 — FastAPI는 등록 순서대로 매칭하므로
+# 위의 API 라우트들(/upload, /search, /admin/* 등)이 항상 먼저 잡히고,
+# 그 외 경로(/assets/*.js 등)만 정적 파일로 처리된다.
+# 로컬 개발처럼 static/ 폴더가 없으면 아무것도 하지 않는다 (기존 동작 유지).
+if os.path.isdir(_STATIC_DIR):
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="frontend")

@@ -1,7 +1,7 @@
 // UploadPage.jsx — 문서 업로드 화면
 // 드래그&드롭으로 PDF를 올리고 카테고리를 선택합니다
 
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { Upload, Select, Card, Typography, Space, Tag, Progress, List, Avatar, Modal, Button, Tooltip } from 'antd'
 import {
   InboxOutlined,
@@ -96,6 +96,72 @@ export default function UploadPage({ onNavigate }) {
   const updateFile = (id, patch) =>
     setFiles(prev => prev.map(f => f.id === id ? { ...f, ...patch } : f))
 
+  // 파싱 상태 폴링 — 업로드는 접수 즉시 응답하고(status='parsing'), 실제 파싱은
+  // 서버 백그라운드에서 진행되므로, 완료(success/failed)를 폴링으로 감지한다.
+  //
+  // [배치화 2026-07-06] 예전에는 파일마다 setInterval을 하나씩 만들어 각자
+  // /documents/{id}/status 를 2초마다 물었다. 동시 업로드가 많으면(예: 더미 49개)
+  // 폴링 요청이 그만큼 배로 늘어 SQLite 커넥션 풀을 순간적으로 고갈시켰다
+  // (실측 8,698회 요청 → QueuePool TimeoutError). 이제 "파싱 중인 docId 목록"을
+  // pendingRef 하나로 모아 전역 타이머 1개가 /documents/statuses?ids=... 를
+  // 한 번에 조회한다 — 동시 업로드 문서 수와 무관하게 폴링 요청은 2초에 1회뿐이다.
+  const pendingRef = useRef(new Map())   // docId -> { localId, startedAt }
+  const timerRef   = useRef(null)
+
+  const runBatchPoll = async () => {
+    const pending = pendingRef.current
+    if (pending.size === 0) {
+      clearInterval(timerRef.current)
+      timerRef.current = null
+      return
+    }
+
+    const now = Date.now()
+    // 안전장치: 30분 넘게 parsing 상태로 남아있는 문서는 더 이상 폴링하지 않는다
+    // (문서는 서버에서 계속 처리될 수 있으나, 화면 표시는 현재 상태를 그대로 둔다)
+    for (const [docId, info] of pending) {
+      if (now - info.startedAt > 30 * 60 * 1000) pending.delete(docId)
+    }
+    if (pending.size === 0) {
+      clearInterval(timerRef.current)
+      timerRef.current = null
+      return
+    }
+
+    const ids = [...pending.keys()].join(',')
+    try {
+      const r = await axios.get(`${API}/documents/statuses`, { params: { ids } })
+      const byId = new Map(r.data.map(d => [d.id, d]))
+      for (const docId of [...pending.keys()]) {
+        const info = pending.get(docId)
+        const doc  = byId.get(docId)
+        if (!doc) {
+          // 배치 응답에 없는 docId(삭제됨 등) — 무한 폴링 방지를 위해 제거
+          pending.delete(docId)
+          continue
+        }
+        if (doc.status !== 'parsing') {
+          updateFile(info.localId, {
+            status: doc.status,
+            pages:  doc.page_count ?? 0,
+            error:  doc.error,
+          })
+          pending.delete(docId)
+        }
+      }
+    } catch {
+      // 일시적 네트워크 오류는 무시하고 다음 주기에 다시 시도 (pending 유지)
+    }
+  }
+
+  // 폴링 대상에 문서를 추가하고, 전역 타이머가 없으면 시작한다
+  const addToPolling = (localId, docId) => {
+    pendingRef.current.set(docId, { localId, startedAt: Date.now() })
+    if (timerRef.current == null) {
+      timerRef.current = setInterval(runBatchPoll, 2000)
+    }
+  }
+
   // 개별 항목 제거 (완료된 항목만)
   const removeFile = (id) =>
     setFiles(prev => prev.filter(f => f.id !== id))
@@ -143,12 +209,19 @@ export default function UploadPage({ onNavigate }) {
         },
       })
       const data = res.data
-      updateFile(id, {
-        percent: 100,
-        status:  data.status,
-        pages:   data.pages?.length ?? 0,
-        error:   data.error,
-      })
+      if (data.status === 'parsing' && data.id != null) {
+        // 접수됨 — 전송 100%, 이제 서버 파싱 대기(폴링으로 완료 감지)
+        updateFile(id, { percent: 100, status: 'parsing', docId: data.id, error: null })
+        addToPolling(id, data.id)
+      } else {
+        // 검사 단계 즉시 실패(지원 안 함·크기 초과 등) 또는 그 외 응답
+        updateFile(id, {
+          percent: 100,
+          status:  data.status ?? 'failed',
+          pages:   data.pages?.length ?? 0,
+          error:   data.error,
+        })
+      }
     } catch {
       updateFile(id, { percent: 100, status: 'failed', error: '서버 연결 오류' })
     }
@@ -329,13 +402,14 @@ export default function UploadPage({ onNavigate }) {
                   avatar={
                     <Avatar
                       icon={
-                        f.status === 'uploading'  ? <LoadingOutlined /> :
+                        (f.status === 'uploading' || f.status === 'parsing') ? <LoadingOutlined /> :
                         f.status === 'success'    ? <CheckCircleOutlined /> :
                                                     <CloseCircleOutlined />
                       }
                       style={{
                         backgroundColor:
                           f.status === 'uploading' ? '#1677ff' :
+                          f.status === 'parsing'   ? '#fa8c16' :
                           f.status === 'success'   ? '#52c41a' : '#ff4d4f',
                       }}
                     />
@@ -372,6 +446,20 @@ export default function UploadPage({ onNavigate }) {
                         status="active"
                         style={{ marginBottom: 0, maxWidth: 400 }}
                       />
+                    ) : f.status === 'parsing' ? (
+                      <span style={{
+                        display: 'inline-block',
+                        padding: '1px 10px',
+                        borderRadius: 10,
+                        fontSize: 11,
+                        fontWeight: 600,
+                        background: '#fff7e6',
+                        color: '#d46b08',
+                        border: '1px solid #ffd591',
+                      }}>
+                        <LoadingOutlined style={{ marginRight: 5 }} />
+                        파싱 중… (대용량 문서는 시간이 걸릴 수 있습니다)
+                      </span>
                     ) : (
                       <span style={{
                         display: 'inline-block',

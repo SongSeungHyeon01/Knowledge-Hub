@@ -1,4 +1,4 @@
-﻿"""DOCX íŒŒì„œ â€” python-docx + embedded ì´ë¯¸ì§€ EasyOCR+img2table"""
+"""DOCX 파서 — python-docx + embedded 이미지 EasyOCR+img2table"""
 from docx import Document
 from docx.table import Table
 from docx.text.paragraph import Paragraph
@@ -40,7 +40,7 @@ def _doc_to_markdown(doc: Document) -> str:
                 else:
                     blocks.append(text)
 
-            # ë‹¨ë½ ë‚´ embedded ì´ë¯¸ì§€
+            # 단락 내 embedded 이미지
             for img_bytes in _get_para_images(child, doc.part):
                 md = extract_image_markdown(img_bytes)
                 if md:
