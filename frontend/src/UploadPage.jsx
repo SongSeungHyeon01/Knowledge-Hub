@@ -214,6 +214,8 @@ export default function UploadPage({ onNavigate }) {
     }
 
     const now = Date.now()
+    // 안전장치: 30분 넘게 parsing 상태로 남아있는 문서는 더 이상 폴링하지 않는다
+    // (문서는 서버에서 계속 처리될 수 있으나, 화면 표시는 현재 상태를 그대로 둔다)
     for (const [docId, info] of pending) {
       if (now - info.startedAt > 30 * 60 * 1000) pending.delete(docId)
     }
@@ -268,6 +270,7 @@ export default function UploadPage({ onNavigate }) {
     }
   }
 
+  // 폴링 대상에 문서를 추가하고, 전역 타이머가 없으면 시작한다
   const addToPolling = (localId, docId, filename) => {
     pendingRef.current.set(docId, { localId, filename, startedAt: Date.now() })
     if (timerRef.current == null) {
@@ -275,6 +278,7 @@ export default function UploadPage({ onNavigate }) {
     }
   }
 
+  // 개별 항목 제거 (완료된 항목만)
   const removeFile = (id) =>
     setFiles(prev => prev.filter(f => f.id !== id))
 
@@ -317,11 +321,13 @@ export default function UploadPage({ onNavigate }) {
       })
       const data = res.data
       if (data.status === 'parsing' && data.id != null) {
+        // 접수됨 — 전송 100%, 이제 서버 파싱 대기(폴링으로 완료 감지)
         updateFile(id, { percent: 100, status: 'parsing', docId: data.id, error: null })
         // 카테고리·특이사항 확인 팝업은 여기서 바로 띄우지 않는다 — AI 자동 분류가
         // 파싱 완료 후에야 가능해서, runBatchPoll이 분류 시도까지 끝난 걸 확인한 뒤 띄운다.
         addToPolling(id, data.id, file.name)
       } else {
+        // 검사 단계 즉시 실패(지원 안 함·크기 초과 등) 또는 그 외 응답
         updateFile(id, {
           percent: 100,
           status:  data.status ?? 'failed',

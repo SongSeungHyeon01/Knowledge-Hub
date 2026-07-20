@@ -782,7 +782,6 @@ def _tokenize_bm25(text: str, is_query: bool = False) -> list:
             result.append(s)
     return result
 
-
 # ── BM25 검색 캐시 ───────────────────────────────────────────────────────────
 # [수정] 예전엔 실제_검색_실행()이 검색할 때마다 매번 문서 본문을 디스크에서 다시 읽고
 # Kiwi로 처음부터 재토큰화해 BM25Okapi를 통째로 재구축했다 — 문서 20개 규모에서도
