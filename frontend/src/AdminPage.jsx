@@ -1,53 +1,60 @@
 // AdminPage.jsx — 관리자 화면
-// 문서 목록 조회, 저신뢰 문서 확인, 문서 삭제 기능을 담당합니다
+// 2026-07-11 목업 반영: 상단 Tabs → 좌측 서브메뉴(문서 목록·OCR 검토·검색 기록·카테고리 관리·대표 문서 지정)
+// + 우측 요약 통계 패널(전체 문서 수·실패 문서·OCR 검토 대기·최근 색인 완료·환경) 3단 레이아웃으로 재구성.
+// App.jsx가 이제 관리자를 최상위 탭으로 렌더링하므로(Drawer 아님), 이 파일은 독립 페이지로 동작한다.
+// 기존 기능(문서 CRUD·OCR 수정·CSV·일괄작업·트렌드 차트·검색기록)은 전부 유지 — 좌측 메뉴 아래로 재배치만 함.
+// "대표 문서 지정"은 목업에는 있으나 백엔드에 버전관리/대표문서 기능이 없어 플레이스홀더로만 표시.
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Table, Button, Tag, Tabs, message, Popconfirm, Typography, Row, Col, Statistic, Card as ACard, List, Drawer, Collapse, Spin, Alert, Input, Space, Select, Progress, Tooltip, Modal, Radio, Empty } from 'antd'
-import { DeleteOutlined, WarningOutlined, FileTextOutlined, HistoryOutlined, FileOutlined, SearchOutlined, ExclamationCircleOutlined, ReloadOutlined, SyncOutlined, EditOutlined, DownloadOutlined } from '@ant-design/icons'
+import {
+  Table, Button, Tag, message, Popconfirm, Typography, Row, Col, Statistic,
+  Card as ACard, List, Drawer, Collapse, Spin, Alert, Input, Space, Select,
+  Progress, Tooltip, Modal, Radio, Empty, Menu,
+} from 'antd'
+import {
+  DeleteOutlined, WarningOutlined, FileTextOutlined, HistoryOutlined, FileOutlined,
+  SearchOutlined, ExclamationCircleOutlined, ReloadOutlined, SyncOutlined, EditOutlined,
+  DownloadOutlined, FolderOutlined, StarOutlined, UnorderedListOutlined,
+  EyeOutlined, UserOutlined,
+} from '@ant-design/icons'
 import axios from 'axios'
 
-const { Title } = Typography
+const { Title, Text } = Typography
 
-// 백엔드 서버 주소 (FastAPI 서버가 켜진 주소)
 const API = import.meta.env.VITE_API_URL
 
 // ── API 호출 함수들 ───────────────────────────────────────────────────────────
-
-// 전체 문서 목록 가져오기
 const fetchDocuments = () => axios.get(`${API}/admin/documents`).then(r => r.data)
-
-// 저신뢰 문서 목록 가져오기
-const fetchFlagged = () => axios.get(`${API}/admin/flagged`).then(r => r.data)
-
-// 검색 기록 가져오기
-const fetchHistory = () => axios.get(`${API}/admin/history`).then(r => r.data)
-
-// 통계 가져오기
-const fetchStats = () => axios.get(`${API}/admin/stats`).then(r => r.data)
-
-// 업로드 트렌드 가져오기
-const fetchTrend = (period = 7) => axios.get(`${API}/admin/stats/trend`, { params: { period } }).then(r => r.data)
-
-// 문서 삭제하기 (id를 넘겨주면 해당 문서를 삭제)
+const fetchFlagged   = () => axios.get(`${API}/admin/flagged`).then(r => r.data)
+const fetchHistory   = () => axios.get(`${API}/admin/history`).then(r => r.data)
+const fetchStats     = () => axios.get(`${API}/admin/stats`).then(r => r.data)
+const fetchTrend     = (period = 7) => axios.get(`${API}/admin/stats/trend`, { params: { period } }).then(r => r.data)
 const deleteDocument = (id) => axios.delete(`${API}/admin/documents/${id}`)
 
-// ── 관리자 화면 컴포넌트 ──────────────────────────────────────────────────────
+const CAT_LABEL = { spec: '사양서', research: '연구자료', presentation: '발표자료', report: '보고서' }
+const CAT_COLOR = { spec: 'blue', research: 'purple', presentation: 'cyan', report: 'green' }
+// 카테고리 랜딩(태그 브라우징) 카드 전용 — 체크형 태그의 선택 상태 배경/글자색
+const CAT_ACCENT_HEX = { spec: '#4C6FFF', research: '#8456DB', presentation: '#0EA5B0', report: '#1E9E5A' }
+const CAT_SOFT_BG    = { spec: '#EEF1FF', research: '#F3EEFC', presentation: '#E6F8F9', report: '#E9F9EF' }
+const FILE_TYPE_COLOR = {
+  pdf: 'volcano', docx: 'geekblue', pptx: 'orange', ppt: 'orange',
+  xlsx: 'green', xls: 'green', hwp: 'purple', hwpx: 'purple',
+  txt: 'default', md: 'cyan', png: 'magenta', jpg: 'magenta', jpeg: 'magenta',
+}
 
 export default function AdminPage({ onNavigate }) {
-  // queryClient: 데이터를 다시 불러올 때 사용합니다 (삭제 후 목록 갱신 등)
   const queryClient = useQueryClient()
+
+  const [navKey, setNavKey] = useState('docs')  // docs | ocr | history | category | representative
 
   // 문서 상세 보기 Drawer 상태
   const [drawerOpen,    setDrawerOpen]    = useState(false)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailData,    setDetailData]    = useState(null)
 
-  // 메모 편집 상태
-  const [memoEdit,    setMemoEdit]    = useState(null)   // null = 보기 모드, string = 편집 중
+  const [memoEdit,    setMemoEdit]    = useState(null)
   const [memoSaving,  setMemoSaving]  = useState(false)
-
-  // 제목 편집 상태
   const [titleEdit,   setTitleEdit]   = useState(null)
   const [titleSaving, setTitleSaving] = useState(false)
 
@@ -84,18 +91,18 @@ export default function AdminPage({ onNavigate }) {
   }
 
   // OCR 수동 수정 모달 상태
-  const [ocrModal,     setOcrModal]     = useState(false)
-  const [ocrDoc,       setOcrDoc]       = useState(null)   // { id, filename, pages[] }
-  const [ocrEdits,     setOcrEdits]     = useState({})     // { page_num: text }
-  const [ocrSaving,    setOcrSaving]    = useState(false)
+  const [ocrModal,  setOcrModal]  = useState(false)
+  const [ocrDoc,    setOcrDoc]    = useState(null)
+  const [ocrEdits,  setOcrEdits]  = useState({})
+  const [ocrSaving, setOcrSaving] = useState(false)
 
   // 관리자 문서 목록 필터 상태
   const [filterText,     setFilterText]     = useState('')
   const [filterCategory, setFilterCategory] = useState(null)
   const [filterStatus,   setFilterStatus]   = useState(null)
   const [filterFileType, setFilterFileType] = useState(null)
+  const [catSearch,       setCatSearch]      = useState('')  // "카테고리로 찾아보기" 카드 전용 제목 검색
 
-  // 상대 시간 포맷 (방금 전 / N분 전 / N시간 전 / N일 전 / 날짜)
   const formatDate = (dateStr) => {
     if (!dateStr) return '—'
     const date = new Date(dateStr.replace(' ', 'T'))
@@ -107,7 +114,6 @@ export default function AdminPage({ onNavigate }) {
     return `${date.getFullYear()}.${String(date.getMonth()+1).padStart(2,'0')}.${String(date.getDate()).padStart(2,'0')}`
   }
 
-  // 자동 새로고침 (30초 간격)
   const [autoRefresh, setAutoRefresh] = useState(false)
   useEffect(() => {
     if (!autoRefresh) return
@@ -115,13 +121,11 @@ export default function AdminPage({ onNavigate }) {
     return () => clearInterval(id)
   }, [autoRefresh, queryClient])
 
-  // 전체 새로고침
   const refreshAll = () => {
     queryClient.invalidateQueries()
     message.success('새로고침 완료')
   }
 
-  // OCR 수정 모달 열기: 상세 정보 로드
   const openOcrEdit = async (doc) => {
     setOcrModal(true)
     setOcrDoc(null)
@@ -139,7 +143,6 @@ export default function AdminPage({ onNavigate }) {
     }
   }
 
-  // OCR 수정 저장
   const saveOcrEdit = async (pageNum) => {
     if (!ocrDoc) return
     setOcrSaving(true)
@@ -148,7 +151,6 @@ export default function AdminPage({ onNavigate }) {
         text: ocrEdits[pageNum] ?? '',
       })
       message.success(`${pageNum}페이지 저장 완료`)
-      // 해당 페이지를 목록에서 제거 (플래그 해제됨)
       setOcrDoc(prev => ({ ...prev, pages: prev.pages.filter(p => p.page_num !== pageNum) }))
       queryClient.invalidateQueries({ queryKey: ['flagged'] })
       queryClient.invalidateQueries({ queryKey: ['documents'] })
@@ -160,20 +162,12 @@ export default function AdminPage({ onNavigate }) {
     }
   }
 
-  // 문서 목록을 CSV 파일로 다운로드합니다
   const downloadCSV = () => {
     const header = ['ID', '파일명', '파일형식', '원본경로', '카테고리', '상태', '페이지수', 'OCR저신뢰', '업로드시각']
-    const CAT_KO = { spec: '사양서', research: '연구자료', presentation: '발표자료', report: '보고서' }
     const rows = filteredDocuments.map(d => [
-      d.id,
-      `"${d.filename}"`,
-      d.file_type ?? '',
-      `"${d.original_path ?? ''}"`,
-      CAT_KO[d.category] ?? d.category,
-      d.status === 'success' ? '성공' : '실패',
-      d.page_count,
-      d.has_flagged ? '검토필요' : '정상',
-      `"${d.uploaded_at}"`,
+      d.id, `"${d.filename}"`, d.file_type ?? '', `"${d.original_path ?? ''}"`,
+      CAT_LABEL[d.category] ?? d.category, d.status === 'success' ? '성공' : '실패',
+      d.page_count, d.has_flagged ? '검토필요' : '정상', `"${d.uploaded_at}"`,
     ])
     const csv = '﻿' + [header, ...rows].map(r => r.join(',')).join('\n')
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
@@ -185,13 +179,54 @@ export default function AdminPage({ onNavigate }) {
     URL.revokeObjectURL(url)
   }
 
+  const [permissions,  setPermissions]  = useState([])   // 이 문서의 읽기 권한 화이트리스트(비어있으면 전체 공개)
+  const [newPermEmail, setNewPermEmail] = useState('')
+  const [permSaving,   setPermSaving]   = useState(false)
+
+  const loadPermissions = async (docId) => {
+    try {
+      const res = await axios.get(`${API}/admin/documents/${docId}/permissions`)
+      setPermissions(res.data)
+    } catch {
+      setPermissions([])
+    }
+  }
+
+  const addPermission = async () => {
+    const email = newPermEmail.trim().toLowerCase()
+    if (!email || !detailData) return
+    setPermSaving(true)
+    try {
+      await axios.post(`${API}/admin/documents/${detailData.id}/permissions`, { email })
+      setNewPermEmail('')
+      await loadPermissions(detailData.id)
+    } catch {
+      message.error('권한 추가에 실패했습니다')
+    } finally {
+      setPermSaving(false)
+    }
+  }
+
+  const removePermission = async (email) => {
+    if (!detailData) return
+    try {
+      await axios.delete(`${API}/admin/documents/${detailData.id}/permissions`, { params: { email } })
+      setPermissions(prev => prev.filter(p => p.email !== email))
+    } catch {
+      message.error('권한 해제에 실패했습니다')
+    }
+  }
+
   const openDetail = async (doc) => {
     setDrawerOpen(true)
     setDetailLoading(true)
     setDetailData(null)
+    setPermissions([])
+    setNewPermEmail('')
     try {
       const res = await axios.get(`${API}/admin/documents/${doc.id}/detail`)
       setDetailData(res.data)
+      loadPermissions(doc.id)
     } catch {
       message.error('상세 데이터를 불러오지 못했습니다')
       setDrawerOpen(false)
@@ -200,58 +235,72 @@ export default function AdminPage({ onNavigate }) {
     }
   }
 
-  // 전체 문서 목록 데이터 가져오기
-  const { data: documents = [], isLoading: loadingDocs } = useQuery({
-    queryKey: ['documents'],
-    queryFn: fetchDocuments,
+  const { data: documents = [], isLoading: loadingDocs } = useQuery({ queryKey: ['documents'], queryFn: fetchDocuments })
+  const { data: flagged   = [], isLoading: loadingFlagged } = useQuery({ queryKey: ['flagged'],   queryFn: fetchFlagged })
+  const { data: history   = [], isLoading: loadingHistory } = useQuery({ queryKey: ['history'],   queryFn: fetchHistory })
+  const { data: stats } = useQuery({ queryKey: ['stats'], queryFn: fetchStats })
+
+  // 관리자 계정 관리 — .env 고정 관리자(env_admins, 삭제 불가) + 웹 화면에서 추가한 관리자(extra_admins)
+  const { data: adminEmails = { env_admins: [], extra_admins: [] }, isLoading: loadingAdmins } = useQuery({
+    queryKey: ['admin-emails'],
+    queryFn: () => axios.get(`${API}/admin/admin-emails`).then(r => r.data),
+  })
+  const [newAdminEmail, setNewAdminEmail] = useState('')
+  const addAdminMutation = useMutation({
+    mutationFn: (email) => axios.post(`${API}/admin/admin-emails`, { email }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin-emails'] })
+      setNewAdminEmail('')
+      message.success('관리자로 추가됐습니다')
+    },
+    onError: (e) => message.error(e?.response?.data?.detail || '추가 중 오류가 발생했습니다'),
+  })
+  const removeAdminMutation = useMutation({
+    mutationFn: (email) => axios.delete(`${API}/admin/admin-emails/${encodeURIComponent(email)}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin-emails'] })
+      message.success('관리자에서 제외됐습니다')
+    },
+    onError: (e) => message.error(e?.response?.data?.detail || '제외 중 오류가 발생했습니다'),
   })
 
-  // 저신뢰 문서 목록 데이터 가져오기
-  const { data: flagged = [], isLoading: loadingFlagged } = useQuery({
-    queryKey: ['flagged'],
-    queryFn: fetchFlagged,
-  })
+  // 고정 5종 + 실제로 문서에 쓰인(업로드 화면에서 클라이언트가 만든 것 포함) 카테고리 전부
+  const allCategoryOptions = useMemo(() => {
+    const fixed = Object.keys(CAT_LABEL)
+    const observed = new Set([
+      ...Object.keys(stats?.by_category ?? {}),
+      ...documents.map(d => d.category).filter(Boolean),
+    ])
+    const extra = [...observed].filter(c => !fixed.includes(c))
+    return [...fixed, ...extra].map(value => ({ value, label: CAT_LABEL[value] ?? value }))
+  }, [stats, documents])
 
-  // 검색 기록 데이터 가져오기
-  const { data: history = [], isLoading: loadingHistory } = useQuery({
-    queryKey: ['history'],
-    queryFn: fetchHistory,
-  })
-
-  // 통계 데이터 가져오기
-  const { data: stats } = useQuery({
-    queryKey: ['stats'],
-    queryFn: fetchStats,
-  })
-
-  // 트렌드 차트 기간 선택 (7/14/30일) — useQuery보다 반드시 먼저 선언
   const [trendPeriod, setTrendPeriod] = useState(7)
+  const { data: trend = [] } = useQuery({ queryKey: ['trend', trendPeriod], queryFn: () => fetchTrend(trendPeriod) })
 
-  // 업로드 트렌드 데이터 가져오기
-  const { data: trend = [] } = useQuery({
-    queryKey: ['trend', trendPeriod],
-    queryFn: () => fetchTrend(trendPeriod),
-  })
+  const [selectedRowKeys, setSelectedRowKeys] = useState([])
+  const [bulkCategory,    setBulkCategory]    = useState(null)
 
-  // 선택된 행 키 (일괄 작업용)
-  const [selectedRowKeys,  setSelectedRowKeys]  = useState([])
-  const [bulkCategory,     setBulkCategory]     = useState(null)
-
-  // 일괄 카테고리 변경 mutation
   const bulkCategoryMutation = useMutation({
-    mutationFn: ({ ids, category }) =>
-      axios.patch(`${API}/admin/documents/bulk-category`, { ids, category }),
-    onSuccess: (_, { ids, category }) => {
+    mutationFn: ({ ids, category }) => axios.patch(`${API}/admin/documents/bulk-category`, { ids, category }),
+    onSuccess: (_, { ids }) => {
       queryClient.invalidateQueries({ queryKey: ['documents'] })
       queryClient.invalidateQueries({ queryKey: ['stats'] })
-      setSelectedRowKeys([])
-      setBulkCategory(null)
+      setSelectedRowKeys([]); setBulkCategory(null)
       message.success(`${ids.length}개 문서의 카테고리가 변경됐습니다`)
     },
     onError: () => message.error('카테고리 변경 중 오류가 발생했습니다'),
   })
 
-  // 일괄 삭제 mutation
+  // 커스텀 카테고리 삭제 — 카테고리 자체가 별도 테이블이 아니라 문서의 category 문자열이므로,
+  // "삭제"는 그 카테고리를 쓰는 문서 전부를 "보고서"로 재분류하는 것으로 구현한다.
+  // 고정 4종(CAT_LABEL)은 지울 수 없고, 실제로 문서가 있는 커스텀 카테고리만 대상이다.
+  const deleteCategory = (cat) => {
+    const ids = documents.filter(d => d.category === cat).map(d => d.id)
+    if (ids.length === 0) return
+    bulkCategoryMutation.mutate({ ids, category: 'report' })
+  }
+
   const bulkDeleteMutation = useMutation({
     mutationFn: (ids) => axios.delete(`${API}/admin/documents/bulk`, { data: ids }),
     onSuccess: (_, ids) => {
@@ -264,10 +313,8 @@ export default function AdminPage({ onNavigate }) {
     onError: () => message.error('일괄 삭제 중 오류가 발생했습니다'),
   })
 
-  // 카테고리 변경 mutation
   const categoryMutation = useMutation({
-    mutationFn: ({ id, category }) =>
-      axios.patch(`${API}/admin/documents/${id}/category`, { category }),
+    mutationFn: ({ id, category }) => axios.patch(`${API}/admin/documents/${id}/category`, { category }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['documents'] })
       queryClient.invalidateQueries({ queryKey: ['stats'] })
@@ -276,7 +323,6 @@ export default function AdminPage({ onNavigate }) {
     onError: () => message.error('카테고리 변경 중 오류가 발생했습니다'),
   })
 
-  // 검색 기록 전체 초기화 mutation
   const clearHistoryMutation = useMutation({
     mutationFn: () => axios.delete(`${API}/admin/history`),
     onSuccess: () => {
@@ -287,7 +333,6 @@ export default function AdminPage({ onNavigate }) {
     onError: () => message.error('초기화 중 오류가 발생했습니다'),
   })
 
-  // 재시도 mutation — 파싱 실패 문서를 다시 파싱합니다
   const retryMutation = useMutation({
     mutationFn: (id) => axios.post(`${API}/admin/documents/${id}/retry`),
     onSuccess: () => {
@@ -296,293 +341,131 @@ export default function AdminPage({ onNavigate }) {
       queryClient.invalidateQueries({ queryKey: ['stats'] })
       message.success('재시도가 완료됐습니다')
     },
-    onError: (err) => {
-      const detail = err.response?.data?.detail ?? '재시도 중 오류가 발생했습니다'
-      message.error(detail)
-    },
+    onError: (err) => message.error(err.response?.data?.detail ?? '재시도 중 오류가 발생했습니다'),
   })
 
-  // 삭제 버튼 클릭 시 실행되는 함수
   const deleteMutation = useMutation({
     mutationFn: deleteDocument,
     onSuccess: () => {
-      // 삭제 성공하면 목록을 다시 불러옵니다
       queryClient.invalidateQueries({ queryKey: ['documents'] })
       queryClient.invalidateQueries({ queryKey: ['flagged'] })
       message.success('문서가 삭제됐습니다')
     },
-    onError: () => {
-      message.error('삭제 중 오류가 발생했습니다')
-    },
+    onError: () => message.error('삭제 중 오류가 발생했습니다'),
   })
 
-  // 카테고리 한국어 이름 매핑
-  const CATEGORY_LABEL = {
-    spec:         { text: '사양서',    color: 'blue'   },
-    research:     { text: '연구자료',  color: 'purple' },
-    presentation: { text: '발표자료',  color: 'cyan'   },
-    report:       { text: '보고서',    color: 'green'  },
-  }
-
-  // 파일 형식별 색상 (파일 유형 뱃지에 사용)
-  const FILE_TYPE_COLOR = {
-    pdf: 'volcano', docx: 'geekblue', pptx: 'orange', ppt: 'orange',
-    xlsx: 'green', xls: 'green', hwp: 'purple', hwpx: 'purple',
-    txt: 'default', md: 'cyan', png: 'magenta', jpg: 'magenta', jpeg: 'magenta',
-  }
-
-  // ── 전체 문서 테이블 컬럼 정의 ────────────────────────────────────────────
   const docColumns = [
-    {
-      title: 'ID',
-      dataIndex: 'id',
-      width: 60,
-    },
+    { title: 'ID', dataIndex: 'id', width: 60 },
     {
       title: '파일명 / 문서 제목',
       dataIndex: 'filename',
       sorter: (a, b) => a.filename.localeCompare(b.filename),
       render: (name, record) => (
         <span style={{ cursor: 'pointer' }} onClick={() => openDetail(record)}>
-          {/* 파일명 + 형식 태그 */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
             <FileTextOutlined style={{ color: '#1677ff', flexShrink: 0 }} />
             <Tooltip title={name}>
-              <Typography.Text
-                style={{ color: '#1677ff', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block', verticalAlign: 'bottom' }}
-              >
+              <Text style={{ color: '#1677ff', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block', verticalAlign: 'bottom' }}>
                 {name}
-              </Typography.Text>
+              </Text>
             </Tooltip>
-            {record.file_type && (
-              <Tag color={FILE_TYPE_COLOR[record.file_type] ?? 'default'} style={{ fontSize: 11, margin: 0 }}>
-                {record.file_type.toUpperCase()}
-              </Tag>
-            )}
+            {record.file_type && <Tag color={FILE_TYPE_COLOR[record.file_type] ?? 'default'} style={{ fontSize: 11, margin: 0 }}>{record.file_type.toUpperCase()}</Tag>}
           </div>
-
-          {/* 자동 추출 제목 */}
           {record.title && record.title !== name && (
             <Tooltip title="파싱에서 자동 추출된 문서 제목">
-              <Typography.Text
-                type="secondary"
-                style={{ fontSize: 11, display: 'block', marginTop: 2, fontStyle: 'italic' }}
-                ellipsis
-              >
-                📄 {record.title}
-              </Typography.Text>
+              <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 2, fontStyle: 'italic' }} ellipsis>{record.title}</Text>
             </Tooltip>
           )}
-
-          {/* 폴더 업로드 원본 경로 */}
           {record.original_path && (
-            <Typography.Text
-              type="secondary"
-              style={{ fontSize: 11, display: 'block', marginTop: 1 }}
-              title={record.original_path}
-            >
-              📁 {record.original_path}
-            </Typography.Text>
+            <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 1 }} title={record.original_path}>{record.original_path}</Text>
           )}
         </span>
       ),
     },
     {
-      title: '카테고리',
-      dataIndex: 'category',
-      width: 130,
+      title: '카테고리', dataIndex: 'category', width: 130,
       render: (cat, record) => (
         <Select
-          value={cat}
-          size="small"
-          style={{ width: 110 }}
+          value={cat} size="small" style={{ width: 110 }}
           onChange={(val) => categoryMutation.mutate({ id: record.id, category: val })}
-          options={[
-            { value: 'spec',         label: '사양서' },
-            { value: 'research',     label: '연구자료' },
-            { value: 'presentation', label: '발표자료' },
-            { value: 'report',       label: '보고서' },
-          ]}
+          options={allCategoryOptions}
         />
       ),
     },
     {
-      title: '상태',
-      dataIndex: 'status',
-      width: 90,
-      render: (status) => (
-        <Tag color={status === 'success' ? 'green' : 'red'}>
-          {status === 'success' ? '성공' : '실패'}
-        </Tag>
-      ),
+      title: '상태', dataIndex: 'status', width: 90,
+      render: (status) => <Tag color={status === 'success' ? 'green' : 'red'}>{status === 'success' ? '성공' : '실패'}</Tag>,
+    },
+    { title: '페이지', dataIndex: 'page_count', width: 80, align: 'center', sorter: (a, b) => a.page_count - b.page_count },
+    {
+      title: '조회수', dataIndex: 'view_count', width: 80, align: 'center',
+      sorter: (a, b) => (a.view_count ?? 0) - (b.view_count ?? 0),
+      render: (v) => <Text type="secondary"><EyeOutlined style={{ marginRight: 4 }} />{v ?? 0}</Text>,
     },
     {
-      title: '페이지',
-      dataIndex: 'page_count',
-      width: 80,
-      align: 'center',
-      sorter: (a, b) => a.page_count - b.page_count,
+      title: '담당자', dataIndex: 'uploaded_by', width: 130,
+      render: (v, record) => v && v !== 'anonymous'
+        ? <Tooltip title={v}><Text ellipsis style={{ maxWidth: 110, display: 'inline-block', verticalAlign: 'bottom' }}><UserOutlined style={{ marginRight: 4 }} />{record.uploaded_by_name ?? v}</Text></Tooltip>
+        : <Text type="secondary">—</Text>,
     },
     {
-      title: 'OCR 저신뢰',
-      dataIndex: 'has_flagged',
-      width: 110,
-      align: 'center',
-      render: (flagged) =>
-        flagged
-          ? <Tag color="orange" icon={<WarningOutlined />}>검토 필요</Tag>
-          : <Tag color="default">정상</Tag>,
+      title: 'OCR 저신뢰', dataIndex: 'has_flagged', width: 110, align: 'center',
+      render: (f) => f ? <Tag color="orange" icon={<WarningOutlined />}>검토 필요</Tag> : <Tag color="default">정상</Tag>,
     },
     {
-      title: '업로드 시각',
-      dataIndex: 'uploaded_at',
-      width: 120,
-      defaultSortOrder: 'descend',
+      title: '업로드 시각', dataIndex: 'uploaded_at', width: 120, defaultSortOrder: 'descend',
       sorter: (a, b) => new Date(a.uploaded_at) - new Date(b.uploaded_at),
-      render: (d) => (
-        <Tooltip title={d}>
-          <span style={{ cursor: 'default' }}>{formatDate(d)}</span>
-        </Tooltip>
-      ),
-    },
-    {
-      title: '삭제',
-      width: 80,
-      align: 'center',
-      render: (_, record) => (
-        // Popconfirm: 실수로 삭제하지 않도록 "정말 삭제할까요?" 확인창을 띄웁니다
-        <Popconfirm
-          title="정말 삭제할까요?"
-          okText="삭제"
-          cancelText="취소"
-          onConfirm={() => deleteMutation.mutate(record.id)}
-        >
-          <Button danger icon={<DeleteOutlined />} size="small" />
-        </Popconfirm>
-      ),
-    },
-    {
-      title: '재시도',
-      width: 80,
-      align: 'center',
-      render: (_, record) =>
-        record.status === 'failed' ? (
-          <Popconfirm
-            title="파싱을 다시 시도할까요?"
-            okText="재시도"
-            cancelText="취소"
-            onConfirm={() => retryMutation.mutate(record.id)}
-          >
-            <Button
-              icon={<ReloadOutlined />}
-              size="small"
-              loading={retryMutation.isPending && retryMutation.variables === record.id}
-            >
-              재시도
-            </Button>
-          </Popconfirm>
-        ) : null,
-    },
-    {
-      title: '상세',
-      width: 70,
-      align: 'center',
-      render: (_, record) => (
-        <Button size="small" onClick={() => openDetail(record)}>보기</Button>
-      ),
-    },
-  ]
-
-  // ── 저신뢰 문서 테이블 컬럼 정의 ─────────────────────────────────────────
-  const flaggedColumns = [
-    { title: 'ID', dataIndex: 'id', width: 60 },
-    {
-      title: '파일명',
-      dataIndex: 'filename',
-      render: (name) => (
-        <span><WarningOutlined style={{ color: 'orange', marginRight: 6 }} />{name}</span>
-      ),
-    },
-    { title: '페이지 수', dataIndex: 'page_count', width: 100, align: 'center' },
-    {
-      title: '업로드 시각',
-      dataIndex: 'uploaded_at',
       render: (d) => <Tooltip title={d}><span>{formatDate(d)}</span></Tooltip>,
     },
     {
-      title: 'OCR 수정',
-      width: 90,
-      align: 'center',
+      title: '삭제', width: 80, align: 'center',
       render: (_, record) => (
-        <Button
-          icon={<EditOutlined />}
-          size="small"
-          type="primary"
-          ghost
-          onClick={() => openOcrEdit(record)}
-        >
-          수정
-        </Button>
+        <Popconfirm title="정말 삭제할까요?" okText="삭제" cancelText="취소" onConfirm={() => deleteMutation.mutate(record.id)}>
+          <Button danger icon={<DeleteOutlined />} size="small" />
+        </Popconfirm>
       ),
     },
     {
-      title: '삭제',
-      width: 80,
-      align: 'center',
-      render: (_, record) => (
-        <Popconfirm
-          title="정말 삭제할까요?"
-          okText="삭제"
-          cancelText="취소"
-          onConfirm={() => deleteMutation.mutate(record.id)}
-        >
+      title: '재시도', width: 80, align: 'center',
+      render: (_, record) => record.status === 'failed' ? (
+        <Popconfirm title="파싱을 다시 시도할까요?" okText="재시도" cancelText="취소" onConfirm={() => retryMutation.mutate(record.id)}>
+          <Button icon={<ReloadOutlined />} size="small" loading={retryMutation.isPending && retryMutation.variables === record.id}>재시도</Button>
+        </Popconfirm>
+      ) : null,
+    },
+    { title: '상세', width: 70, align: 'center', render: (_, record) => <Button size="small" onClick={() => openDetail(record)}>보기</Button> },
+  ]
+
+  const flaggedColumns = [
+    { title: 'ID', dataIndex: 'id', width: 60 },
+    { title: '파일명', dataIndex: 'filename', render: (n) => <span><WarningOutlined style={{ color: 'orange', marginRight: 6 }} />{n}</span> },
+    { title: '페이지 수', dataIndex: 'page_count', width: 100, align: 'center' },
+    { title: '업로드 시각', dataIndex: 'uploaded_at', render: (d) => <Tooltip title={d}><span>{formatDate(d)}</span></Tooltip> },
+    { title: 'OCR 수정', width: 90, align: 'center', render: (_, r) => <Button icon={<EditOutlined />} size="small" type="primary" ghost onClick={() => openOcrEdit(r)}>수정</Button> },
+    {
+      title: '삭제', width: 80, align: 'center',
+      render: (_, r) => (
+        <Popconfirm title="정말 삭제할까요?" okText="삭제" cancelText="취소" onConfirm={() => deleteMutation.mutate(r.id)}>
           <Button danger icon={<DeleteOutlined />} size="small" />
         </Popconfirm>
       ),
     },
   ]
 
-  // 검색 로그 테이블 컬럼
   const historyColumns = [
     { title: 'ID', dataIndex: 'id', width: 60 },
     { title: '검색어', dataIndex: 'query', render: (q) => <Tag color="blue">{q}</Tag> },
-    {
-      title: '검색 방식',
-      dataIndex: 'alpha',
-      width: 160,
-      render: (a) => (
-        <span>의미 {Math.round(a * 100)}% · 키워드 {Math.round((1 - a) * 100)}%</span>
-      ),
-    },
+    { title: '검색 방식', dataIndex: 'alpha', width: 160, render: (a) => <span>의미 {Math.round(a * 100)}% · 키워드 {Math.round((1 - a) * 100)}%</span> },
     { title: '결과 수', dataIndex: 'result_count', width: 90, align: 'center' },
+    { title: '검색 시각', dataIndex: 'searched_at', render: (d) => <Tooltip title={d}><span>{formatDate(d)}</span></Tooltip> },
     {
-      title: '검색 시각',
-      dataIndex: 'searched_at',
-      render: (d) => <Tooltip title={d}><span>{formatDate(d)}</span></Tooltip>,
-    },
-    {
-      title: '재검색',
-      width: 80,
-      align: 'center',
-      render: (_, record) => (
-        <Button
-          size="small"
-          icon={<SearchOutlined />}
-          onClick={() => {
-            localStorage.setItem('km_launch_query', record.query)
-            onNavigate?.('search')
-          }}
-        >
-          검색
-        </Button>
+      title: '재검색', width: 80, align: 'center',
+      render: (_, r) => (
+        <Button size="small" icon={<SearchOutlined />} onClick={() => { localStorage.setItem('km_launch_query', r.query); onNavigate?.('search') }}>검색</Button>
       ),
     },
   ]
 
-  const CAT_LABEL = { spec: '사양서', research: '연구자료', presentation: '발표자료', report: '보고서' }
-  const CAT_COLOR = { spec: 'blue', research: 'purple', presentation: 'cyan', report: 'green' }
-
-  // 필터가 적용된 문서 목록 — tabs보다 반드시 먼저 선언해야 합니다
   const filteredDocuments = documents.filter(doc => {
     if (filterText     && !doc.filename.toLowerCase().includes(filterText.toLowerCase())) return false
     if (filterCategory && doc.category  !== filterCategory) return false
@@ -591,219 +474,30 @@ export default function AdminPage({ onNavigate }) {
     return true
   })
 
-  // ── 탭 구성 (전체 문서 / OCR 검토 필요 / 검색 기록) ─────────────────────
-  const tabs = [
-    {
-      key: 'all',
-      label: `전체 문서 (${documents.length})`,
-      children: (
-        <>
-          {/* 필터 바 */}
-          <ACard size="small" style={{ marginBottom: 12 }}>
-            <Space wrap>
-              <Input
-                placeholder="파일명 검색"
-                prefix={<SearchOutlined style={{ color: '#aaa' }} />}
-                value={filterText}
-                onChange={e => setFilterText(e.target.value)}
-                allowClear
-                style={{ width: 220 }}
-              />
-              <Select
-                placeholder="카테고리"
-                value={filterCategory}
-                onChange={setFilterCategory}
-                allowClear
-                style={{ width: 130 }}
-                options={[
-                  { value: 'spec',         label: '사양서' },
-                  { value: 'research',     label: '연구자료' },
-                  { value: 'presentation', label: '발표자료' },
-                  { value: 'report',       label: '보고서' },
-                ]}
-              />
-              <Select
-                placeholder="상태"
-                value={filterStatus}
-                onChange={setFilterStatus}
-                allowClear
-                style={{ width: 100 }}
-                options={[
-                  { value: 'success', label: '성공' },
-                  { value: 'failed',  label: '실패' },
-                ]}
-              />
-              <Select
-                placeholder="파일 형식"
-                value={filterFileType}
-                onChange={setFilterFileType}
-                allowClear
-                style={{ width: 120 }}
-                options={['pdf','docx','pptx','xlsx','hwp','hwpx','txt','md','png','jpg'].map(ft => ({
-                  value: ft, label: ft.toUpperCase(),
-                }))}
-              />
-              {(filterText || filterCategory || filterStatus || filterFileType) && (
-                <Button
-                  size="small"
-                  onClick={() => { setFilterText(''); setFilterCategory(null); setFilterStatus(null); setFilterFileType(null) }}
-                >
-                  필터 초기화
-                </Button>
-              )}
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                {filteredDocuments.length}/{documents.length}건
-              </Typography.Text>
-              <Button size="small" onClick={downloadCSV} disabled={filteredDocuments.length === 0}>
-                CSV 내보내기
-              </Button>
-            </Space>
-          </ACard>
-          {selectedRowKeys.length > 0 && (
-            <div style={{
-              marginBottom: 8,
-              padding: '8px 12px',
-              background: '#e6f4ff',
-              borderRadius: 6,
-              display: 'flex',
-              alignItems: 'center',
-              flexWrap: 'wrap',
-              gap: 8,
-            }}>
-              <Typography.Text strong style={{ color: '#1677ff' }}>
-                {selectedRowKeys.length}개 선택됨
-              </Typography.Text>
+  const failedPct = stats?.total_documents ? Math.round((stats.failed_count / stats.total_documents) * 1000) / 10 : 0
+  const mostRecentDoc = [...documents].sort((a, b) => new Date(b.uploaded_at) - new Date(a.uploaded_at))[0]
 
-              {/* 카테고리 일괄 변경 */}
-              <Select
-                placeholder="카테고리 선택"
-                value={bulkCategory}
-                onChange={setBulkCategory}
-                allowClear
-                style={{ width: 130 }}
-                options={[
-                  { value: 'spec',         label: '사양서' },
-                  { value: 'research',     label: '연구자료' },
-                  { value: 'presentation', label: '발표자료' },
-                  { value: 'report',       label: '보고서' },
-                ]}
-              />
-              <Popconfirm
-                title={`선택한 ${selectedRowKeys.length}개 문서의 카테고리를 "${
-                  { spec:'사양서', research:'연구자료', presentation:'발표자료', report:'보고서' }[bulkCategory]
-                }"(으)로 변경할까요?`}
-                okText="변경"
-                cancelText="취소"
-                disabled={!bulkCategory}
-                onConfirm={() => bulkCategoryMutation.mutate({ ids: selectedRowKeys, category: bulkCategory })}
-              >
-                <Button
-                  disabled={!bulkCategory}
-                  loading={bulkCategoryMutation.isPending}
-                >
-                  카테고리 일괄 변경
-                </Button>
-              </Popconfirm>
-
-              <div style={{ width: 1, height: 20, background: '#d0e8ff', margin: '0 4px' }} />
-
-              {/* 일괄 삭제 */}
-              <Popconfirm
-                title={`선택한 ${selectedRowKeys.length}개 문서를 모두 삭제할까요?`}
-                okText="삭제"
-                cancelText="취소"
-                onConfirm={() => bulkDeleteMutation.mutate(selectedRowKeys)}
-              >
-                <Button danger icon={<DeleteOutlined />} loading={bulkDeleteMutation.isPending}>
-                  선택 삭제
-                </Button>
-              </Popconfirm>
-
-              <Button onClick={() => { setSelectedRowKeys([]); setBulkCategory(null) }}>
-                선택 해제
-              </Button>
-            </div>
-          )}
-          <Table
-            columns={docColumns}
-            dataSource={filteredDocuments}
-            rowKey="id"
-            loading={loadingDocs}
-            pagination={{ pageSize: 10 }}
-            scroll={{ x: 960 }}
-            rowSelection={{
-              selectedRowKeys,
-              onChange: setSelectedRowKeys,
-            }}
-          />
-        </>
-      ),
-    },
-    {
-      key: 'flagged',
-      label: (
-        <span>
-          <WarningOutlined style={{ color: 'orange' }} />
-          OCR 검토 필요 ({flagged.length})
-        </span>
-      ),
-      children: (
-        <Table
-          columns={flaggedColumns}
-          dataSource={flagged}
-          rowKey="id"
-          loading={loadingFlagged}
-          pagination={{ pageSize: 10 }}
-        />
-      ),
-    },
-    {
-      key: 'history',
-      label: (
-        <span>
-          <HistoryOutlined />
-          검색 기록 ({history.length})
-        </span>
-      ),
-      children: (
-        <>
-          {history.length > 0 && (
-            <div style={{ marginBottom: 12 }}>
-              <Popconfirm
-                title="검색 기록을 모두 삭제할까요?"
-                okText="초기화"
-                cancelText="취소"
-                onConfirm={() => clearHistoryMutation.mutate()}
-              >
-                <Button danger loading={clearHistoryMutation.isPending}>
-                  전체 초기화
-                </Button>
-              </Popconfirm>
-            </div>
-          )}
-          <Table
-            columns={historyColumns}
-            dataSource={history}
-            rowKey="id"
-            loading={loadingHistory}
-            pagination={{ pageSize: 20 }}
-          />
-        </>
-      ),
-    },
+  const leftMenuItems = [
+    { key: 'docs',           icon: <UnorderedListOutlined />, label: '문서 목록' },
+    { key: 'ocr',            icon: <WarningOutlined />,       label: `OCR 검토 (${flagged.length})` },
+    { key: 'history',        icon: <HistoryOutlined />,       label: '검색 기록' },
+    { key: 'category',       icon: <FolderOutlined />,        label: '카테고리 관리' },
+    { key: 'representative', icon: <StarOutlined />,          label: '대표 문서 지정' },
+    { key: 'admins',         icon: <UserOutlined />,          label: '관리자 계정' },
   ]
 
+  const NAV_TITLE = {
+    docs: '문서 목록', ocr: 'OCR 검토', history: '검색 기록',
+    category: '카테고리 관리', representative: '대표 문서 지정', admins: '관리자 계정',
+  }
+
   return (
-    <div style={{ padding: 32, maxWidth: 1200, margin: '0 auto' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24 }}>
-        <Title level={2} style={{ margin: 0 }}>관리자 대시보드</Title>
+    <div style={{ maxWidth: 1400, margin: '0 auto', padding: '24px 24px 40px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 22 }}>
+        <Title level={2} style={{ margin: 0 }}>관리자 · {NAV_TITLE[navKey]}</Title>
         <Space>
           <Tooltip title="30초마다 자동으로 데이터를 갱신합니다">
-            <Button
-              icon={<SyncOutlined spin={autoRefresh} />}
-              type={autoRefresh ? 'primary' : 'default'}
-              onClick={() => setAutoRefresh(v => !v)}
-            >
+            <Button icon={<SyncOutlined spin={autoRefresh} />} type={autoRefresh ? 'primary' : 'default'} onClick={() => setAutoRefresh(v => !v)}>
               {autoRefresh ? '자동 갱신 ON' : '자동 갱신'}
             </Button>
           </Tooltip>
@@ -811,352 +505,370 @@ export default function AdminPage({ onNavigate }) {
         </Space>
       </div>
 
-      {/* ── 문서 0건 온보딩 안내 ────────────────────────────────── */}
-      {stats && stats.total_documents === 0 && (
-        <div style={{ textAlign: 'center', padding: '40px 0', marginBottom: 24 }}>
-          <Empty description={
-            <span>
-              아직 업로드된 문서가 없습니다<br />
-              <Typography.Text type="secondary" style={{ fontSize: 13 }}>
-                첫 문서를 올리면 여기에 통계가 표시됩니다
-              </Typography.Text>
-            </span>
-          }>
-            <Button type="primary" onClick={() => onNavigate?.('upload')}>
-              문서 업로드 시작하기
-            </Button>
-          </Empty>
-        </div>
-      )}
+      <Row gutter={20} wrap={false}>
+        {/* ── 좌측 서브메뉴 (스크롤해도 화면에 고정) ───────────────── */}
+        {/* marginTop: 제목("관리자 · ...")과 나란히 붙지 않도록 아래로 내림 — UploadPage 좌측 사이드바와 동일 값 */}
+        <Col flex="200px" style={{ position: 'sticky', top: 80, alignSelf: 'flex-start', marginTop: 80 }}>
+          <Menu mode="inline" selectedKeys={[navKey]} onClick={(e) => setNavKey(e.key)} items={leftMenuItems} style={{ border: '1px solid #eef0f2', borderRadius: 8 }} />
+        </Col>
 
-      {/* ── 통계 카드 ───────────────────────────────────────────── */}
-      {stats && stats.total_documents > 0 && (
-        <>
-          <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
-            {[
-              {
-                title: '전체 문서',
-                value: stats.total_documents,
-                icon: <FileOutlined style={{ fontSize: 22, color: '#1677ff' }} />,
-                accent: '#1677ff',
-                bg: '#e6f4ff',
-              },
-              {
-                title: 'OCR 검토 필요',
-                value: stats.flagged_count,
-                icon: <ExclamationCircleOutlined style={{ fontSize: 22, color: stats.flagged_count > 0 ? '#fa8c16' : '#52c41a' }} />,
-                accent: stats.flagged_count > 0 ? '#fa8c16' : '#52c41a',
-                bg: stats.flagged_count > 0 ? '#fff7e6' : '#f6ffed',
-                valueStyle: { color: stats.flagged_count > 0 ? '#fa8c16' : '#52c41a' },
-              },
-              {
-                title: '파싱 실패',
-                value: stats.failed_count,
-                icon: <WarningOutlined style={{ fontSize: 22, color: stats.failed_count > 0 ? '#ff4d4f' : '#52c41a' }} />,
-                accent: stats.failed_count > 0 ? '#ff4d4f' : '#52c41a',
-                bg: stats.failed_count > 0 ? '#fff1f0' : '#f6ffed',
-                valueStyle: { color: stats.failed_count > 0 ? '#ff4d4f' : '#52c41a' },
-              },
-              {
-                title: '총 검색 횟수',
-                value: stats.total_searches,
-                icon: <SearchOutlined style={{ fontSize: 22, color: '#722ed1' }} />,
-                accent: '#722ed1',
-                bg: '#f9f0ff',
-              },
-            ].map(({ title, value, icon, accent, bg, valueStyle }) => (
-              <Col span={6} key={title}>
-                <ACard
-                  style={{
-                    borderTop: `3px solid ${accent}`,
-                    borderRadius: 8,
-                    background: bg,
-                  }}
-                  bodyStyle={{ padding: '16px 20px' }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <Statistic
-                      title={<span style={{ fontSize: 13, color: '#666' }}>{title}</span>}
-                      value={value}
-                      valueStyle={{ fontSize: 28, fontWeight: 700, ...(valueStyle ?? {}) }}
-                    />
-                    <div style={{
-                      width: 48, height: 48,
-                      borderRadius: '50%',
-                      background: '#fff',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
-                      flexShrink: 0,
-                    }}>
-                      {icon}
-                    </div>
-                  </div>
-                </ACard>
-              </Col>
-            ))}
-          </Row>
+        {/* ── 중앙 콘텐츠 ───────────────────────────────────────── */}
+        {/* minWidth: 0 — flex 아이템의 기본 최소폭(content의 min-content 크기)을 해제.
+            안 넣으면 넓은 테이블(문서 목록) 때문에 이 Col이 줄어들지 못하고 3열 Row 전체가
+            줄바꿈되어(사이드바 아래로 콘텐츠가 통째로 떨어짐) 표시됨. */}
+        <Col flex="auto" style={{ minWidth: 0 }}>
+          {stats && stats.total_documents === 0 && (
+            <div style={{ textAlign: 'center', padding: '40px 0' }}>
+              <Empty description={<span>아직 업로드된 문서가 없습니다<br /><Text type="secondary" style={{ fontSize: 13 }}>첫 문서를 올리면 여기에 통계가 표시됩니다</Text></span>}>
+                <Button type="primary" onClick={() => onNavigate?.('upload')}>문서 업로드 시작하기</Button>
+              </Empty>
+            </div>
+          )}
 
-          {/* 카테고리별 분포 + 파일 형식 분포 + 인기 검색어 */}
-          <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
-            <Col span={8}>
-              <ACard title="카테고리별 문서 수" size="small">
-                {Object.entries(stats.by_category).length === 0
-                  ? <Typography.Text type="secondary">업로드된 문서 없음</Typography.Text>
-                  : Object.entries(stats.by_category).map(([cat, cnt]) => {
-                    const pct = stats.total_documents > 0
-                      ? Math.round((cnt / stats.total_documents) * 100)
-                      : 0
-                    return (
-                      <div key={cat} style={{ marginBottom: 10 }}>
-                        <Row justify="space-between" style={{ marginBottom: 2 }}>
-                          <Col>
-                            <Tag color={CAT_COLOR[cat]} style={{ marginRight: 0 }}>
-                              {CAT_LABEL[cat] ?? cat}
-                            </Tag>
-                          </Col>
-                          <Col>
-                            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                              {cnt}건 ({pct}%)
-                            </Typography.Text>
-                          </Col>
-                        </Row>
-                        <Progress
-                          percent={pct}
-                          showInfo={false}
-                          strokeColor={
-                            { spec: '#1677ff', research: '#722ed1', presentation: '#13c2c2', report: '#52c41a' }[cat]
-                          }
-                          size="small"
-                        />
-                      </div>
-                    )
-                  })
-                }
+          {navKey === 'docs' && (
+            <>
+              <ACard size="small" style={{ marginBottom: 18 }}>
+                <Space wrap size={10}>
+                  <Input placeholder="파일명 검색" prefix={<SearchOutlined style={{ color: '#aaa' }} />} value={filterText} onChange={e => setFilterText(e.target.value)} allowClear style={{ width: 220 }} />
+                  <Select placeholder="카테고리" value={filterCategory} onChange={setFilterCategory} allowClear style={{ width: 130 }} options={allCategoryOptions} />
+                  <Select placeholder="상태" value={filterStatus} onChange={setFilterStatus} allowClear style={{ width: 100 }} options={[{ value: 'success', label: '성공' }, { value: 'failed', label: '실패' }]} />
+                  <Select placeholder="파일 형식" value={filterFileType} onChange={setFilterFileType} allowClear style={{ width: 120 }} options={['pdf','docx','pptx','xlsx','hwp','hwpx','txt','md','png','jpg'].map(ft => ({ value: ft, label: ft.toUpperCase() }))} />
+                  {(filterText || filterCategory || filterStatus || filterFileType) && (
+                    <Button size="small" onClick={() => { setFilterText(''); setFilterCategory(null); setFilterStatus(null); setFilterFileType(null) }}>필터 초기화</Button>
+                  )}
+                  <Text type="secondary" style={{ fontSize: 12 }}>{filteredDocuments.length}/{documents.length}건</Text>
+                  <Button size="small" onClick={downloadCSV} disabled={filteredDocuments.length === 0}>CSV 내보내기</Button>
+                </Space>
               </ACard>
-            </Col>
-            <Col span={8}>
-              <ACard title="파일 형식별 문서 수" size="small">
-                {!stats.by_file_type || Object.entries(stats.by_file_type).length === 0
-                  ? <Typography.Text type="secondary">업로드된 문서 없음</Typography.Text>
-                  : Object.entries(stats.by_file_type)
-                      .sort((a, b) => b[1] - a[1])
-                      .map(([ft, cnt]) => {
-                        const pct = stats.total_documents > 0
-                          ? Math.round((cnt / stats.total_documents) * 100) : 0
+
+              {selectedRowKeys.length > 0 && (
+                <div style={{ marginBottom: 16, padding: '10px 14px', background: '#e6f4ff', borderRadius: 6, display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
+                  <Text strong style={{ color: '#1677ff' }}>{selectedRowKeys.length}개 선택됨</Text>
+                  <Select placeholder="카테고리 선택" value={bulkCategory} onChange={setBulkCategory} allowClear style={{ width: 130 }} options={allCategoryOptions} />
+                  <Popconfirm
+                    title={`선택한 ${selectedRowKeys.length}개 문서의 카테고리를 "${CAT_LABEL[bulkCategory]}"(으)로 변경할까요?`}
+                    okText="변경" cancelText="취소" disabled={!bulkCategory}
+                    onConfirm={() => bulkCategoryMutation.mutate({ ids: selectedRowKeys, category: bulkCategory })}
+                  >
+                    <Button disabled={!bulkCategory} loading={bulkCategoryMutation.isPending}>카테고리 일괄 변경</Button>
+                  </Popconfirm>
+                  <div style={{ width: 1, height: 20, background: '#d0e8ff', margin: '0 4px' }} />
+                  <Popconfirm title={`선택한 ${selectedRowKeys.length}개 문서를 모두 삭제할까요?`} okText="삭제" cancelText="취소" onConfirm={() => bulkDeleteMutation.mutate(selectedRowKeys)}>
+                    <Button danger icon={<DeleteOutlined />} loading={bulkDeleteMutation.isPending}>선택 삭제</Button>
+                  </Popconfirm>
+                  <Button onClick={() => { setSelectedRowKeys([]); setBulkCategory(null) }}>선택 해제</Button>
+                </div>
+              )}
+
+              <Table
+                columns={docColumns} dataSource={filteredDocuments} rowKey="id" loading={loadingDocs}
+                pagination={{ pageSize: 10 }} scroll={{ x: 960 }}
+                rowSelection={{ selectedRowKeys, onChange: setSelectedRowKeys }}
+              />
+            </>
+          )}
+
+          {navKey === 'ocr' && (
+            <Table columns={flaggedColumns} dataSource={flagged} rowKey="id" loading={loadingFlagged} pagination={{ pageSize: 10 }} />
+          )}
+
+          {navKey === 'history' && (
+            <>
+              {history.length > 0 && (
+                <div style={{ marginBottom: 12 }}>
+                  <Popconfirm title="검색 기록을 모두 삭제할까요?" okText="초기화" cancelText="취소" onConfirm={() => clearHistoryMutation.mutate()}>
+                    <Button danger loading={clearHistoryMutation.isPending}>전체 초기화</Button>
+                  </Popconfirm>
+                </div>
+              )}
+              <Table columns={historyColumns} dataSource={history} rowKey="id" loading={loadingHistory} pagination={{ pageSize: 20 }} />
+            </>
+          )}
+
+          {navKey === 'category' && stats && (
+            <>
+              <Row gutter={[20, 20]} style={{ marginBottom: 20 }}>
+                <Col span={24}>
+                  <ACard
+                    title="카테고리로 찾아보기"
+                    size="small"
+                    extra={
+                      <Input
+                        size="small"
+                        allowClear
+                        placeholder="문서 제목으로 검색…"
+                        prefix={<SearchOutlined style={{ color: '#bfbfbf' }} />}
+                        value={catSearch}
+                        onChange={(e) => setCatSearch(e.target.value)}
+                        style={{ width: 220 }}
+                      />
+                    }
+                  >
+                    <div style={{ marginBottom: 22 }}>
+                      <Tag.CheckableTag checked={!filterCategory} onChange={() => setFilterCategory(null)}>
+                        전체 {documents.length}
+                      </Tag.CheckableTag>
+                      {allCategoryOptions.map(({ value: cat, label }) => (
+                        <span key={cat} style={{ display: 'inline-flex', alignItems: 'center', marginRight: 4 }}>
+                          <Tag.CheckableTag
+                            checked={filterCategory === cat}
+                            onChange={(checked) => setFilterCategory(checked ? cat : null)}
+                            style={filterCategory === cat
+                              ? {
+                                  background: CAT_SOFT_BG[cat] ?? '#f0f0f0',
+                                  color: CAT_ACCENT_HEX[cat] ?? '#595959',
+                                  borderColor: CAT_ACCENT_HEX[cat] ?? '#d9d9d9',
+                                  marginRight: 0,
+                                }
+                              : { marginRight: 0 }}
+                          >
+                            {label} {stats.by_category?.[cat] ?? 0}
+                          </Tag.CheckableTag>
+                          {/* 고정 5종(사양서·연구자료·발표자료·보고서·기타)은 삭제 불가 — 커스텀 카테고리만 삭제 버튼 노출 */}
+                          {!(cat in CAT_LABEL) && (
+                            <Popconfirm
+                              title={`"${label}" 카테고리를 삭제할까요?`}
+                              description="이 카테고리의 문서는 전부 '보고서'로 재분류됩니다."
+                              okText="삭제" cancelText="취소"
+                              onConfirm={() => deleteCategory(cat)}
+                            >
+                              <Button
+                                type="text" size="small" danger
+                                icon={<DeleteOutlined style={{ fontSize: 11 }} />}
+                                style={{ padding: '0 4px', height: 20 }}
+                                loading={bulkCategoryMutation.isPending}
+                              />
+                            </Popconfirm>
+                          )}
+                        </span>
+                      ))}
+                    </div>
+                    {(() => {
+                      const filtered = documents.filter(d =>
+                        (!filterCategory || d.category === filterCategory) &&
+                        (!catSearch || (d.title || d.filename || '').toLowerCase().includes(catSearch.toLowerCase()))
+                      )
+                      if (filtered.length === 0) {
+                        return <Empty description="조건에 맞는 문서가 없습니다" style={{ margin: '32px 0' }} />
+                      }
+                      return (
+                        <Row gutter={[16, 16]}>
+                          {filtered.map(doc => (
+                            <Col key={doc.id} xs={24} sm={12} md={8} lg={6}>
+                              <ACard size="small" hoverable onClick={() => openDetail(doc)} styles={{ body: { padding: 12 } }}>
+                                <Text strong style={{ fontSize: 13, display: 'block', marginBottom: 8 }} ellipsis={{ tooltip: doc.title || doc.filename }}>
+                                  {doc.title || doc.filename}
+                                </Text>
+                                <Row justify="space-between" align="middle" style={{ marginBottom: 6 }}>
+                                  <Col><Tag color={CAT_COLOR[doc.category]} style={{ marginRight: 0 }}>{CAT_LABEL[doc.category] ?? doc.category}</Tag></Col>
+                                  <Col><Text type="secondary" style={{ fontSize: 11.5 }}>{(doc.uploaded_at || '').slice(0, 10)}</Text></Col>
+                                </Row>
+                                <Row justify="space-between" align="middle">
+                                  <Col><Text type="secondary" style={{ fontSize: 11.5 }}><EyeOutlined style={{ marginRight: 4 }} />{doc.view_count ?? 0}</Text></Col>
+                                  {doc.uploaded_by && doc.uploaded_by !== 'anonymous' && (
+                                    <Col><Text type="secondary" style={{ fontSize: 11.5 }} ellipsis={{ tooltip: doc.uploaded_by }}><UserOutlined style={{ marginRight: 4 }} />{doc.uploaded_by_name ?? doc.uploaded_by}</Text></Col>
+                                  )}
+                                </Row>
+                              </ACard>
+                            </Col>
+                          ))}
+                        </Row>
+                      )
+                    })()}
+                  </ACard>
+                </Col>
+              </Row>
+
+              <Row gutter={[20, 20]} style={{ marginBottom: 20 }}>
+                <Col span={24}>
+                  <ACard title="파일 형식별 문서 수" size="small">
+                    {!stats.by_file_type || Object.entries(stats.by_file_type).length === 0
+                      ? <Text type="secondary">업로드된 문서 없음</Text>
+                      : Object.entries(stats.by_file_type).sort((a, b) => b[1] - a[1]).map(([ft, cnt]) => {
+                        const pct = stats.total_documents > 0 ? Math.round((cnt / stats.total_documents) * 100) : 0
                         return (
-                          <div key={ft} style={{ marginBottom: 8 }}>
-                            <Row justify="space-between" style={{ marginBottom: 2 }}>
-                              <Col>
-                                <Tag color={FILE_TYPE_COLOR[ft] ?? 'default'} style={{ marginRight: 0 }}>
-                                  {ft.toUpperCase()}
-                                </Tag>
-                              </Col>
-                              <Col>
-                                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                                  {cnt}건
-                                </Typography.Text>
-                              </Col>
+                          <div key={ft} style={{ marginBottom: 22 }}>
+                            <Row justify="space-between" style={{ marginBottom: 8 }}>
+                              <Col><Tag color={FILE_TYPE_COLOR[ft] ?? 'default'} style={{ marginRight: 0 }}>{ft.toUpperCase()}</Tag></Col>
+                              <Col><Text type="secondary" style={{ fontSize: 12 }}>{cnt}건</Text></Col>
                             </Row>
-                            <Progress
-                              percent={pct}
-                              showInfo={false}
-                              size="small"
-                              strokeColor={FILE_TYPE_COLOR[ft] === 'volcano' ? '#ff4d4f'
-                                : FILE_TYPE_COLOR[ft] === 'geekblue' ? '#1677ff'
-                                : FILE_TYPE_COLOR[ft] === 'orange'   ? '#fa8c16'
-                                : FILE_TYPE_COLOR[ft] === 'green'    ? '#52c41a'
-                                : FILE_TYPE_COLOR[ft] === 'purple'   ? '#722ed1'
-                                : FILE_TYPE_COLOR[ft] === 'cyan'     ? '#13c2c2'
-                                : FILE_TYPE_COLOR[ft] === 'magenta'  ? '#eb2f96'
-                                : '#8c8c8c'}
-                            />
+                            <Progress percent={pct} showInfo={false} size="small" />
                           </div>
                         )
-                      })
-                }
-              </ACard>
-            </Col>
-            <Col span={8}>
-              <ACard title="인기 검색어 Top 5" size="small">
-                {stats.top_queries.length === 0
-                  ? <Typography.Text type="secondary">검색 기록 없음</Typography.Text>
-                  : (() => {
-                    const maxCnt = Math.max(...stats.top_queries.map(q => q.count), 1)
-                    const RANK_COLOR = ['#ff4d4f', '#fa8c16', '#fadb14', '#8c8c8c', '#8c8c8c']
-                    return stats.top_queries.map((q, i) => (
-                      <div key={i} style={{ marginBottom: i < stats.top_queries.length - 1 ? 10 : 0 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
-                          <span style={{
-                            width: 18, height: 18, borderRadius: '50%',
-                            background: RANK_COLOR[i],
-                            color: i < 3 ? '#fff' : '#fff',
-                            fontSize: 10, fontWeight: 700,
-                            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                            flexShrink: 0,
-                          }}>{i + 1}</span>
-                          <Typography.Text strong style={{ flex: 1, fontSize: 13 }} ellipsis>{q.query}</Typography.Text>
-                          <Typography.Text type="secondary" style={{ fontSize: 11, flexShrink: 0 }}>{q.count}회</Typography.Text>
-                        </div>
-                        <div style={{ height: 4, borderRadius: 2, background: '#f0f0f0' }}>
-                          <div style={{
-                            height: '100%',
-                            width: `${Math.round((q.count / maxCnt) * 100)}%`,
-                            background: RANK_COLOR[i],
-                            borderRadius: 2,
-                            transition: 'width 0.4s ease',
-                          }} />
-                        </div>
-                      </div>
-                    ))
-                  })()
-                }
-              </ACard>
-            </Col>
-          </Row>
+                      })}
+                  </ACard>
+                </Col>
+              </Row>
 
-          {/* 업로드 트렌드 */}
-          {trend.length > 0 && (
-            <ACard
-              title={`최근 ${trendPeriod}일 업로드 현황`}
-              size="small"
-              style={{ marginBottom: 24 }}
-              extra={
-                <Radio.Group
-                  size="small"
-                  value={trendPeriod}
-                  onChange={(e) => setTrendPeriod(e.target.value)}
-                >
-                  <Radio.Button value={7}>7일</Radio.Button>
-                  <Radio.Button value={14}>14일</Radio.Button>
-                  <Radio.Button value={30}>30일</Radio.Button>
-                </Radio.Group>
-              }
-            >
-              {(() => {
-                const maxCount = Math.max(...trend.map(d => d.count), 1)
-                const todayStr = trend[trend.length - 1]?.date
-                const CHART_H  = 80
-                const GRID_LINES = [0.25, 0.5, 0.75, 1.0]
-                return (
-                  <div style={{ position: 'relative' }}>
-                    {/* 격자선 */}
-                    {GRID_LINES.map(ratio => (
-                      <div key={ratio} style={{
-                        position: 'absolute',
-                        left: 0, right: 0,
-                        bottom: 24 + ratio * CHART_H,
-                        borderTop: '1px dashed #f0f0f0',
-                        pointerEvents: 'none',
-                      }} />
-                    ))}
+              <ACard
+                title={`최근 ${trendPeriod}일 업로드 현황`} size="small"
+                extra={
+                  <Radio.Group size="small" value={trendPeriod} onChange={(e) => setTrendPeriod(e.target.value)}>
+                    <Radio.Button value={7}>7일</Radio.Button>
+                    <Radio.Button value={14}>14일</Radio.Button>
+                    <Radio.Button value={30}>30일</Radio.Button>
+                  </Radio.Group>
+                }
+              >
+                {trend.length > 0 && (() => {
+                  const maxCount = Math.max(...trend.map(d => d.count), 1)
+                  const todayStr = trend[trend.length - 1]?.date
+                  const CHART_H = 160
+                  return (
                     <div style={{ display: 'flex', alignItems: 'flex-end', gap: trendPeriod > 7 ? 3 : 6, height: CHART_H + 24, paddingBottom: 24 }}>
-                      {trend.map((d, idx) => {
+                      {trend.map((d) => {
                         const isToday = d.date === todayStr
-                        const showLabel = isToday || trendPeriod <= 7 || idx % Math.ceil(trendPeriod / 7) === 0
-                        const barH    = d.count > 0
-                          ? Math.max((d.count / maxCount) * CHART_H, 8)
-                          : 3
+                        const barH = d.count > 0 ? Math.max((d.count / maxCount) * CHART_H, 8) : 3
                         return (
                           <div key={d.date} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
-                            {/* 건수 레이블 */}
-                            <span style={{
-                              fontSize: 11, fontWeight: 600,
-                              color: d.count > 0 ? (isToday ? '#1677ff' : '#595959') : 'transparent',
-                              minHeight: 16,
-                            }}>
-                              {d.count > 0 ? d.count : '0'}
-                            </span>
-                            {/* 바 */}
+                            <span style={{ fontSize: 11, fontWeight: 600, color: d.count > 0 ? (isToday ? '#1677ff' : '#595959') : 'transparent' }}>{d.count > 0 ? d.count : '0'}</span>
                             <Tooltip title={`${d.date}: ${d.count}건`}>
-                              <div style={{
-                                width: '100%',
-                                height: barH,
-                                background: d.count > 0
-                                  ? (isToday
-                                    ? 'linear-gradient(to top, #0958d9, #4096ff)'
-                                    : 'linear-gradient(to top, #1677ff88, #1677ffcc)')
-                                  : '#f0f0f0',
-                                borderRadius: '4px 4px 0 0',
-                                transition: 'height 0.4s ease',
-                                cursor: 'default',
-                                boxShadow: isToday && d.count > 0 ? '0 2px 8px #1677ff44' : 'none',
-                              }} />
+                              <div style={{ width: '100%', height: barH, background: d.count > 0 ? (isToday ? '#0958d9' : '#91caff') : '#f0f0f0', borderRadius: '4px 4px 0 0' }} />
                             </Tooltip>
-                            {/* 날짜 레이블 — 14일/30일 모드에서는 간격을 두고 표시 */}
-                            <span style={{
-                              fontSize: trendPeriod > 7 ? 10 : 11,
-                              color: isToday ? '#1677ff' : '#8c8c8c',
-                              fontWeight: isToday ? 600 : 400,
-                              whiteSpace: 'nowrap',
-                              visibility: showLabel ? 'visible' : 'hidden',
-                            }}>
-                              {isToday ? '오늘' : d.date}
-                            </span>
                           </div>
                         )
                       })}
                     </div>
-                  </div>
-                )
-              })()}
-            </ACard>
+                  )
+                })()}
+              </ACard>
+            </>
           )}
-        </>
-      )}
 
-      <Tabs items={tabs} defaultActiveKey="all" />
+          {navKey === 'representative' && (
+            <div style={{
+              padding: '48px 24px', textAlign: 'center', borderRadius: 8,
+              background: '#fafafa', border: '1px dashed #e0e0e0', color: '#bfbfbf',
+            }}>
+              <StarOutlined style={{ fontSize: 28, marginBottom: 10 }} />
+              <div style={{ fontSize: 14 }}>대표 문서 지정 (추후 제공 예정)</div>
+              <div style={{ fontSize: 12.5, marginTop: 6 }}>
+                최신 표준 문서를 자동 제안하고 관리자가 대표 문서로 확정하는 기능은
+                현재 백엔드에 구현돼 있지 않습니다(버전 관리 기능 자체가 아직 없음).
+              </div>
+            </div>
+          )}
+
+          {navKey === 'admins' && (
+            <>
+              <Alert
+                type="info" showIcon style={{ marginBottom: 20 }}
+                message="구글 로그인 자체를 할 수 있는 사람(테스트 사용자)은 Google Cloud Console에서 관리합니다"
+                description="여기서는 '로그인은 되는 사람 중 누가 관리자 권한을 갖는지'만 관리합니다. 관리자로 추가하면 그 이메일로 로그인했을 때 관리자 탭이 보이고 이 화면에 접근할 수 있습니다."
+              />
+
+              <ACard title="새 관리자 추가" size="small" style={{ marginBottom: 20 }}>
+                <Space.Compact style={{ width: '100%', maxWidth: 420 }}>
+                  <Input
+                    placeholder="추가할 관리자의 구글 이메일"
+                    value={newAdminEmail}
+                    onChange={(e) => setNewAdminEmail(e.target.value)}
+                    onPressEnter={() => newAdminEmail.trim() && addAdminMutation.mutate(newAdminEmail.trim())}
+                  />
+                  <Button
+                    type="primary"
+                    loading={addAdminMutation.isPending}
+                    disabled={!newAdminEmail.trim()}
+                    onClick={() => addAdminMutation.mutate(newAdminEmail.trim())}
+                  >
+                    추가
+                  </Button>
+                </Space.Compact>
+              </ACard>
+
+              <ACard title="현재 관리자 목록" size="small" loading={loadingAdmins}>
+                <List
+                  size="small"
+                  dataSource={adminEmails.env_admins.map(email => ({ email, fixed: true }))}
+                  renderItem={({ email }) => (
+                    <List.Item>
+                      <Space>
+                        <Text>{email}</Text>
+                        <Tag>고정 관리자</Tag>
+                      </Space>
+                    </List.Item>
+                  )}
+                />
+                <List
+                  size="small"
+                  dataSource={adminEmails.extra_admins}
+                  locale={{ emptyText: '웹 화면에서 추가한 관리자가 아직 없습니다' }}
+                  renderItem={(row) => (
+                    <List.Item
+                      actions={[
+                        <Popconfirm
+                          key="del"
+                          title={`"${row.email}"를 관리자에서 제외할까요?`}
+                          okText="제외" cancelText="취소"
+                          onConfirm={() => removeAdminMutation.mutate(row.email)}
+                        >
+                          <Button type="text" danger size="small" icon={<DeleteOutlined />} loading={removeAdminMutation.isPending} />
+                        </Popconfirm>,
+                      ]}
+                    >
+                      <Space direction="vertical" size={0}>
+                        <Text>{row.email}</Text>
+                        <Text type="secondary" style={{ fontSize: 11.5 }}>
+                          {row.added_by ? `${row.added_by} 추가` : ''} {(row.created_at || '').slice(0, 16)}
+                        </Text>
+                      </Space>
+                    </List.Item>
+                  )}
+                />
+              </ACard>
+            </>
+          )}
+        </Col>
+
+        {/* ── 우측 요약 통계 패널 (스크롤해도 화면에 고정) ────────── */}
+        <Col flex="240px" style={{ position: 'sticky', top: 80, alignSelf: 'flex-start', marginTop: 80, maxHeight: 'calc(100vh - 96px)', overflowY: 'auto' }}>
+          <ACard size="small" style={{ marginBottom: 16 }}>
+            <Statistic title="전체 문서 수" value={stats?.total_documents ?? 0} valueStyle={{ color: '#1677ff', fontWeight: 700 }} />
+          </ACard>
+          <ACard size="small" style={{ marginBottom: 16 }}>
+            <Statistic
+              title="실패 문서" value={stats?.failed_count ?? 0}
+              suffix={<span style={{ fontSize: 13, color: '#8c8c8c' }}>({failedPct}%)</span>}
+              valueStyle={{ color: (stats?.failed_count ?? 0) > 0 ? '#cf1322' : '#389e0d', fontWeight: 700 }}
+            />
+          </ACard>
+          <ACard size="small" style={{ marginBottom: 16 }}>
+            <Statistic title="OCR 검토 대기" value={stats?.flagged_count ?? 0} valueStyle={{ color: (stats?.flagged_count ?? 0) > 0 ? '#d46b08' : '#389e0d', fontWeight: 700 }} />
+          </ACard>
+          <ACard size="small" title="최근 색인 완료" style={{ marginBottom: 16 }}>
+            {mostRecentDoc ? (
+              <div>
+                <Text style={{ fontSize: 12.5 }}>{formatDate(mostRecentDoc.uploaded_at)}</Text>
+                <div style={{ fontSize: 12.5, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{mostRecentDoc.filename}</div>
+              </div>
+            ) : <Text type="secondary" style={{ fontSize: 12.5 }}>기록 없음</Text>}
+          </ACard>
+          <ACard size="small" title="환경">
+            <div style={{ fontSize: 12, color: '#595959', lineHeight: 1.9 }}>
+              SQLite(로컬 개발)<br />
+              DATABASE_URL 미설정 시 자동 분기<br />
+              MiniLM-L12-v2 · turbovec
+            </div>
+          </ACard>
+        </Col>
+      </Row>
 
       {/* ── OCR 수동 수정 모달 ──────────────────────────────────────── */}
-      <Modal
-        title={ocrDoc ? `OCR 수동 수정 — ${ocrDoc.filename}` : 'OCR 수동 수정'}
-        open={ocrModal}
-        onCancel={() => setOcrModal(false)}
-        footer={null}
-        width={680}
-        destroyOnClose
-      >
-        {!ocrDoc && (
-          <div style={{ textAlign: 'center', padding: 40 }}>
-            <Spin tip="불러오는 중..." />
-          </div>
-        )}
-        {ocrDoc && ocrDoc.pages.length === 0 && (
-          <Alert type="success" message="모든 페이지가 이미 수정됐습니다." showIcon />
-        )}
+      <Modal title={ocrDoc ? `OCR 수동 수정 — ${ocrDoc.filename}` : 'OCR 수동 수정'} open={ocrModal} onCancel={() => setOcrModal(false)} footer={null} width={680} destroyOnClose>
+        {!ocrDoc && <div style={{ textAlign: 'center', padding: 40 }}><Spin tip="불러오는 중..." /></div>}
+        {ocrDoc && ocrDoc.pages.length === 0 && <Alert type="success" message="모든 페이지가 이미 수정됐습니다." showIcon />}
         {ocrDoc && ocrDoc.pages.map(page => (
           <ACard
-            key={page.page_num}
-            size="small"
-            style={{ marginBottom: 16 }}
+            key={page.page_num} size="small" style={{ marginBottom: 16 }}
             title={
               <Space>
-                <Tag color="orange" icon={<WarningOutlined />}>
-                  {page.page_num}페이지 · OCR 저신뢰
-                </Tag>
-                {page.ocr_confidence != null && (
-                  <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                    신뢰도 {Math.round(page.ocr_confidence * 100)}%
-                  </Typography.Text>
-                )}
+                <Tag color="orange" icon={<WarningOutlined />}>{page.page_num}페이지 · OCR 저신뢰</Tag>
+                {page.ocr_confidence != null && <Text type="secondary" style={{ fontSize: 11 }}>신뢰도 {Math.round(page.ocr_confidence * 100)}%</Text>}
               </Space>
             }
-            extra={
-              <Button
-                type="primary"
-                size="small"
-                loading={ocrSaving}
-                onClick={() => saveOcrEdit(page.page_num)}
-              >
-                저장
-              </Button>
-            }
+            extra={<Button type="primary" size="small" loading={ocrSaving} onClick={() => saveOcrEdit(page.page_num)}>저장</Button>}
           >
-            <Input.TextArea
-              rows={6}
-              value={ocrEdits[page.page_num] ?? page.text}
-              onChange={(e) => setOcrEdits(prev => ({ ...prev, [page.page_num]: e.target.value }))}
-              style={{ fontFamily: 'monospace', fontSize: 12 }}
-            />
+            <Input.TextArea rows={6} value={ocrEdits[page.page_num] ?? page.text} onChange={(e) => setOcrEdits(prev => ({ ...prev, [page.page_num]: e.target.value }))} style={{ fontFamily: 'monospace', fontSize: 12 }} />
           </ACard>
         ))}
       </Modal>
@@ -1164,152 +876,105 @@ export default function AdminPage({ onNavigate }) {
       {/* ── 문서 상세 보기 Drawer ───────────────────────────────────── */}
       <Drawer
         title={detailData ? `${detailData.filename} 상세 보기` : '문서 상세 보기'}
-        placement="right"
-        width={580}
-        open={drawerOpen}
+        placement="right" width={580} open={drawerOpen}
         onClose={() => { setDrawerOpen(false); setMemoEdit(null); setTitleEdit(null) }}
         destroyOnClose
-        extra={
-          detailData && (
-            <Button
-              icon={<DownloadOutlined />}
-              type="primary"
-              href={`${API}/files/${detailData.id}`}
-              download
-            >
-              파일 다운로드
-            </Button>
-          )
-        }
+        extra={detailData && <Button icon={<DownloadOutlined />} type="primary" href={`${API}/files/${detailData.id}`} download>파일 다운로드</Button>}
       >
-        {detailLoading && (
-          <div style={{ textAlign: 'center', paddingTop: 60 }}>
-            <Spin size="large" tip="불러오는 중..." />
-          </div>
-        )}
+        {detailLoading && <div style={{ textAlign: 'center', paddingTop: 60 }}><Spin size="large" tip="불러오는 중..." /></div>}
 
         {!detailLoading && detailData && (
           <>
-            {/* 문서 제목 — 자동 추출 또는 수동 편집 */}
-            <div style={{
-              background: '#f0f5ff',
-              border: '1px solid #adc6ff',
-              borderRadius: 6,
-              padding: '8px 12px',
-              marginBottom: 12,
-            }}>
+            <div style={{ background: '#f0f5ff', border: '1px solid #adc6ff', borderRadius: 6, padding: '10px 14px', marginBottom: 16 }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
-                <Typography.Text type="secondary" style={{ fontSize: 11 }}>문서 제목</Typography.Text>
+                <Text type="secondary" style={{ fontSize: 11 }}>문서 제목</Text>
                 {titleEdit === null ? (
-                  <Button size="small" icon={<EditOutlined />} type="text" onClick={() => setTitleEdit(detailData.title ?? '')}>
-                    편집
-                  </Button>
+                  <Button size="small" icon={<EditOutlined />} type="text" onClick={() => setTitleEdit(detailData.title ?? '')}>편집</Button>
                 ) : (
-                  <Space size={4}>
-                    <Button size="small" onClick={() => setTitleEdit(null)}>취소</Button>
-                    <Button size="small" type="primary" loading={titleSaving} onClick={saveTitle}>저장</Button>
-                  </Space>
+                  <Space size={4}><Button size="small" onClick={() => setTitleEdit(null)}>취소</Button><Button size="small" type="primary" loading={titleSaving} onClick={saveTitle}>저장</Button></Space>
                 )}
               </div>
               {titleEdit === null ? (
-                detailData.title
-                  ? <Typography.Title level={5} style={{ margin: 0 }}>{detailData.title}</Typography.Title>
-                  : <Typography.Text type="secondary" style={{ fontStyle: 'italic' }}>제목 없음 — 편집을 눌러 추가하세요</Typography.Text>
+                detailData.title ? <Typography.Title level={5} style={{ margin: 0 }}>{detailData.title}</Typography.Title>
+                  : <Text type="secondary" style={{ fontStyle: 'italic' }}>제목 없음 — 편집을 눌러 추가하세요</Text>
               ) : (
-                <Input
-                  value={titleEdit}
-                  onChange={e => setTitleEdit(e.target.value)}
-                  onPressEnter={saveTitle}
-                  placeholder="문서 제목을 입력하세요"
-                  autoFocus
-                />
+                <Input value={titleEdit} onChange={e => setTitleEdit(e.target.value)} onPressEnter={saveTitle} placeholder="문서 제목을 입력하세요" autoFocus />
               )}
             </div>
 
-            {/* 문서 기본 정보 */}
-            <ACard size="small" style={{ marginBottom: 16 }}>
-              <Row gutter={12}>
+            <ACard size="small" style={{ marginBottom: 20 }}>
+              <Row gutter={[16, 16]}>
+                <Col span={12}><Text type="secondary">카테고리</Text><br /><Tag color={CAT_COLOR[detailData.category]}>{CAT_LABEL[detailData.category] ?? detailData.category}</Tag></Col>
+                <Col span={12}><Text type="secondary">상태</Text><br /><Tag color={detailData.status === 'success' ? 'green' : 'red'}>{detailData.status === 'success' ? '성공' : '실패'}</Tag></Col>
+                <Col span={12}><Text type="secondary">총 페이지</Text><br /><Text>{detailData.page_count}페이지</Text></Col>
+                <Col span={12}><Text type="secondary">조회수</Text><br /><Text><EyeOutlined style={{ marginRight: 4 }} />{detailData.view_count ?? 0}</Text></Col>
                 <Col span={12}>
-                  <Typography.Text type="secondary">카테고리</Typography.Text><br />
-                  <Tag color={CAT_COLOR[detailData.category]}>{CAT_LABEL[detailData.category] ?? detailData.category}</Tag>
+                  <Text type="secondary">담당자</Text><br />
+                  {detailData.uploaded_by && detailData.uploaded_by !== 'anonymous'
+                    ? <Text><UserOutlined style={{ marginRight: 4 }} />{detailData.uploaded_by_name ?? detailData.uploaded_by}</Text>
+                    : <Text type="secondary">—</Text>}
                 </Col>
                 <Col span={12}>
-                  <Typography.Text type="secondary">상태</Typography.Text><br />
-                  <Tag color={detailData.status === 'success' ? 'green' : 'red'}>
-                    {detailData.status === 'success' ? '성공' : '실패'}
-                  </Tag>
+                  <Text type="secondary">파일 형식</Text><br />
+                  {detailData.file_type ? <Tag color={FILE_TYPE_COLOR[detailData.file_type] ?? 'default'}>{detailData.file_type.toUpperCase()}</Tag> : <Text type="secondary">—</Text>}
                 </Col>
-                <Col span={12} style={{ marginTop: 8 }}>
-                  <Typography.Text type="secondary">총 페이지</Typography.Text><br />
-                  <Typography.Text>{detailData.page_count}페이지</Typography.Text>
-                </Col>
-                <Col span={12} style={{ marginTop: 8 }}>
-                  <Typography.Text type="secondary">파일 형식</Typography.Text><br />
-                  {detailData.file_type
-                    ? <Tag color={FILE_TYPE_COLOR[detailData.file_type] ?? 'default'}>{detailData.file_type.toUpperCase()}</Tag>
-                    : <Typography.Text type="secondary">—</Typography.Text>
-                  }
-                </Col>
-                <Col span={24} style={{ marginTop: 8 }}>
-                  <Typography.Text type="secondary">업로드 시각</Typography.Text><br />
-                  <Typography.Text>{detailData.uploaded_at}</Typography.Text>
-                </Col>
+                <Col span={24}><Text type="secondary">업로드 시각</Text><br /><Text>{detailData.uploaded_at}</Text></Col>
                 {detailData.original_path && (
-                  <Col span={24} style={{ marginTop: 8 }}>
-                    <Typography.Text type="secondary">원본 경로</Typography.Text><br />
-                    <Typography.Text code style={{ fontSize: 12 }}>{detailData.original_path}</Typography.Text>
-                  </Col>
+                  <Col span={24}><Text type="secondary">원본 경로</Text><br /><Text code style={{ fontSize: 12 }}>{detailData.original_path}</Text></Col>
                 )}
-              {/* 메모 */}
-              <Col span={24} style={{ marginTop: 12 }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
-                  <Typography.Text type="secondary">메모</Typography.Text>
+                <Col span={24} style={{ marginTop: 4 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+                    <Text type="secondary">메모</Text>
+                    {memoEdit === null ? (
+                      <Button size="small" icon={<EditOutlined />} type="text" onClick={() => setMemoEdit(detailData.memo ?? '')}>편집</Button>
+                    ) : (
+                      <Space size={4}><Button size="small" onClick={() => setMemoEdit(null)}>취소</Button><Button size="small" type="primary" loading={memoSaving} onClick={saveMemo}>저장</Button></Space>
+                    )}
+                  </div>
                   {memoEdit === null ? (
-                    <Button
-                      size="small"
-                      icon={<EditOutlined />}
-                      type="text"
-                      onClick={() => setMemoEdit(detailData.memo ?? '')}
-                    >
-                      편집
-                    </Button>
+                    detailData.memo ? <Text style={{ whiteSpace: 'pre-wrap' }}>{detailData.memo}</Text> : <Text type="secondary" style={{ fontStyle: 'italic' }}>메모 없음 — 편집을 눌러 추가하세요</Text>
                   ) : (
-                    <Space size={4}>
-                      <Button size="small" onClick={() => setMemoEdit(null)}>취소</Button>
-                      <Button size="small" type="primary" loading={memoSaving} onClick={saveMemo}>저장</Button>
-                    </Space>
+                    <Input.TextArea rows={3} value={memoEdit} onChange={(e) => setMemoEdit(e.target.value)} placeholder="이 문서에 대한 설명을 입력하세요 (신입이 검색 결과에서 볼 수 있습니다)" autoFocus />
                   )}
-                </div>
-                {memoEdit === null ? (
-                  detailData.memo
-                    ? <Typography.Text style={{ whiteSpace: 'pre-wrap' }}>{detailData.memo}</Typography.Text>
-                    : <Typography.Text type="secondary" style={{ fontStyle: 'italic' }}>메모 없음 — 편집을 눌러 추가하세요</Typography.Text>
-                ) : (
-                  <Input.TextArea
-                    rows={3}
-                    value={memoEdit}
-                    onChange={(e) => setMemoEdit(e.target.value)}
-                    placeholder="이 문서에 대한 설명을 입력하세요 (신입이 검색 결과에서 볼 수 있습니다)"
-                    autoFocus
-                  />
-                )}
-              </Col>
+                </Col>
               </Row>
-
-              {detailData.has_flagged && (
-                <Alert
-                  type="warning"
-                  showIcon
-                  message="OCR 저신뢰 페이지가 포함된 문서입니다. 내용을 직접 확인하세요."
-                  style={{ marginTop: 12 }}
-                />
-              )}
-              {detailData.error && (
-                <Alert type="error" showIcon message={detailData.error} style={{ marginTop: 12 }} />
-              )}
+              {detailData.has_flagged && <Alert type="warning" showIcon message="OCR 저신뢰 페이지가 포함된 문서입니다. 내용을 직접 확인하세요." style={{ marginTop: 12 }} />}
+              {detailData.error && <Alert type="error" showIcon message={detailData.error} style={{ marginTop: 12 }} />}
             </ACard>
 
-            {/* 페이지별 텍스트 */}
+            <ACard size="small" title="읽기 권한" style={{ marginBottom: 16 }}>
+              {permissions.length === 0 ? (
+                <Alert
+                  type="info" showIcon style={{ marginBottom: 12 }}
+                  message="전체 공개 — 아래에 이메일을 추가하면 그 사람들과 관리자만 볼 수 있게 제한됩니다"
+                />
+              ) : (
+                <>
+                  <Alert
+                    type="warning" showIcon style={{ marginBottom: 12 }}
+                    message="제한됨 — 아래 목록에 있는 사람과 관리자만 검색·다운로드할 수 있습니다"
+                  />
+                  <Space direction="vertical" style={{ width: '100%', marginBottom: 12 }} size={6}>
+                    {permissions.map(p => (
+                      <div key={p.email} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <Text style={{ fontSize: 13 }}>{p.email}</Text>
+                        <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => removePermission(p.email)} />
+                      </div>
+                    ))}
+                  </Space>
+                </>
+              )}
+              <Space.Compact style={{ width: '100%' }}>
+                <Input
+                  placeholder="이메일 추가 (예: user@company.com)"
+                  value={newPermEmail}
+                  onChange={(e) => setNewPermEmail(e.target.value)}
+                  onPressEnter={addPermission}
+                />
+                <Button type="primary" loading={permSaving} onClick={addPermission}>추가</Button>
+              </Space.Compact>
+            </ACard>
+
             {detailData.pages.length === 0 ? (
               <Alert type="info" message="저장된 파싱 데이터가 없습니다. 이 문서는 업그레이드 전에 업로드됐을 수 있습니다." />
             ) : (
@@ -1321,30 +986,10 @@ export default function AdminPage({ onNavigate }) {
                   const flagged = page.flagged ?? false
                   return {
                     key: String(idx),
-                    label: (
-                      <span>
-                        {pageNum}페이지
-                        {flagged && (
-                          <Tag color="orange" icon={<WarningOutlined />} style={{ marginLeft: 8 }}>
-                            OCR 저신뢰
-                          </Tag>
-                        )}
-                      </span>
-                    ),
+                    label: <span>{pageNum}페이지{flagged && <Tag color="orange" icon={<WarningOutlined />} style={{ marginLeft: 8 }}>OCR 저신뢰</Tag>}</span>,
                     children: (
-                      <Typography.Paragraph
-                        style={{
-                          whiteSpace: 'pre-wrap',
-                          fontSize: 13,
-                          maxHeight: 360,
-                          overflowY: 'auto',
-                          background: '#fafafa',
-                          padding: 12,
-                          borderRadius: 6,
-                          margin: 0,
-                        }}
-                      >
-                        {text || <Typography.Text type="secondary">(텍스트 없음)</Typography.Text>}
+                      <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', fontSize: 13, maxHeight: 360, overflowY: 'auto', background: '#fafafa', padding: 12, borderRadius: 6, margin: 0 }}>
+                        {text || <Text type="secondary">(텍스트 없음)</Text>}
                       </Typography.Paragraph>
                     ),
                   }
