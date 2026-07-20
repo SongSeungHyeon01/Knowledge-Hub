@@ -151,6 +151,9 @@ async def lifespan(_):
         "ALTER TABLE documents ADD COLUMN uploaded_by VARCHAR",
         "ALTER TABLE documents ADD COLUMN category_ai_suggested BOOLEAN DEFAULT 0",
         "ALTER TABLE documents ADD COLUMN category_ai_checked BOOLEAN DEFAULT 0",
+        "ALTER TABLE documents ADD COLUMN department VARCHAR",
+        "ALTER TABLE users ADD COLUMN department VARCHAR",
+        "ALTER TABLE search_logs ADD COLUMN user_email VARCHAR",
     ]
     for stmt in migrations:
         try:
@@ -256,20 +259,43 @@ def _current_user_email(request: Request) -> str:
 
 async def _filter_readable_ids(db: AsyncSession, doc_ids: list[int], user_email: str) -> set[int]:
     """문서별 읽기 권한 필터. 로그인이 꺼져 있거나 관리자면 전부 통과.
-    권한이 하나도 설정 안 된 문서(공개)이거나, 본인이 명시적으로 허가된 문서만 남긴다."""
+
+    두 가지 제한이 함께 적용된다:
+    - 부서 제한(기본): 문서에 department가 지정돼 있으면, 그 부서 소속만 열람 가능.
+      department가 비어있는 문서(부서 미지정 유저가 올렸거나 이 기능 도입 전 문서)는 이 제한이 없다.
+    - 개별 허가(DocumentPermission, 예외 추가): 부서가 달라도(또는 부서 미지정 문서에 개별
+      허가만 걸어둔 예전 방식 그대로) 명시적으로 허가된 사람은 항상 열람 가능.
+    """
     if not AUTH_ENABLED or _is_admin(user_email) or not doc_ids:
         return set(doc_ids)
-    restricted_ids = set((await db.execute(
-        select(DocumentPermission.doc_id).where(DocumentPermission.doc_id.in_(doc_ids)).distinct()
-    )).scalars().all())
-    if not restricted_ids:
-        return set(doc_ids)
+
+    user_dept = (await db.execute(
+        select(User.department).where(User.email == user_email)
+    )).scalar_one_or_none()
+
+    doc_rows = (await db.execute(
+        select(Document.id, Document.department).where(Document.id.in_(doc_ids))
+    )).all()
+
     granted_ids = set((await db.execute(
         select(DocumentPermission.doc_id).where(
             DocumentPermission.doc_id.in_(doc_ids), DocumentPermission.user_email == user_email
         )
     )).scalars().all())
-    return {d for d in doc_ids if d not in restricted_ids or d in granted_ids}
+    restricted_ids = set((await db.execute(
+        select(DocumentPermission.doc_id).where(DocumentPermission.doc_id.in_(doc_ids)).distinct()
+    )).scalars().all())
+
+    readable = set()
+    for doc_id, doc_dept in doc_rows:
+        if doc_dept:
+            if doc_dept == user_dept or doc_id in granted_ids:
+                readable.add(doc_id)
+        else:
+            # 부서 미지정 문서 — 기존 방식 그대로: 개별 허가가 하나도 없으면 공개, 있으면 허가된 사람만
+            if doc_id not in restricted_ids or doc_id in granted_ids:
+                readable.add(doc_id)
+    return readable
 
 
 async def _can_read_doc(db: AsyncSession, doc_id: int, user_email: str) -> bool:
@@ -653,6 +679,32 @@ async def 문서_권한_회수(doc_id: int, email: str = Query(...), db: AsyncSe
     ))
     await db.commit()
     return {"doc_id": doc_id, "email": email, "granted": False}
+
+
+# ── 사용자 부서 관리 (/admin 접두사라 미들웨어가 이미 관리자만 통과시킴) ─────────
+# 부서는 관리자가 여기서 직접 지정한다. 문서는 업로드 시점의 업로드자 부서를 그대로
+# 물려받아(main.py 업로드 핸들러) 부서별 열람 제한(_filter_readable_ids)의 기준이 된다.
+@app.get("/admin/users")
+async def 사용자_목록(db: AsyncSession = Depends(get_db)):
+    rows = (await db.execute(select(User).order_by(User.email))).scalars().all()
+    return [
+        {"email": u.email, "name": u.name, "department": u.department}
+        for u in rows
+    ]
+
+
+@app.patch("/admin/users/{email}/department")
+async def 사용자_부서_지정(email: str, department: str | None = Body(None, embed=True), db: AsyncSession = Depends(get_db)):
+    email = email.strip().lower()
+    department = (department or "").strip() or None
+    user = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
+    if user is None:
+        # 아직 한 번도 로그인 안 한 사람에게도 미리 부서를 지정해둘 수 있게 upsert
+        user = User(email=email)
+        db.add(user)
+    user.department = department
+    await db.commit()
+    return {"email": email, "department": department}
 
 
 # 로그인 기능이 켜져 있으면(AUTH_ENABLED) 아래 목록을 제외한 모든 API가 유효한
@@ -1043,7 +1095,7 @@ _PARSE_CONCURRENCY = max(1, int(os.environ.get("PARSE_CONCURRENCY", "1")))
 _parse_semaphore = asyncio.Semaphore(_PARSE_CONCURRENCY)
 
 
-async def _parse_and_ingest(doc_id: int, save_path: str, source_file: str, ext: str):
+async def _parse_and_ingest(doc_id: int, save_path: str, source_file: str, ext: str, ai_category_enabled: bool = True):
     """[비동기 파싱 파이프라인] 업로드/재시도 응답을 즉시 돌려준 뒤 백그라운드에서 실행된다.
 
     ⭐ 왜 이렇게 하나 (2026-07-05):
@@ -1098,7 +1150,7 @@ async def _parse_and_ingest(doc_id: int, save_path: str, source_file: str, ext: 
         if result.get("status") == "success":
             full_text = "\n".join(p.get("text", "") for p in result.get("pages", []))
             suggested = None
-            if full_text.strip():
+            if ai_category_enabled and full_text.strip():
                 suggested = await asyncio.to_thread(_ollama_classify_category, full_text)
             async with AsyncSessionLocal() as sess3:
                 doc3 = (await sess3.execute(
@@ -1148,6 +1200,7 @@ async def 파일_업로드(
     category: str = Form("report"),
     original_path: str = Form(None),   # 폴더 업로드 시 상대 경로 (없으면 None)
     memo: str = Form(None),            # 업로드 시점에 바로 남기는 특이사항 — 검색 결과에 그대로 노출됨
+    ai_category_enabled: bool = Form(True),  # AI 요약처럼 누구나 켜고 끄는 클라이언트 설정(localStorage) — 업로드마다 전달받음
     db: AsyncSession = Depends(get_db),
 ):
     # 카테고리는 고정 5종(spec/research/presentation/report/other) 외에도 클라이언트가
@@ -1219,6 +1272,12 @@ async def 파일_업로드(
     # 대용량 PDF도 업로드 요청이 즉시 끝나 타임아웃·이벤트루프 블로킹을 피한다.
     # 프론트는 반환된 id로 /documents/{id}/status 를 폴링해 완료를 확인한다.
     file_type = ext.lstrip('.')
+    uploader_email = _current_user_email(request)
+    # 업로드자의 부서를 그대로 문서에 박아둔다 — 부서별 열람 제한의 기준값(_filter_readable_ids).
+    # 부서가 지정 안 된 사람이 올리면 department는 None(=제한 없음)으로 남는다.
+    uploader_department = (await db.execute(
+        select(User.department).where(User.email == uploader_email)
+    )).scalar_one_or_none()
     doc = Document(
         filename      = file.filename,
         title         = None,
@@ -1232,14 +1291,15 @@ async def 파일_업로드(
         page_count    = 0,
         has_flagged   = False,
         sha256        = sha256_hex,
-        uploaded_by   = _current_user_email(request),
+        uploaded_by   = uploader_email,
+        department    = uploader_department,
     )
     db.add(doc)
     await db.commit()
     await db.refresh(doc)  # auto-increment id 가져오기
 
     # 응답 후 백그라운드에서 파싱 → 상태 갱신 → JSON 저장 → 임베딩 색인
-    background_tasks.add_task(_parse_and_ingest, doc.id, save_path, file.filename, ext)
+    background_tasks.add_task(_parse_and_ingest, doc.id, save_path, file.filename, ext, ai_category_enabled)
 
     return {
         "id":       doc.id,
@@ -1865,8 +1925,8 @@ async def 검색(
     if file_type:
         results = [r for r in results if r.get("file_type") == file_type]
 
-    # 검색 기록 저장
-    log = SearchLog(query=q, alpha=alpha, result_count=len(results))
+    # 검색 기록 저장 — 계정에 귀속된 서버측 기록(로그인 꺼져 있으면 "anonymous" 공용)
+    log = SearchLog(query=q, alpha=alpha, result_count=len(results), user_email=_current_user_email(request))
     db.add(log)
     await db.commit()
 
@@ -2203,6 +2263,29 @@ async def 내_문서_삭제(doc_id: int, request: Request, db: AsyncSession = De
     await _문서_완전삭제(doc, db)
     await db.commit()
     return {"message": f"'{filename}' 문서가 삭제됐습니다", "id": doc_id}
+
+
+# ── 내 검색 기록 (계정에 귀속된 서버측 기록 — 브라우저 localStorage가 아니라 SearchLog에 저장) ──
+# 로그인이 꺼져 있으면(AUTH_ENABLED=False) "anonymous" 단일 공용 기록으로 동작(다른 /me 기능과 동일 원칙).
+@app.get("/me/search-history")
+async def 내_검색_기록(request: Request, limit: int = Query(10, ge=1, le=50), db: AsyncSession = Depends(get_db)):
+    email = _current_user_email(request)
+    rows = (await db.execute(
+        select(SearchLog.query, func.max(SearchLog.searched_at).label("last_searched_at"))
+        .where(SearchLog.user_email == email)
+        .group_by(SearchLog.query)
+        .order_by(func.max(SearchLog.searched_at).desc())
+        .limit(limit)
+    )).all()
+    return [{"query": r.query, "searched_at": str(r.last_searched_at)} for r in rows]
+
+
+@app.delete("/me/search-history")
+async def 내_검색_기록_삭제(request: Request, db: AsyncSession = Depends(get_db)):
+    email = _current_user_email(request)
+    await db.execute(sa_delete(SearchLog).where(SearchLog.user_email == email))
+    await db.commit()
+    return {"message": "검색 기록이 삭제됐습니다"}
 
 
 # ── AI 답변 (Ollama + OLLAMA_MODEL) ─────────────────────────────────────────

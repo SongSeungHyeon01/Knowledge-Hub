@@ -66,7 +66,7 @@ export default function AdminRoute() {
       <Header
         style={{
           background: '#fff', borderBottom: '1px solid #eef0f2', display: 'flex',
-          alignItems: 'center', padding: '0 28px', height: 64, lineHeight: '64px',
+          alignItems: 'center', justifyContent: 'space-between', padding: '0 28px', height: 64, lineHeight: '64px',
           position: 'sticky', top: 0, zIndex: 100,
         }}
       >
@@ -83,7 +83,12 @@ export default function AdminRoute() {
           </div>
           <div style={{ fontWeight: 800, fontSize: 15, color: '#1a1a1a' }}>Knowledge Hub · 관리자</div>
         </div>
-        <div style={{ marginLeft: 'auto' }}>
+        {/* 관리자 화면의 좌측 서브메뉴가 상단 탭으로 옮겨와 여기에 포털로 렌더링됨
+            — AdminPage가 실제 메뉴 항목·선택 상태를 들고 있고, 이 슬롯으로 포털만 쏴준다.
+            로고·메인으로 버튼 폭이 서로 달라도 항상 화면 정중앙에 오도록 flex 흐름에서 빼고
+            절대 위치로 중앙 정렬한다 (Header가 position: sticky라 이 absolute의 기준이 됨). */}
+        <div id="admin-nav-slot" style={{ position: 'absolute', left: '50%', transform: 'translateX(-50%)' }} />
+        <div>
           <Button onClick={goHome}>메인으로</Button>
         </div>
       </Header>

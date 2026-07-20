@@ -5,14 +5,14 @@
 
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Typography, Avatar, Table, Tag, Button, Space, Modal, Input, Select, Popconfirm, message, Empty } from 'antd'
+import { Typography, Avatar, Table, Tag, Button, Space, Modal, Input, Select, Popconfirm, message, Empty, Row, Col } from 'antd'
 import {
   UserOutlined, EditOutlined, DeleteOutlined,
   CheckCircleOutlined, CloseCircleOutlined, LoadingOutlined, EyeOutlined,
 } from '@ant-design/icons'
 import axios from 'axios'
 
-const { Title, Text } = Typography
+const { Title, Text, Paragraph } = Typography
 
 const API = import.meta.env.VITE_API_URL
 
@@ -104,9 +104,14 @@ export default function MyPage({ me }) {
   ]
 
   return (
-    <div style={{ maxWidth: 1100, margin: '0 auto', padding: '28px 32px 40px' }}>
-      <Title level={2} style={{ margin: '0 0 4px' }}>내 정보</Title>
-      <Text type="secondary">내가 업로드한 문서를 여기서 직접 수정·삭제할 수 있습니다.</Text>
+    <div style={{ maxWidth: 1400, margin: '0 auto', padding: '24px 24px 40px' }}>
+      {/* flex="200px" 빈 칸: 업로드/관리자 화면의 좌측 사이드바 폭(gutter 포함)만큼 맞춰서
+          모든 화면의 제목·본문이 같은 x 위치에서 시작하도록 함 */}
+      <Row gutter={20} wrap={false}>
+        <Col flex="200px" />
+        <Col flex="auto" style={{ minWidth: 0 }}>
+      <Title level={3} style={{ marginBottom: 2 }}>내 정보</Title>
+      <Paragraph type="secondary" style={{ marginBottom: 16 }}>내가 업로드한 문서를 여기서 직접 수정·삭제할 수 있습니다.</Paragraph>
 
       <div style={{
         display: 'flex', alignItems: 'center', gap: 14, margin: '22px 0 26px',
@@ -169,6 +174,8 @@ export default function MyPage({ me }) {
           />
         </div>
       </Modal>
+        </Col>
+      </Row>
     </div>
   )
 }

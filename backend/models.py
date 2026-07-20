@@ -26,6 +26,7 @@ class Document(Base):
     sha256        = Column(String(64), nullable=True, index=True)   # SHA-256 해시 (중복 체크용)
     view_count    = Column(Integer, nullable=False, default=0)      # 상세보기 조회수
     uploaded_by   = Column(String, nullable=True)                   # 업로드한 사람 이메일(로그인 꺼져 있으면 "anonymous")
+    department    = Column(String, nullable=True)                   # 업로드자의 부서로 자동 지정 — 부서별 열람 제한 기준값(비어있으면 제한 없음)
     uploaded_at   = Column(DateTime, server_default=func.now())     # 업로드 시각 (자동 기록, 이후 불변)
     # [수정 2026-07-06] 주기적 스윕이 "parsing이 얼마나 오래됐는지" 판정할 기준 컬럼.
     # uploaded_at은 최초 업로드 시각으로 고정이라 재시도(retry) 시에는 갱신되지 않는다 —
@@ -68,6 +69,7 @@ class User(Base):
     email      = Column(String, primary_key=True)
     name       = Column(String, nullable=True)
     picture    = Column(String, nullable=True)
+    department = Column(String, nullable=True)   # 관리자가 지정 — 부서별 문서 접근 제한의 기준값
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
@@ -102,6 +104,7 @@ class SearchLog(Base):
     query        = Column(String, nullable=False)                  # 검색어
     alpha        = Column(Float, nullable=False)                   # 의미검색 비중 (0~1)
     result_count = Column(Integer, default=0)                      # 검색 결과 수
+    user_email   = Column(String, nullable=True, index=True)       # 검색한 계정(로그인 꺼져있으면 "anonymous")
     searched_at  = Column(DateTime, server_default=func.now())     # 검색 시각 (자동 기록)
 
 

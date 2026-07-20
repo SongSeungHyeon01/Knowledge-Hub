@@ -152,8 +152,6 @@ export default function SearchPage({ onNavigate }) {
   )
   const PAGE_SIZE = 10
   const inputRef = useRef(null)
-
-  const LS_KEY = 'km_recent_searches'
   const [extraCategories, setExtraCategories] = useState([])  // 고정 5종 외에 실제로 쓰인 커스텀 카테고리
   const [uploaderList,    setUploaderList]    = useState([])  // 작성자 필터 드롭다운용 — 실제로 업로드한 적 있는 사람만
   const [bookmarkedIds,   setBookmarkedIds]   = useState(new Set())
@@ -325,26 +323,20 @@ export default function SearchPage({ onNavigate }) {
     return () => document.removeEventListener('keydown', handler)
   }, [])
 
-  // 마운트 시: 로컬스토리지 우선 로드, 없으면 서버에서 가져옵니다
-  useEffect(() => {
-    const saved = localStorage.getItem(LS_KEY)
-    if (saved) {
-      try { setRecentList(JSON.parse(saved)) } catch {}
-      return
-    }
-    axios.get(`${API}/admin/history`)
-      .then(res => {
-        const seen = new Set()
-        const unique = res.data.filter(log => {
-          if (seen.has(log.query)) return false
-          seen.add(log.query)
-          return true
-        }).slice(0, 5)
-        setRecentList(unique)
-        localStorage.setItem(LS_KEY, JSON.stringify(unique))
-      })
+  // 최근 검색어 — 브라우저 localStorage가 아니라 계정에 귀속된 서버측 기록(/me/search-history).
+  // 로그인이 꺼져 있으면 "anonymous" 단일 공용 기록으로 동작(다른 /me 기능과 동일 원칙).
+  const loadRecent = () => {
+    axios.get(`${API}/me/search-history`, { params: { limit: 5 } })
+      .then(res => setRecentList(res.data))
       .catch(() => {})
-  }, [])
+  }
+  useEffect(() => { loadRecent() }, [])
+
+  const clearRecentHistory = () => {
+    axios.delete(`${API}/me/search-history`)
+      .then(() => setRecentList([]))
+      .catch(() => message.error('검색 기록 삭제에 실패했습니다'))
+  }
 
   // resultsData를 인자로 받는 이유: setResults 직후엔 results state가 아직 갱신 전이라
   // (React 배치 업데이트), handleSearch에서 자동 호출할 때 방금 받은 응답을 직접 넘겨야 한다.
@@ -419,13 +411,9 @@ export default function SearchPage({ onNavigate }) {
         runAskAI(res.data)
       }
 
-      if (q.trim()) {
-        setRecentList(prev => {
-          const next = [{ query: q }, ...prev.filter(r => r.query !== q)].slice(0, 5)
-          localStorage.setItem(LS_KEY, JSON.stringify(next))
-          return next
-        })
-      }
+      // 검색 자체가 서버에 SearchLog(user_email 포함)로 이미 기록되므로, 여기서는
+      // 그 최신 상태를 다시 읽어오기만 한다 — 로컬에서 직접 조작하지 않는다.
+      if (q.trim()) loadRecent()
     } catch {
       setResults({ query: q, alpha, total: 0, results: [], error: '서버 연결 오류' })
     } finally {
@@ -443,18 +431,15 @@ export default function SearchPage({ onNavigate }) {
     handleSearch(q)
   }
 
-  const handleDeleteRecent = (e, q) => {
-    e.stopPropagation()
-    setRecentList(prev => {
-      const next = prev.filter(r => r.query !== q)
-      localStorage.setItem(LS_KEY, JSON.stringify(next))
-      return next
-    })
-  }
 
   return (
-    <div style={{ padding: '28px 32px 40px', maxWidth: 860, margin: '0 auto' }}>
-      <Title level={2} style={{ margin: '0 0 4px' }}>통합 검색</Title>
+    <div style={{ maxWidth: 1400, margin: '0 auto', padding: '24px 24px 40px' }}>
+      {/* flex="200px" 빈 칸: 업로드/관리자 화면의 좌측 사이드바 폭(gutter 포함)만큼 맞춰서
+          모든 화면의 제목·본문이 같은 x 위치에서 시작하도록 함 */}
+      <Row gutter={20} wrap={false}>
+        <Col flex="200px" />
+        <Col flex="auto" style={{ minWidth: 0 }}>
+      <Title level={3} style={{ marginBottom: 2 }}>통합 검색</Title>
 
       {tipVisible && (
         <Alert
@@ -511,18 +496,16 @@ export default function SearchPage({ onNavigate }) {
                   <List.Item
                     style={{ padding: '8px 12px', cursor: 'pointer' }}
                     onMouseDown={() => handleRecentClick(item.query)}
-                    actions={[
-                      <CloseOutlined
-                        key="del"
-                        style={{ color: '#aaa', fontSize: 11 }}
-                        onMouseDown={(e) => handleDeleteRecent(e, item.query)}
-                      />
-                    ]}
                   >
                     <Space><HistoryOutlined style={{ color: '#aaa' }} /><Text>{item.query}</Text></Space>
                   </List.Item>
                 )}
               />
+              <div style={{ textAlign: 'right', padding: '4px 12px 8px' }}>
+                <Button type="link" size="small" style={{ padding: 0, fontSize: 12 }} onMouseDown={(e) => { e.preventDefault(); clearRecentHistory() }}>
+                  검색 기록 전체 삭제
+                </Button>
+              </div>
             </div>
           )}
         </div>
@@ -1234,6 +1217,8 @@ export default function SearchPage({ onNavigate }) {
           </>
         )}
       </Modal>
+        </Col>
+      </Row>
     </div>
   )
 }

@@ -6,17 +6,18 @@
 // "대표 문서 지정"은 목업에는 있으나 백엔드에 버전관리/대표문서 기능이 없어 플레이스홀더로만 표시.
 
 import { useState, useEffect, useMemo } from 'react'
+import { createPortal } from 'react-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Table, Button, Tag, message, Popconfirm, Typography, Row, Col, Statistic,
   Card as ACard, List, Drawer, Collapse, Spin, Alert, Input, Space, Select,
-  Progress, Tooltip, Modal, Radio, Empty, Menu,
+  Progress, Tooltip, Modal, Radio, Empty, Menu, AutoComplete,
 } from 'antd'
 import {
   DeleteOutlined, WarningOutlined, FileTextOutlined, HistoryOutlined, FileOutlined,
   SearchOutlined, ExclamationCircleOutlined, ReloadOutlined, SyncOutlined, EditOutlined,
-  DownloadOutlined, FolderOutlined, StarOutlined, UnorderedListOutlined,
-  EyeOutlined, UserOutlined,
+  DownloadOutlined, FolderOutlined, UnorderedListOutlined,
+  EyeOutlined, UserOutlined, TeamOutlined,
 } from '@ant-design/icons'
 import axios from 'axios'
 
@@ -46,7 +47,14 @@ const FILE_TYPE_COLOR = {
 export default function AdminPage({ onNavigate }) {
   const queryClient = useQueryClient()
 
-  const [navKey, setNavKey] = useState('docs')  // docs | ocr | history | category | representative
+  const [navKey, setNavKey] = useState('docs')  // docs | ocr | history | category | admins
+
+  // 좌측 서브메뉴가 상단 헤더(AdminRoute.jsx의 #admin-nav-slot)로 이동 — 마운트된 뒤에야
+  // 그 DOM 노드가 존재하므로 useEffect에서 한 번 찾아 포털 대상으로 저장한다.
+  const [navSlot, setNavSlot] = useState(null)
+  useEffect(() => {
+    setNavSlot(document.getElementById('admin-nav-slot'))
+  }, [])
 
   // 문서 상세 보기 Drawer 상태
   const [drawerOpen,    setDrawerOpen]    = useState(false)
@@ -264,6 +272,36 @@ export default function AdminPage({ onNavigate }) {
     onError: (e) => message.error(e?.response?.data?.detail || '제외 중 오류가 발생했습니다'),
   })
 
+  // 부서 관리 — 사용자별 부서 지정(문서 부서별 열람 제한의 기준값이 됨)
+  const { data: users = [], isLoading: loadingUsers } = useQuery({
+    queryKey: ['users'],
+    queryFn: () => axios.get(`${API}/admin/users`).then(r => r.data),
+  })
+  const [deptDraft, setDeptDraft] = useState({})  // email -> 입력 중인 부서명(저장 전)
+  const departmentMutation = useMutation({
+    mutationFn: ({ email, department }) => axios.patch(`${API}/admin/users/${encodeURIComponent(email)}/department`, { department }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['users'] })
+      message.success('부서가 저장됐습니다')
+    },
+    onError: () => message.error('부서 저장 중 오류가 발생했습니다'),
+  })
+  const knownDepartments = useMemo(
+    () => Array.from(new Set(users.map(u => u.department).filter(Boolean))),
+    [users]
+  )
+
+  // 카테고리 이름 변경 — 그 카테고리를 쓰는 문서 전부를 새 이름으로 일괄 재분류(기존 bulk-category 재사용)
+  const [renamingCategory, setRenamingCategory] = useState(null)  // 이름 바꾸는 중인 카테고리(원래 이름)
+  const [renameValue,      setRenameValue]      = useState('')
+  const renameCategory = () => {
+    const next = renameValue.trim().slice(0, 30)
+    if (!next || next === renamingCategory) { setRenamingCategory(null); return }
+    const ids = documents.filter(d => d.category === renamingCategory).map(d => d.id)
+    if (ids.length > 0) bulkCategoryMutation.mutate({ ids, category: next })
+    setRenamingCategory(null)
+  }
+
   // 고정 5종 + 실제로 문서에 쓰인(업로드 화면에서 클라이언트가 만든 것 포함) 카테고리 전부
   const allCategoryOptions = useMemo(() => {
     const fixed = Object.keys(CAT_LABEL)
@@ -354,8 +392,10 @@ export default function AdminPage({ onNavigate }) {
     onError: () => message.error('삭제 중 오류가 발생했습니다'),
   })
 
+  const nowrapHeader = () => ({ style: { whiteSpace: 'nowrap' } })
+
   const docColumns = [
-    { title: 'ID', dataIndex: 'id', width: 60 },
+    { title: 'ID', dataIndex: 'id', width: 46, onHeaderCell: nowrapHeader },
     {
       title: '파일명 / 문서 제목',
       dataIndex: 'filename',
@@ -365,7 +405,7 @@ export default function AdminPage({ onNavigate }) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
             <FileTextOutlined style={{ color: '#1677ff', flexShrink: 0 }} />
             <Tooltip title={name}>
-              <Text style={{ color: '#1677ff', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block', verticalAlign: 'bottom' }}>
+              <Text style={{ color: '#1677ff', maxWidth: 170, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block', verticalAlign: 'bottom' }}>
                 {name}
               </Text>
             </Tooltip>
@@ -383,59 +423,69 @@ export default function AdminPage({ onNavigate }) {
       ),
     },
     {
-      title: '카테고리', dataIndex: 'category', width: 130,
+      title: '카테고리', dataIndex: 'category', width: 110, onHeaderCell: nowrapHeader,
       render: (cat, record) => (
         <Select
-          value={cat} size="small" style={{ width: 110 }}
+          value={cat} size="small" style={{ width: 92 }}
           onChange={(val) => categoryMutation.mutate({ id: record.id, category: val })}
           options={allCategoryOptions}
         />
       ),
     },
     {
-      title: '상태', dataIndex: 'status', width: 90,
+      title: '상태', dataIndex: 'status', width: 68, onHeaderCell: nowrapHeader,
       render: (status) => <Tag color={status === 'success' ? 'green' : 'red'}>{status === 'success' ? '성공' : '실패'}</Tag>,
     },
-    { title: '페이지', dataIndex: 'page_count', width: 80, align: 'center', sorter: (a, b) => a.page_count - b.page_count },
+    { title: '페이지', dataIndex: 'page_count', width: 60, align: 'center', onHeaderCell: nowrapHeader, sorter: (a, b) => a.page_count - b.page_count },
     {
-      title: '조회수', dataIndex: 'view_count', width: 80, align: 'center',
+      title: '조회수', dataIndex: 'view_count', width: 64, align: 'center', onHeaderCell: nowrapHeader,
       sorter: (a, b) => (a.view_count ?? 0) - (b.view_count ?? 0),
       render: (v) => <Text type="secondary"><EyeOutlined style={{ marginRight: 4 }} />{v ?? 0}</Text>,
     },
     {
-      title: '담당자', dataIndex: 'uploaded_by', width: 130,
+      title: '담당자', dataIndex: 'uploaded_by', width: 100, onHeaderCell: nowrapHeader,
       render: (v, record) => v && v !== 'anonymous'
-        ? <Tooltip title={v}><Text ellipsis style={{ maxWidth: 110, display: 'inline-block', verticalAlign: 'bottom' }}><UserOutlined style={{ marginRight: 4 }} />{record.uploaded_by_name ?? v}</Text></Tooltip>
+        ? <Tooltip title={v}><Text ellipsis style={{ maxWidth: 80, display: 'inline-block', verticalAlign: 'bottom' }}><UserOutlined style={{ marginRight: 4 }} />{record.uploaded_by_name ?? v}</Text></Tooltip>
         : <Text type="secondary">—</Text>,
     },
     {
-      title: 'OCR 저신뢰', dataIndex: 'has_flagged', width: 110, align: 'center',
-      render: (f) => f ? <Tag color="orange" icon={<WarningOutlined />}>검토 필요</Tag> : <Tag color="default">정상</Tag>,
+      title: 'OCR', dataIndex: 'has_flagged', width: 60, align: 'center', onHeaderCell: nowrapHeader,
+      render: (f) => f ? <Tooltip title="검토 필요"><Tag color="orange" icon={<WarningOutlined />} /></Tooltip> : <Tag color="default">정상</Tag>,
     },
     {
-      title: '업로드 시각', dataIndex: 'uploaded_at', width: 120, defaultSortOrder: 'descend',
+      title: '업로드', dataIndex: 'uploaded_at', width: 100, defaultSortOrder: 'descend',
       sorter: (a, b) => new Date(a.uploaded_at) - new Date(b.uploaded_at),
-      render: (d) => <Tooltip title={d}><span>{formatDate(d)}</span></Tooltip>,
+      render: (d) => <Tooltip title={d}><span style={{ whiteSpace: 'nowrap' }}>{formatDate(d)}</span></Tooltip>,
+      onHeaderCell: () => ({ style: { whiteSpace: 'nowrap' } }),
     },
     {
-      title: '삭제', width: 80, align: 'center',
+      title: '관리', width: 110, align: 'center', onHeaderCell: nowrapHeader,
       render: (_, record) => (
-        <Popconfirm title="정말 삭제할까요?" okText="삭제" cancelText="취소" onConfirm={() => deleteMutation.mutate(record.id)}>
-          <Button danger icon={<DeleteOutlined />} size="small" />
-        </Popconfirm>
+        <Space size={4}>
+          {record.status === 'failed' && (
+            <Tooltip title="재시도">
+              <Popconfirm title="파싱을 다시 시도할까요?" okText="재시도" cancelText="취소" onConfirm={() => retryMutation.mutate(record.id)}>
+                <Button icon={<ReloadOutlined />} size="small" loading={retryMutation.isPending && retryMutation.variables === record.id} />
+              </Popconfirm>
+            </Tooltip>
+          )}
+          <Tooltip title="상세보기">
+            <Button icon={<EyeOutlined />} size="small" onClick={() => openDetail(record)} />
+          </Tooltip>
+          <Tooltip title="삭제">
+            <Popconfirm title="정말 삭제할까요?" okText="삭제" cancelText="취소" onConfirm={() => deleteMutation.mutate(record.id)}>
+              <Button danger icon={<DeleteOutlined />} size="small" />
+            </Popconfirm>
+          </Tooltip>
+        </Space>
       ),
     },
-    {
-      title: '재시도', width: 80, align: 'center',
-      render: (_, record) => record.status === 'failed' ? (
-        <Popconfirm title="파싱을 다시 시도할까요?" okText="재시도" cancelText="취소" onConfirm={() => retryMutation.mutate(record.id)}>
-          <Button icon={<ReloadOutlined />} size="small" loading={retryMutation.isPending && retryMutation.variables === record.id}>재시도</Button>
-        </Popconfirm>
-      ) : null,
-    },
-    { title: '상세', width: 70, align: 'center', render: (_, record) => <Button size="small" onClick={() => openDetail(record)}>보기</Button> },
   ]
 
+  // OCR 검토 탭: 스캔 문서 등 이미지 기반 페이지를 OCR로 읽었을 때 신뢰도가 낮으면(has_flagged)
+  // 오인식 텍스트가 검색 품질을 해치지 않도록 검색 인덱싱에서 자동 제외된다(main.py _build_chunks 참고).
+  // 이 탭은 그렇게 제외된 페이지들을 모아 보여줘서, 관리자가 직접 읽고 텍스트를 고치면
+  // (PATCH /admin/documents/{id}/pages/{page_num}) flagged가 풀리고 다시 검색 대상에 포함된다.
   const flaggedColumns = [
     { title: 'ID', dataIndex: 'id', width: 60 },
     { title: '파일명', dataIndex: 'filename', render: (n) => <span><WarningOutlined style={{ color: 'orange', marginRight: 6 }} />{n}</span> },
@@ -482,41 +532,48 @@ export default function AdminPage({ onNavigate }) {
     { key: 'ocr',            icon: <WarningOutlined />,       label: `OCR 검토 (${flagged.length})` },
     { key: 'history',        icon: <HistoryOutlined />,       label: '검색 기록' },
     { key: 'category',       icon: <FolderOutlined />,        label: '카테고리 관리' },
-    { key: 'representative', icon: <StarOutlined />,          label: '대표 문서 지정' },
+    { key: 'departments',    icon: <TeamOutlined />,          label: '부서 관리' },
     { key: 'admins',         icon: <UserOutlined />,          label: '관리자 계정' },
   ]
 
   const NAV_TITLE = {
     docs: '문서 목록', ocr: 'OCR 검토', history: '검색 기록',
-    category: '카테고리 관리', representative: '대표 문서 지정', admins: '관리자 계정',
+    category: '카테고리 관리', departments: '부서 관리', admins: '관리자 계정',
   }
 
   return (
     <div style={{ maxWidth: 1400, margin: '0 auto', padding: '24px 24px 40px' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 22 }}>
-        <Title level={2} style={{ margin: 0 }}>관리자 · {NAV_TITLE[navKey]}</Title>
-        <Space>
-          <Tooltip title="30초마다 자동으로 데이터를 갱신합니다">
-            <Button icon={<SyncOutlined spin={autoRefresh} />} type={autoRefresh ? 'primary' : 'default'} onClick={() => setAutoRefresh(v => !v)}>
-              {autoRefresh ? '자동 갱신 ON' : '자동 갱신'}
-            </Button>
-          </Tooltip>
-          <Button icon={<SyncOutlined />} onClick={refreshAll}>새로고침</Button>
-        </Space>
-      </div>
-
+      {/* 좌측 서브메뉴였던 것을 상단 헤더 탭으로 이동 — 실제 DOM은 AdminRoute.jsx의
+          #admin-nav-slot(로고~메인으로 버튼 사이)에 포털로 렌더링된다 */}
+      {navSlot && createPortal(
+        <Menu
+          mode="horizontal"
+          selectedKeys={[navKey]}
+          onClick={(e) => setNavKey(e.key)}
+          items={leftMenuItems}
+          disabledOverflow
+          style={{ border: 'none', lineHeight: '62px', whiteSpace: 'nowrap' }}
+        />,
+        navSlot
+      )}
       <Row gutter={20} wrap={false}>
-        {/* ── 좌측 서브메뉴 (스크롤해도 화면에 고정) ───────────────── */}
-        {/* marginTop: 제목("관리자 · ...")과 나란히 붙지 않도록 아래로 내림 — UploadPage 좌측 사이드바와 동일 값 */}
-        <Col flex="200px" style={{ position: 'sticky', top: 80, alignSelf: 'flex-start', marginTop: 80 }}>
-          <Menu mode="inline" selectedKeys={[navKey]} onClick={(e) => setNavKey(e.key)} items={leftMenuItems} style={{ border: '1px solid #eef0f2', borderRadius: 8 }} />
-        </Col>
-
         {/* ── 중앙 콘텐츠 ───────────────────────────────────────── */}
         {/* minWidth: 0 — flex 아이템의 기본 최소폭(content의 min-content 크기)을 해제.
             안 넣으면 넓은 테이블(문서 목록) 때문에 이 Col이 줄어들지 못하고 3열 Row 전체가
             줄바꿈되어(사이드바 아래로 콘텐츠가 통째로 떨어짐) 표시됨. */}
         <Col flex="auto" style={{ minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 22 }}>
+            <Title level={3} style={{ margin: 0 }}>관리자 · {NAV_TITLE[navKey]}</Title>
+            <Space>
+              <Tooltip title="30초마다 자동으로 데이터를 갱신합니다">
+                <Button icon={<SyncOutlined spin={autoRefresh} />} type={autoRefresh ? 'primary' : 'default'} onClick={() => setAutoRefresh(v => !v)}>
+                  {autoRefresh ? '자동 갱신 ON' : '자동 갱신'}
+                </Button>
+              </Tooltip>
+              <Button icon={<SyncOutlined />} onClick={refreshAll}>새로고침</Button>
+            </Space>
+          </div>
+
           {stats && stats.total_documents === 0 && (
             <div style={{ textAlign: 'center', padding: '40px 0' }}>
               <Empty description={<span>아직 업로드된 문서가 없습니다<br /><Text type="secondary" style={{ fontSize: 13 }}>첫 문서를 올리면 여기에 통계가 표시됩니다</Text></span>}>
@@ -527,18 +584,22 @@ export default function AdminPage({ onNavigate }) {
 
           {navKey === 'docs' && (
             <>
-              <ACard size="small" style={{ marginBottom: 18 }}>
-                <Space wrap size={10}>
-                  <Input placeholder="파일명 검색" prefix={<SearchOutlined style={{ color: '#aaa' }} />} value={filterText} onChange={e => setFilterText(e.target.value)} allowClear style={{ width: 220 }} />
-                  <Select placeholder="카테고리" value={filterCategory} onChange={setFilterCategory} allowClear style={{ width: 130 }} options={allCategoryOptions} />
-                  <Select placeholder="상태" value={filterStatus} onChange={setFilterStatus} allowClear style={{ width: 100 }} options={[{ value: 'success', label: '성공' }, { value: 'failed', label: '실패' }]} />
-                  <Select placeholder="파일 형식" value={filterFileType} onChange={setFilterFileType} allowClear style={{ width: 120 }} options={['pdf','docx','pptx','xlsx','hwp','hwpx','txt','md','png','jpg'].map(ft => ({ value: ft, label: ft.toUpperCase() }))} />
-                  {(filterText || filterCategory || filterStatus || filterFileType) && (
-                    <Button size="small" onClick={() => { setFilterText(''); setFilterCategory(null); setFilterStatus(null); setFilterFileType(null) }}>필터 초기화</Button>
-                  )}
-                  <Text type="secondary" style={{ fontSize: 12 }}>{filteredDocuments.length}/{documents.length}건</Text>
-                  <Button size="small" onClick={downloadCSV} disabled={filteredDocuments.length === 0}>CSV 내보내기</Button>
-                </Space>
+              <ACard size="small" style={{ marginBottom: 18, padding: '4px 0' }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
+                  <Space wrap size={16}>
+                    <Input placeholder="파일명 검색" prefix={<SearchOutlined style={{ color: '#aaa' }} />} value={filterText} onChange={e => setFilterText(e.target.value)} allowClear style={{ width: 300 }} />
+                    <Select placeholder="카테고리" value={filterCategory} onChange={setFilterCategory} allowClear style={{ width: 170 }} options={allCategoryOptions} />
+                    <Select placeholder="상태" value={filterStatus} onChange={setFilterStatus} allowClear style={{ width: 140 }} options={[{ value: 'success', label: '성공' }, { value: 'failed', label: '실패' }]} />
+                    <Select placeholder="파일 형식" value={filterFileType} onChange={setFilterFileType} allowClear style={{ width: 160 }} options={['pdf','docx','pptx','xlsx','hwp','hwpx','txt','md','png','jpg'].map(ft => ({ value: ft, label: ft.toUpperCase() }))} />
+                    {(filterText || filterCategory || filterStatus || filterFileType) && (
+                      <Button onClick={() => { setFilterText(''); setFilterCategory(null); setFilterStatus(null); setFilterFileType(null) }}>필터 초기화</Button>
+                    )}
+                  </Space>
+                  <Space size={16}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>{filteredDocuments.length}/{documents.length}건</Text>
+                    <Button onClick={downloadCSV} disabled={filteredDocuments.length === 0}>CSV 내보내기</Button>
+                  </Space>
+                </div>
               </ACard>
 
               {selectedRowKeys.length > 0 && (
@@ -562,14 +623,23 @@ export default function AdminPage({ onNavigate }) {
 
               <Table
                 columns={docColumns} dataSource={filteredDocuments} rowKey="id" loading={loadingDocs}
-                pagination={{ pageSize: 10 }} scroll={{ x: 960 }}
+                pagination={{ pageSize: 10 }}
                 rowSelection={{ selectedRowKeys, onChange: setSelectedRowKeys }}
               />
             </>
           )}
 
           {navKey === 'ocr' && (
-            <Table columns={flaggedColumns} dataSource={flagged} rowKey="id" loading={loadingFlagged} pagination={{ pageSize: 10 }} />
+            <>
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 16 }}
+                message="OCR 인식 신뢰도가 낮은 페이지만 모아둔 목록입니다"
+                description="스캔 PDF 등 이미지 기반 문서를 OCR로 읽었을 때 인식 결과를 못 믿을 만큼 신뢰도가 낮은 페이지는 검색 결과 품질을 해치지 않도록 검색 인덱싱에서 자동 제외됩니다. 여기서 '수정' 버튼으로 해당 페이지 텍스트를 직접 확인·수정하면, 그 페이지가 다시 검색 대상에 포함됩니다."
+              />
+              <Table columns={flaggedColumns} dataSource={flagged} rowKey="id" loading={loadingFlagged} pagination={{ pageSize: 10 }} />
+            </>
           )}
 
           {navKey === 'history' && (
@@ -590,7 +660,7 @@ export default function AdminPage({ onNavigate }) {
               <Row gutter={[20, 20]} style={{ marginBottom: 20 }}>
                 <Col span={24}>
                   <ACard
-                    title="카테고리로 찾아보기"
+                    title="카테고리 관리"
                     size="small"
                     extra={
                       <Input
@@ -610,35 +680,61 @@ export default function AdminPage({ onNavigate }) {
                       </Tag.CheckableTag>
                       {allCategoryOptions.map(({ value: cat, label }) => (
                         <span key={cat} style={{ display: 'inline-flex', alignItems: 'center', marginRight: 4 }}>
-                          <Tag.CheckableTag
-                            checked={filterCategory === cat}
-                            onChange={(checked) => setFilterCategory(checked ? cat : null)}
-                            style={filterCategory === cat
-                              ? {
-                                  background: CAT_SOFT_BG[cat] ?? '#f0f0f0',
-                                  color: CAT_ACCENT_HEX[cat] ?? '#595959',
-                                  borderColor: CAT_ACCENT_HEX[cat] ?? '#d9d9d9',
-                                  marginRight: 0,
-                                }
-                              : { marginRight: 0 }}
-                          >
-                            {label} {stats.by_category?.[cat] ?? 0}
-                          </Tag.CheckableTag>
-                          {/* 고정 5종(사양서·연구자료·발표자료·보고서·기타)은 삭제 불가 — 커스텀 카테고리만 삭제 버튼 노출 */}
-                          {!(cat in CAT_LABEL) && (
-                            <Popconfirm
-                              title={`"${label}" 카테고리를 삭제할까요?`}
-                              description="이 카테고리의 문서는 전부 '보고서'로 재분류됩니다."
-                              okText="삭제" cancelText="취소"
-                              onConfirm={() => deleteCategory(cat)}
-                            >
-                              <Button
-                                type="text" size="small" danger
-                                icon={<DeleteOutlined style={{ fontSize: 11 }} />}
-                                style={{ padding: '0 4px', height: 20 }}
-                                loading={bulkCategoryMutation.isPending}
+                          {renamingCategory === cat ? (
+                            <Space.Compact size="small">
+                              <Input
+                                size="small"
+                                autoFocus
+                                value={renameValue}
+                                onChange={(e) => setRenameValue(e.target.value)}
+                                onPressEnter={renameCategory}
+                                style={{ width: 110 }}
+                                maxLength={30}
                               />
-                            </Popconfirm>
+                              <Button size="small" type="primary" onClick={renameCategory}>저장</Button>
+                              <Button size="small" onClick={() => setRenamingCategory(null)}>취소</Button>
+                            </Space.Compact>
+                          ) : (
+                            <>
+                              <Tag.CheckableTag
+                                checked={filterCategory === cat}
+                                onChange={(checked) => setFilterCategory(checked ? cat : null)}
+                                style={filterCategory === cat
+                                  ? {
+                                      background: CAT_SOFT_BG[cat] ?? '#f0f0f0',
+                                      color: CAT_ACCENT_HEX[cat] ?? '#595959',
+                                      borderColor: CAT_ACCENT_HEX[cat] ?? '#d9d9d9',
+                                      marginRight: 0,
+                                    }
+                                  : { marginRight: 0 }}
+                              >
+                                {label} {stats.by_category?.[cat] ?? 0}
+                              </Tag.CheckableTag>
+                              {/* 고정 5종(사양서·연구자료·발표자료·보고서·기타)은 수정·삭제 불가 — 커스텀 카테고리만 버튼 노출 */}
+                              {!(cat in CAT_LABEL) && (
+                                <>
+                                  <Button
+                                    type="text" size="small"
+                                    icon={<EditOutlined style={{ fontSize: 11 }} />}
+                                    style={{ padding: '0 4px', height: 20 }}
+                                    onClick={() => { setRenamingCategory(cat); setRenameValue(label) }}
+                                  />
+                                  <Popconfirm
+                                    title={`"${label}" 카테고리를 삭제할까요?`}
+                                    description="이 카테고리의 문서는 전부 '보고서'로 재분류됩니다."
+                                    okText="삭제" cancelText="취소"
+                                    onConfirm={() => deleteCategory(cat)}
+                                  >
+                                    <Button
+                                      type="text" size="small" danger
+                                      icon={<DeleteOutlined style={{ fontSize: 11 }} />}
+                                      style={{ padding: '0 4px', height: 20 }}
+                                      loading={bulkCategoryMutation.isPending}
+                                    />
+                                  </Popconfirm>
+                                </>
+                              )}
+                            </>
                           )}
                         </span>
                       ))}
@@ -681,22 +777,36 @@ export default function AdminPage({ onNavigate }) {
 
               <Row gutter={[20, 20]} style={{ marginBottom: 20 }}>
                 <Col span={24}>
-                  <ACard title="파일 형식별 문서 수" size="small">
-                    {!stats.by_file_type || Object.entries(stats.by_file_type).length === 0
-                      ? <Text type="secondary">업로드된 문서 없음</Text>
-                      : Object.entries(stats.by_file_type).sort((a, b) => b[1] - a[1]).map(([ft, cnt]) => {
-                        const pct = stats.total_documents > 0 ? Math.round((cnt / stats.total_documents) * 100) : 0
-                        return (
-                          <div key={ft} style={{ marginBottom: 22 }}>
-                            <Row justify="space-between" style={{ marginBottom: 8 }}>
-                              <Col><Tag color={FILE_TYPE_COLOR[ft] ?? 'default'} style={{ marginRight: 0 }}>{ft.toUpperCase()}</Tag></Col>
-                              <Col><Text type="secondary" style={{ fontSize: 12 }}>{cnt}건</Text></Col>
-                            </Row>
-                            <Progress percent={pct} showInfo={false} size="small" />
-                          </div>
-                        )
-                      })}
-                  </ACard>
+                  {(() => {
+                    // 카테고리 관리에서 고른 필터(전체/사양서/...)를 그대로 따라가도록,
+                    // 전역 stats.by_file_type이 아니라 documents를 filterCategory로 직접 걸러 집계한다.
+                    const docsForFileType = documents.filter(d => !filterCategory || d.category === filterCategory)
+                    const fileTypeCounts = docsForFileType.reduce((acc, d) => {
+                      const ft = d.file_type || 'unknown'
+                      acc[ft] = (acc[ft] ?? 0) + 1
+                      return acc
+                    }, {})
+                    const fileTypeTotal = docsForFileType.length
+                    const scopeLabel = filterCategory ? (CAT_LABEL[filterCategory] ?? filterCategory) : '전체'
+                    return (
+                      <ACard title={`파일 형식별 문서 수 (${scopeLabel})`} size="small">
+                        {fileTypeTotal === 0
+                          ? <Text type="secondary">해당하는 문서 없음</Text>
+                          : Object.entries(fileTypeCounts).sort((a, b) => b[1] - a[1]).map(([ft, cnt]) => {
+                            const pct = fileTypeTotal > 0 ? Math.round((cnt / fileTypeTotal) * 100) : 0
+                            return (
+                              <div key={ft} style={{ marginBottom: 22 }}>
+                                <Row justify="space-between" style={{ marginBottom: 8 }}>
+                                  <Col><Tag color={FILE_TYPE_COLOR[ft] ?? 'default'} style={{ marginRight: 0 }}>{ft.toUpperCase()}</Tag></Col>
+                                  <Col><Text type="secondary" style={{ fontSize: 12 }}>{cnt}건</Text></Col>
+                                </Row>
+                                <Progress percent={pct} showInfo={false} size="small" />
+                              </div>
+                            )
+                          })}
+                      </ACard>
+                    )
+                  })()}
                 </Col>
               </Row>
 
@@ -735,18 +845,53 @@ export default function AdminPage({ onNavigate }) {
             </>
           )}
 
-          {navKey === 'representative' && (
-            <div style={{
-              padding: '48px 24px', textAlign: 'center', borderRadius: 8,
-              background: '#fafafa', border: '1px dashed #e0e0e0', color: '#bfbfbf',
-            }}>
-              <StarOutlined style={{ fontSize: 28, marginBottom: 10 }} />
-              <div style={{ fontSize: 14 }}>대표 문서 지정 (추후 제공 예정)</div>
-              <div style={{ fontSize: 12.5, marginTop: 6 }}>
-                최신 표준 문서를 자동 제안하고 관리자가 대표 문서로 확정하는 기능은
-                현재 백엔드에 구현돼 있지 않습니다(버전 관리 기능 자체가 아직 없음).
-              </div>
-            </div>
+          {navKey === 'departments' && (
+            <>
+              <Alert
+                type="info" showIcon style={{ marginBottom: 20 }}
+                message="문서는 업로드한 사람의 부서를 그대로 물려받습니다"
+                description="여기서 지정한 부서가 문서의 열람 범위 기준이 됩니다 — 같은 부서 소속만 볼 수 있고, 다른 부서라도 문서별 '읽기 권한'에 개별로 추가된 사람은 예외적으로 볼 수 있습니다. 부서를 비워두면 그 사람이 올리는 문서는 부서 제한 없이 공개됩니다."
+              />
+              <ACard size="small" loading={loadingUsers}>
+                <List
+                  size="small"
+                  dataSource={users}
+                  locale={{ emptyText: '아직 로그인한 사용자가 없습니다' }}
+                  renderItem={(u) => {
+                    const draft = deptDraft[u.email] ?? u.department ?? ''
+                    const dirty = draft !== (u.department ?? '')
+                    return (
+                      <List.Item>
+                        <Space style={{ width: '100%', justifyContent: 'space-between' }} wrap>
+                          <Space direction="vertical" size={0}>
+                            <Text strong>{u.name || u.email}</Text>
+                            {u.name && <Text type="secondary" style={{ fontSize: 11.5 }}>{u.email}</Text>}
+                          </Space>
+                          <Space.Compact>
+                            <AutoComplete
+                              size="small"
+                              style={{ width: 180 }}
+                              placeholder="부서 없음(제한 없음)"
+                              options={knownDepartments.map(d => ({ value: d }))}
+                              value={draft}
+                              onChange={(val) => setDeptDraft(prev => ({ ...prev, [u.email]: val }))}
+                              filterOption={(input, option) => option.value.toLowerCase().includes(input.toLowerCase())}
+                            />
+                            <Button
+                              size="small" type="primary" disabled={!dirty}
+                              loading={departmentMutation.isPending && departmentMutation.variables?.email === u.email}
+                              onClick={() => departmentMutation.mutate({ email: u.email, department: draft.trim() || null })}
+                            >
+                              저장
+                            </Button>
+                          </Space.Compact>
+                        </Space>
+                      </List.Item>
+                    )
+                  }}
+                />
+              </ACard>
+            </>
           )}
 
           {navKey === 'admins' && (
@@ -835,20 +980,13 @@ export default function AdminPage({ onNavigate }) {
           <ACard size="small" style={{ marginBottom: 16 }}>
             <Statistic title="OCR 검토 대기" value={stats?.flagged_count ?? 0} valueStyle={{ color: (stats?.flagged_count ?? 0) > 0 ? '#d46b08' : '#389e0d', fontWeight: 700 }} />
           </ACard>
-          <ACard size="small" title="최근 색인 완료" style={{ marginBottom: 16 }}>
+          <ACard size="small" title="가장 최근에 업로드된 문서" style={{ marginBottom: 16 }}>
             {mostRecentDoc ? (
               <div>
                 <Text style={{ fontSize: 12.5 }}>{formatDate(mostRecentDoc.uploaded_at)}</Text>
                 <div style={{ fontSize: 12.5, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{mostRecentDoc.filename}</div>
               </div>
             ) : <Text type="secondary" style={{ fontSize: 12.5 }}>기록 없음</Text>}
-          </ACard>
-          <ACard size="small" title="환경">
-            <div style={{ fontSize: 12, color: '#595959', lineHeight: 1.9 }}>
-              SQLite(로컬 개발)<br />
-              DATABASE_URL 미설정 시 자동 분기<br />
-              MiniLM-L12-v2 · turbovec
-            </div>
           </ACard>
         </Col>
       </Row>

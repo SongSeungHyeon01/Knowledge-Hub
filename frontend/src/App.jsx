@@ -146,6 +146,7 @@ export default function App() {
           borderBottom: '1px solid #eef0f2',
           display: 'flex',
           alignItems: 'center',
+          justifyContent: 'space-between',
           padding: '0 28px',
           height: 64,
           lineHeight: '64px',
@@ -174,8 +175,10 @@ export default function App() {
           </div>
         </div>
 
-        {/* 중앙: 탭 메뉴 */}
-        <div style={{ flex: 1, display: 'flex', justifyContent: 'center' }}>
+        {/* 중앙: 탭 메뉴 — 좌측 로고·우측 계정 영역의 폭이 서로 달라도(이메일 길이 등)
+            항상 화면 정중앙에 오도록 flex 흐름에서 빼고 절대 위치로 중앙 정렬한다.
+            Header가 position: sticky라 이 absolute의 기준(containing block)이 된다. */}
+        <div style={{ position: 'absolute', left: '50%', transform: 'translateX(-50%)' }}>
           <Menu
             mode="horizontal"
             selectedKeys={[current]}

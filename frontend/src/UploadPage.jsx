@@ -6,7 +6,7 @@ import { useState, useEffect, useRef, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   Upload, Table, Typography, Space, Tag, Progress, Modal, Button, Tooltip,
-  Alert, Menu, Row, Col, Card, List, Empty, Input, message,
+  Alert, Menu, Row, Col, Card, List, Empty, Input, message, Switch,
 } from 'antd'
 import {
   InboxOutlined,
@@ -27,7 +27,6 @@ import {
   SearchOutlined,
   CloudUploadOutlined,
   HistoryOutlined,
-  ReadOutlined,
   PlusOutlined,
   EditOutlined,
 } from '@ant-design/icons'
@@ -91,6 +90,16 @@ export default function UploadPage({ onNavigate }) {
     () => localStorage.getItem('km_last_category') ?? 'spec'
   )
 
+  // AI 자동 카테고리 분류 — AI 요약(SearchPage)과 동일하게 누구나 켜고 끌 수 있는
+  // 클라이언트 설정(localStorage에 기억, 서버 전역 설정 아님). 업로드마다 이 값을 함께 보낸다.
+  const [aiCategoryEnabled, setAiCategoryEnabled] = useState(
+    () => localStorage.getItem('km_ai_category_enabled') !== 'false'
+  )
+  const handleToggleAiCategory = (checked) => {
+    setAiCategoryEnabled(checked)
+    localStorage.setItem('km_ai_category_enabled', checked ? 'true' : 'false')
+  }
+
   // 카테고리·특이사항 — 배치 업로드 시 파일마다 다른 값이 필요할 수 있어(업로드 전 공용
   // 입력란 하나로는 모든 파일에 같은 값이 붙어버림), 업로드 폼이 아니라 업로드가 접수된
   // 직후 파일마다 순서대로 물어본다. /me/documents/{id} PATCH(본인 문서 자가 수정용)를 재사용.
@@ -113,6 +122,7 @@ export default function UploadPage({ onNavigate }) {
   })
   const [newCatOpen, setNewCatOpen] = useState(false)
   const [newCatName, setNewCatName] = useState('')
+  const [hoveredCategory, setHoveredCategory] = useState(null)  // 좌측 카테고리 목록 마우스오버 표시용
 
   // files: 이번 브라우저 세션에서 업로드 중이거나 완료된 파일 목록
   // 각 항목: { id, filename, size, category, percent, status, pages, error }
@@ -308,6 +318,7 @@ export default function UploadPage({ onNavigate }) {
     const form = new FormData()
     form.append('file', file)
     form.append('category', category)
+    form.append('ai_category_enabled', aiCategoryEnabled ? 'true' : 'false')
     if (file.webkitRelativePath) {
       form.append('original_path', file.webkitRelativePath)
     }
@@ -479,15 +490,14 @@ export default function UploadPage({ onNavigate }) {
   const leftMenuItems = [
     { key: 'quick',  icon: <CloudUploadOutlined />, label: '업로드' },
     { key: 'recent', icon: <HistoryOutlined />,     label: '최근 업로드' },
-    { key: 'guide',  icon: <ReadOutlined />,         label: '업로드 가이드' },
   ]
 
   return (
     <div style={{ maxWidth: 1400, margin: '0 auto', padding: '24px 24px 40px' }}>
       <Row gutter={20} wrap={false}>
         {/* ── 좌측 서브메뉴 (스크롤해도 화면에 고정) ───────────────── */}
-        {/* marginTop: 제목·안내문·경고 배너 밑, 실제 업로드 UI(카테고리 버튼 줄)와 같은 높이로 내림 */}
-        <Col flex="200px" style={{ position: 'sticky', top: 80, alignSelf: 'flex-start', marginTop: 150 }}>
+        {/* marginTop: 제목·안내문·경고 배너 2개 밑, 업로드 드래그 보드 윗줄과 맞춤 */}
+        <Col flex="200px" style={{ position: 'sticky', top: 80, alignSelf: 'flex-start', marginTop: 220 }}>
           <Menu
             mode="inline"
             selectedKeys={[navKey]}
@@ -505,7 +515,19 @@ export default function UploadPage({ onNavigate }) {
                     localStorage.setItem('km_launch_category', c)
                     onNavigate?.('search')
                   }}
-                  style={{ padding: '6px 0', border: 'none', display: 'flex', justifyContent: 'space-between', cursor: 'pointer' }}
+                  onMouseEnter={() => setHoveredCategory(c)}
+                  onMouseLeave={() => setHoveredCategory(null)}
+                  style={{
+                    padding: '6px 8px',
+                    margin: '0 -8px',
+                    border: 'none',
+                    borderRadius: 6,
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    cursor: 'pointer',
+                    background: hoveredCategory === c ? '#f0f5ff' : 'transparent',
+                    transition: 'background 0.15s',
+                  }}
                 >
                   <Text style={{ fontSize: 13 }}>{CATEGORY_LABEL[c] ?? c}</Text>
                   <Text strong>{stats?.by_category?.[c] ?? 0}</Text>
@@ -524,10 +546,18 @@ export default function UploadPage({ onNavigate }) {
         <Col flex="auto" style={{ minWidth: 0 }}>
           {navKey === 'quick' && (
             <>
-              <Title level={3} style={{ marginBottom: 2 }}>문서 업로드</Title>
-              <Paragraph type="secondary" style={{ marginBottom: 16 }}>
-                문서를 업로드하면 자동으로 인덱싱 및 메타데이터 추출이 진행됩니다.
-              </Paragraph>
+              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 }}>
+                <div>
+                  <Title level={3} style={{ marginBottom: 2 }}>문서 업로드</Title>
+                  <Paragraph type="secondary" style={{ marginBottom: 16 }}>
+                    문서를 업로드하면 자동으로 인덱싱 및 메타데이터 추출이 진행됩니다.
+                  </Paragraph>
+                </div>
+                <Space size={6} style={{ marginTop: 6, flexShrink: 0 }}>
+                  <Switch size="small" checked={aiCategoryEnabled} onChange={handleToggleAiCategory} />
+                  <Text style={{ fontSize: 12.5 }}>AI 자동 분류</Text>
+                </Space>
+              </div>
 
               <Alert
                 type="warning"
@@ -675,28 +705,6 @@ export default function UploadPage({ onNavigate }) {
             </>
           )}
 
-          {navKey === 'guide' && (
-            <>
-              <Title level={3}>업로드 가이드</Title>
-              <Card>
-                <Paragraph>
-                  <b>1. 카테고리를 먼저 고르세요.</b> 사양서(spec)·연구자료(research)·발표자료(presentation)·보고서(report)
-                  네 가지 중 하나이며, 검색 화면에서 이 값으로 필터링할 수 있습니다.
-                </Paragraph>
-                <Paragraph>
-                  <b>2. 폴더째 업로드하면 원본 디렉토리 구조가 그대로 유지됩니다.</b> 폴더 선택 버튼으로 여러 파일을 한 번에 올릴 수 있습니다.
-                </Paragraph>
-                <Paragraph>
-                  <b>3. 한 번에 3~4개씩만 올려주세요.</b> 로컬 개발 환경(SQLite)은 동시에 많은 문서를 처리하면
-                  DB 접속 통로가 일시적으로 부족해질 수 있습니다(배포 DB 전환 후 재평가 예정).
-                </Paragraph>
-                <Paragraph style={{ marginBottom: 0 }}>
-                  <b>4. 업로드 직후 상태는 "처리 중"으로 표시됩니다.</b> 실제 파싱은 서버에서 백그라운드로 진행되며,
-                  완료되면 자동으로 "완료" 또는 "실패"로 바뀝니다(2초 간격 배치 조회).
-                </Paragraph>
-              </Card>
-            </>
-          )}
         </Col>
       </Row>
     </div>
