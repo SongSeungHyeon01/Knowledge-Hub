@@ -709,11 +709,17 @@ async def 사용자_부서_지정(email: str, department: str | None = Body(None
 
 # 로그인 기능이 켜져 있으면(AUTH_ENABLED) 아래 목록을 제외한 모든 API가 유효한
 # 세션 쿠키를 요구한다. 꺼져 있으면 기존 무인증 동작 그대로 통과시킨다.
-_AUTH_PUBLIC_PATHS = {"/", "/auth/config", "/auth/google", "/auth/me", "/auth/logout", "/docs", "/openapi.json", "/redoc"}
+_AUTH_PUBLIC_PATHS = {"/", "/auth/config", "/auth/google", "/auth/me", "/auth/logout", "/docs", "/openapi.json", "/redoc", "/favicon.svg"}
+# 프론트 빌드 정적 파일(/assets/index-XXXX.js·css 등)은 로그인 화면 자체를 띄우는 데
+# 필요하므로 항상 통과시킨다 — 안 그러면 "로그인 화면을 보려면 로그인이 필요"한
+# 모순이 생겨(그 파일들이 401로 막혀 화면이 통째로 빈 채로 남음, 실제로 겪은 버그).
+_AUTH_PUBLIC_PREFIXES = ("/assets/",)
 
 @app.middleware("http")
 async def _require_login(request: Request, call_next):
-    if not AUTH_ENABLED or request.method == "OPTIONS" or request.url.path in _AUTH_PUBLIC_PATHS:
+    path = request.url.path
+    if (not AUTH_ENABLED or request.method == "OPTIONS"
+            or path in _AUTH_PUBLIC_PATHS or path.startswith(_AUTH_PUBLIC_PREFIXES)):
         return await call_next(request)
     data = _verify_session_token(request.cookies.get(SESSION_COOKIE))
     if not data:
