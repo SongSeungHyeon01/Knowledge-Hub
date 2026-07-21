@@ -3,7 +3,10 @@
 #   2단계: classify_pdf      — 텍스트형/스캔형 판별
 #   3단계: extract_text_pages — 텍스트형 PDF 본문 추출
 #   4단계: extract_ocr_pages  — 스캔형 PDF OCR 인식 + 신뢰도 계산
+#   STEP 1(2026-07-22): camelot 페이지 단위 조건부 실행 — 대용량 텍스트 PDF 처리방어
 import io
+import os
+import time
 
 import pdfplumber   # PDF 텍스트 추출 + 페이지 렌더링 (MIT, 렌더링 백엔드 pypdfium2) — PyMuPDF 완전 대체
 import camelot      # PDF 표 추출 (MIT, 기본 백엔드 pdfium) — STEP 4에서 추가
@@ -26,6 +29,63 @@ TEXT_THRESHOLD = 10
 # 실제 문서를 투입해 flagged 비율을 관찰한 뒤 이 값을 재조정할 필요가 있을 수 있다.
 # ─────────────────────────────────────────────────────────────────────
 OCR_CONFIDENCE_THRESHOLD = 0.7
+
+# ── STEP 1: camelot 게이트 (2026-07-22, 대용량 텍스트 PDF 처리방어) ─────────────
+# 페이지의 pdfplumber 텍스트가 이 길이 이상이면 camelot(표 감지)을 생략한다.
+# camelot은 표 유무와 무관하게 페이지마다 호출되면 파일 전체를 재오픈하는 비용을
+# 지불한다(실측: 1,950쪽 텍스트 PDF에서 camelot만 ~50분). 텍스트가 이미 충분한
+# 페이지는 표가 섞여 있어도 표 마크다운을 잃을 수 있으나, 표 검색은 부차적이라는
+# 제품 판단(2026-07-22)에 따라 감수한다. TEXT_THRESHOLD(스캔 판별용, 10자)와는
+# 목적이 달라 별도 상수로 둔다.
+CAMELOT_SKIP_TEXT_LEN = int(os.environ.get("CAMELOT_SKIP_TEXT_LEN", "100"))
+
+# 안전장치 — 텍스트가 희박해 위 게이트를 통과하지 못하는 페이지가 많은 문서에서도
+# camelot이 무제한 실행되지 않도록 문서(parse_pdf 1회 호출) 단위 상한을 둔다.
+# 둘 중 하나라도 넘으면 "그 시점 이후" 페이지만 camelot을 생략한다 — 이미 처리한
+# 페이지의 표는 유지되고, 문서 전체가 실패 처리되지도 않는다(부분 저하, 전체 실패 아님).
+#
+# ⚠ CAMELOT_TIMEOUT_SEC는 프로세스/스레드/시그널 기반의 진짜 타임아웃이 아니다.
+# camelot.read_pdf()는 pdfium(C 확장)을 동기 호출하는 단일 함수 호출이라, 실행
+# 도중에는 파이썬에서 선제적으로 중단할 방법이 없다(신호로 끊으면 pdfium 내부
+# 상태가 깨질 위험, 스레드는 GIL 때문에 죽이지 못하고 결국 끝까지 돎). 대신 매
+# camelot 호출 "전에" 누적 경과시간을 확인해, 이미 예산을 넘겼으면 이번 호출
+# 자체를 시작하지 않는 방식이다 — 호출 사이의 사전 게이트이지 실행 중단이 아니다.
+# 따라서 실제 소요는 설정값보다 최대 "camelot 호출 1회분"만큼 더 걸릴 수 있다.
+# 진짜 중단이 필요하면 별도 프로세스로 격리해야 하며, 이는 이번 STEP 범위 밖이다.
+CAMELOT_MAX_PAGES   = int(os.environ.get("CAMELOT_MAX_PAGES", "50"))
+CAMELOT_TIMEOUT_SEC = float(os.environ.get("CAMELOT_TIMEOUT_SEC", "120"))
+
+
+class _CamelotBudget:
+    """문서 하나(parse_pdf 1회 호출) 동안의 camelot 실행 횟수·누적 시간을 추적한다.
+    상한 초과 시 로그를 정확히 1회만 남긴다(반복 로그로 로그를 도배하지 않기 위함)."""
+
+    def __init__(self, source_file: str):
+        self.source_file = source_file
+        self.calls = 0
+        self.first_call_at = None
+        self._logged = False
+
+    def allow(self, page_num: int) -> bool:
+        if self.calls >= CAMELOT_MAX_PAGES:
+            self._log(page_num, f"페이지 수 상한 {CAMELOT_MAX_PAGES} 도달")
+            return False
+        if self.first_call_at is not None and (time.monotonic() - self.first_call_at) >= CAMELOT_TIMEOUT_SEC:
+            self._log(page_num, f"누적 시간 상한 {CAMELOT_TIMEOUT_SEC}초 도달")
+            return False
+        return True
+
+    def record_call(self):
+        if self.first_call_at is None:
+            self.first_call_at = time.monotonic()
+        self.calls += 1
+
+    def _log(self, page_num: int, reason: str):
+        # 조용한 실패 금지 — 예산 소진으로 나머지 페이지의 표가 누락될 수 있음을 반드시 남긴다.
+        if not self._logged:
+            self._logged = True
+            print(f"[parser] {self.source_file}: camelot 예산 소진({reason}) "
+                  f"— {page_num}페이지부터 나머지 페이지는 camelot 생략(텍스트만 추출, 표 마크다운 없음)")
 
 
 def classify_pdf(filepath: str) -> dict:
@@ -112,6 +172,8 @@ def extract_text_pages(filepath: str, source_file: str = None, pages: list = Non
 
             target_pages = pages if pages is not None else range(1, len(pdf.pages) + 1)
 
+            camelot_budget = _CamelotBudget(source_file)   # 이 문서(호출) 범위에서만 유효 — 페이지 루프 밖에서 1회 생성
+
             result_pages = []
             for page_num in target_pages:
                 # 페이지 단위 예외 격리: 한 페이지가 깨져도 파일 전체를 버리지 않는다.
@@ -120,7 +182,7 @@ def extract_text_pages(filepath: str, source_file: str = None, pages: list = Non
                 # (파일 자체를 못 여는 경우는 이 루프 바깥 try/except에서 status=failed로 처리된다)
                 try:
                     page = pdf.pages[page_num - 1]
-                    text = _extract_page_text(filepath, page, page_num)
+                    text = _extract_page_text(filepath, page, page_num, camelot_budget)
                     result_pages.append({
                         "page": page_num,
                         "text": text,
@@ -153,14 +215,17 @@ def extract_text_pages(filepath: str, source_file: str = None, pages: list = Non
         }
 
 
-def _extract_page_text(filepath: str, page, page_num: int) -> str:
+def _extract_page_text(filepath: str, page, page_num: int, camelot_budget: "_CamelotBudget") -> str:
     """
     한 페이지의 텍스트를 뽑되, 표가 있으면 표 영역을 제외한 텍스트 + 마크다운 표를 합쳐 반환한다.
 
-    1. camelot으로 이 페이지에 표가 있는지 감지한다 (flavor="lattice" — 격자선 있는 표 기준.
-       격자선이 없는 표는 이번 구현 범위 밖이다).
-    2. 표가 없으면: 조기 반환 — pdfplumber로 페이지 전체를 그대로 추출하고 끝낸다.
-       (표가 없는 페이지에서 카멜롯 처리를 더 하지 않기 위함 — 자원 절약)
+    0. (STEP 1, 2026-07-22) pdfplumber 텍스트를 먼저 뽑아 CAMELOT_SKIP_TEXT_LEN자 이상이면
+       camelot을 아예 호출하지 않고 그 텍스트를 바로 반환한다. camelot 안전장치
+       (CAMELOT_MAX_PAGES/CAMELOT_TIMEOUT_SEC, camelot_budget)를 이미 넘긴 경우도 동일.
+    1. 위 게이트를 통과하지 못하면(텍스트가 희박하면) camelot으로 이 페이지에 표가
+       있는지 감지한다 (flavor="lattice" — 격자선 있는 표 기준. 격자선이 없는 표는
+       이번 구현 범위 밖이다).
+    2. 표가 없으면: 조기 반환 — 0에서 이미 뽑은 텍스트를 그대로 쓴다(재추출 없음).
     3. 표가 있으면: camelot 좌표(bbox)를 pdfplumber 좌표로 변환해 그 영역을 제외한
        텍스트를 뽑고, 표는 마크다운으로 변환해 페이지 끝에 붙인다.
 
@@ -173,9 +238,22 @@ def _extract_page_text(filepath: str, page, page_num: int) -> str:
       2) 이 파싱은 문서 업로드 시점에 한 번 도는 배치 작업이라 사용자가 실시간으로
          기다리는 구간이 아니다 (검색 응답 5분 이내 같은 실사용 성공 기준과 무관).
       3) 실제 운영에서 이 부분이 병목이라고 측정된 적이 없다.
-    실운영에서 느려짐이 실제로 확인되면 그때 다시 검토한다.
+    2026-07-22: 위 3번 전제가 깨졌다 — 1,950쪽 텍스트 PDF에서 camelot이 페이지마다
+    무조건 실행되어 파싱이 ~50분 걸리는 것이 실측·코드로 확인됨. STEP 1로 텍스트가
+    충분한 페이지는 camelot 자체를 생략하는 게이트를 추가한다(아래 0단계).
     ─────────────────────────────────────────────────────────────────────
     """
+    text = page.extract_text() or ""
+
+    if len(text.strip()) >= CAMELOT_SKIP_TEXT_LEN:
+        return text   # 텍스트가 이미 충분 — camelot 미호출 (표가 섞여 있어도 마크다운 변환 없이 원문 텍스트만 반환)
+
+    if not camelot_budget.allow(page_num):
+        return text   # 예산 소진 — camelot 미호출, 로그는 _CamelotBudget.allow() 내부에서 1회만 남김
+
+    # 예산은 호출 성공/실패와 무관하게 "시도" 자체를 센다 — 비용(파일 재오픈)은
+    # camelot이 표를 못 찾고 실패하더라도 이미 발생했기 때문이다.
+    camelot_budget.record_call()
     try:
         tables = camelot.read_pdf(filepath, pages=str(page_num), flavor="lattice")
     except Exception:
@@ -184,7 +262,7 @@ def _extract_page_text(filepath: str, page, page_num: int) -> str:
         tables = []
 
     if len(tables) == 0:
-        return page.extract_text() or ""
+        return text
 
     # 좌표계 변환 (설계서 2.1 주의사항):
     #   camelot  = 왼쪽 아래가 원점, y는 위로 갈수록 커짐
