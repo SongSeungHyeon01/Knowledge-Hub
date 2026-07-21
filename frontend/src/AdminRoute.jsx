@@ -74,16 +74,32 @@ export default function AdminRoute() {
       >
         <div onClick={goHome} style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', flexShrink: 0 }}>
           <div style={{
-            width: 30, height: 30, borderRadius: 8, background: '#1677ff',
+            width: 30, height: 30, borderRadius: 8, background: '#f1f5f9',
             display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
           }}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-              <path d="M12 2 L22 7 L12 12 L2 7 Z" fill="#fff" opacity="0.95" />
-              <path d="M2 7 L12 12 L12 22 L2 17 Z" fill="#fff" opacity="0.75" />
-              <path d="M22 7 L12 12 L12 22 L22 17 Z" fill="#fff" opacity="0.6" />
+            <svg width="18" height="18" viewBox="0 0 32 32">
+              <g fill="none" stroke="#64748b" strokeWidth="1.6" strokeLinejoin="round">
+                <rect x="6" y="10" width="10" height="17" rx="1" />
+                <rect x="17" y="14" width="9" height="13" rx="1" />
+                <rect x="9" y="13" width="1.6" height="1.6" fill="#64748b" stroke="none" />
+                <rect x="9" y="17" width="1.6" height="1.6" fill="#64748b" stroke="none" />
+                <rect x="9" y="21" width="1.6" height="1.6" fill="#64748b" stroke="none" />
+                <rect x="12.5" y="13" width="1.6" height="1.6" fill="#64748b" stroke="none" />
+                <rect x="12.5" y="17" width="1.6" height="1.6" fill="#64748b" stroke="none" />
+                <rect x="12.5" y="21" width="1.6" height="1.6" fill="#64748b" stroke="none" />
+                <rect x="19.5" y="17" width="1.6" height="1.6" fill="#64748b" stroke="none" />
+                <rect x="19.5" y="21" width="1.6" height="1.6" fill="#64748b" stroke="none" />
+                <rect x="22.5" y="17" width="1.6" height="1.6" fill="#64748b" stroke="none" />
+                <rect x="22.5" y="21" width="1.6" height="1.6" fill="#64748b" stroke="none" />
+              </g>
             </svg>
           </div>
-          {!isNarrow && <div style={{ fontWeight: 800, fontSize: 15, color: '#1a1a1a' }}>Knowledge Hub · 관리자</div>}
+          {!isNarrow && (
+            <div style={{ lineHeight: 1.25 }}>
+              <div style={{ fontWeight: 800, fontSize: 15, color: '#1a1a1a' }}>Knowledge Hub · 관리자</div>
+              <div style={{ fontSize: 11, color: '#8c8c8c' }}>코싸이온(주)</div>
+            </div>
+          )}
         </div>
         {/* 관리자 화면의 좌측 서브메뉴가 상단 탭으로 옮겨와 여기에 포털로 렌더링됨
             — AdminPage가 실제 메뉴 항목·선택 상태를 들고 있고, 이 슬롯으로 포털만 쏴준다.
