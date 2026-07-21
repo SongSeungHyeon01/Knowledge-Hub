@@ -11,6 +11,7 @@ import {
   CheckCircleOutlined, CloseCircleOutlined, LoadingOutlined, EyeOutlined,
 } from '@ant-design/icons'
 import axios from 'axios'
+import useIsNarrow from './useIsNarrow'
 
 const { Title, Text, Paragraph } = Typography
 
@@ -25,6 +26,7 @@ const STATUS_TAG = {
 }
 
 export default function MyPage({ me }) {
+  const isNarrow = useIsNarrow()
   const queryClient = useQueryClient()
   const [editDoc,      setEditDoc]      = useState(null)  // 수정 모달 대상 문서 (null이면 닫힘)
   const [editTitle,    setEditTitle]    = useState('')
@@ -107,8 +109,8 @@ export default function MyPage({ me }) {
     <div style={{ maxWidth: 1400, margin: '0 auto', padding: '24px 24px 40px' }}>
       {/* flex="200px" 빈 칸: 업로드/관리자 화면의 좌측 사이드바 폭(gutter 포함)만큼 맞춰서
           모든 화면의 제목·본문이 같은 x 위치에서 시작하도록 함 */}
-      <Row gutter={20} wrap={false}>
-        <Col flex="200px" />
+      <Row gutter={20} wrap={isNarrow}>
+        <Col flex={isNarrow ? '0 0 0px' : '200px'} />
         <Col flex="auto" style={{ minWidth: 0 }}>
       <Title level={3} style={{ marginBottom: 2 }}>내 정보</Title>
       <Paragraph type="secondary" style={{ marginBottom: 16 }}>내가 업로드한 문서를 여기서 직접 수정·삭제할 수 있습니다.</Paragraph>
@@ -135,6 +137,7 @@ export default function MyPage({ me }) {
         loading={isLoading}
         pagination={{ pageSize: 10 }}
         locale={{ emptyText: <Empty description="아직 업로드한 문서가 없습니다" /> }}
+        scroll={isNarrow ? { x: 'max-content' } : undefined}
       />
 
       <Modal

@@ -20,6 +20,7 @@ import {
 import { useState, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
+import useIsNarrow from './useIsNarrow'
 import UploadPage from './UploadPage'
 import SearchPage from './SearchPage'
 import LoginPage from './LoginPage'
@@ -31,6 +32,7 @@ const { Header, Content } = Layout
 const API = import.meta.env.VITE_API_URL
 
 export default function App() {
+  const isNarrow = useIsNarrow()
   const [current,   setCurrent]   = useState('search')
   // 로고 클릭 시 항상 메인(검색) 화면으로 — 이미 검색 탭이어도 검색 결과·필터 등
   // 남아 있는 내부 상태를 지우고 처음 화면으로 되돌리기 위해 key를 바꿔 강제로 다시 마운트한다
@@ -158,7 +160,7 @@ export default function App() {
         {/* 좌측: 브랜드 (클릭 시 항상 메인 화면인 검색 탭으로 이동, 내부 상태도 초기화) */}
         <div
           onClick={goHome}
-          style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 220, cursor: 'pointer' }}
+          style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: isNarrow ? 0 : 220, cursor: 'pointer', flexShrink: 0 }}
         >
           <div style={{
             width: 30, height: 30, borderRadius: 8, background: '#1677ff',
@@ -170,26 +172,31 @@ export default function App() {
               <path d="M22 7 L12 12 L12 22 L22 17 Z" fill="#fff" opacity="0.6" />
             </svg>
           </div>
-          <div style={{ lineHeight: 1.25 }}>
-            <div style={{ fontWeight: 800, fontSize: 15, color: '#1a1a1a' }}>Knowledge Hub</div>
-          </div>
+          {!isNarrow && (
+            <div style={{ lineHeight: 1.25 }}>
+              <div style={{ fontWeight: 800, fontSize: 15, color: '#1a1a1a' }}>Knowledge Hub</div>
+            </div>
+          )}
         </div>
 
-        {/* 중앙: 탭 메뉴 — 좌측 로고·우측 계정 영역의 폭이 서로 달라도(이메일 길이 등)
-            항상 화면 정중앙에 오도록 flex 흐름에서 빼고 절대 위치로 중앙 정렬한다.
-            Header가 position: sticky라 이 absolute의 기준(containing block)이 된다. */}
-        <div style={{ position: 'absolute', left: '50%', transform: 'translateX(-50%)' }}>
+        {/* 중앙: 탭 메뉴 — 넓을 때는 좌측 로고·우측 계정 영역 폭이 달라도(이메일 길이 등)
+            항상 화면 정중앙에 오도록 flex 흐름에서 빼고 절대 위치로 중앙 정렬한다
+            (Header가 position: sticky라 이 absolute의 기준이 됨). 창이 좁아지면 로고·계정
+            영역과 겹칠 수 있어 절대 위치를 끄고 남는 공간 안에서만 가운데 정렬한다. */}
+        <div style={isNarrow
+          ? { flex: 1, display: 'flex', justifyContent: 'center', minWidth: 0, overflow: 'hidden' }
+          : { position: 'absolute', left: '50%', transform: 'translateX(-50%)' }}>
           <Menu
             mode="horizontal"
             selectedKeys={[current]}
             onClick={(e) => setCurrent(e.key)}
             items={menuItems}
-            style={{ border: 'none', minWidth: 320, justifyContent: 'center' }}
+            style={{ border: 'none', minWidth: isNarrow ? 0 : 320, justifyContent: 'center' }}
           />
         </div>
 
         {/* 우측: 알림 벨 + 관리자 링크(별도 페이지, /admin) + 계정 드롭다운(로그인 활성화 시 — 내 정보·로그아웃) */}
-        <div style={{ minWidth: 220, display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 10 }}>
+        <div style={{ minWidth: isNarrow ? 0 : 220, display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 10, flexShrink: 0 }}>
           {authEnabled && me && (
             <Popover
               open={notifOpen}
@@ -231,7 +238,7 @@ export default function App() {
           )}
           {isAdmin && (
             <Button icon={<SettingOutlined />} onClick={() => { window.location.href = '/admin' }}>
-              관리자
+              {!isNarrow && '관리자'}
             </Button>
           )}
           {authEnabled && me && (
@@ -245,10 +252,12 @@ export default function App() {
               }}
               placement="bottomRight"
             >
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', minWidth: 0 }}>
                 <Avatar size={28} src={me.picture} icon={!me.picture && <UserOutlined />} />
-                <span style={{ fontSize: 13, color: '#595959', lineHeight: 1 }}>{me.name ?? me.email}</span>
-                {isAdmin && (
+                {!isNarrow && (
+                  <span style={{ fontSize: 13, color: '#595959', lineHeight: 1, maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{me.name ?? me.email}</span>
+                )}
+                {isAdmin && !isNarrow && (
                   <Tag color="blue" style={{ margin: 0, fontSize: 11, lineHeight: '16px', padding: '0 6px' }}>관리자</Tag>
                 )}
               </div>

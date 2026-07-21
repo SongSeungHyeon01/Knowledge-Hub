@@ -31,6 +31,7 @@ import {
   EditOutlined,
 } from '@ant-design/icons'
 import axios from 'axios'
+import useIsNarrow from './useIsNarrow'
 
 const { Dragger } = Upload
 const { Title, Text, Paragraph } = Typography
@@ -85,6 +86,7 @@ const STATUS_TAG = {
 }
 
 export default function UploadPage({ onNavigate }) {
+  const isNarrow = useIsNarrow()
   const [navKey, setNavKey] = useState('quick')
   const [category, setCategory] = useState(
     () => localStorage.getItem('km_last_category') ?? 'spec'
@@ -114,12 +116,13 @@ export default function UploadPage({ onNavigate }) {
     localStorage.setItem('km_last_category', val)
   }
 
-  // 클라이언트가 직접 만든 카테고리 — 이 브라우저에서 즉시 다시 고를 수 있게 로컬에 저장.
-  // (실제 저장은 문서의 category 문자열 컬럼 그대로라 서버 쪽 사전 등록은 필요 없음.
-  //  다른 사람이 만든 카테고리는 stats.by_category에 실제로 잡힌 값으로 자동 반영됨)
-  const [customCategories, setCustomCategories] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('km_custom_categories') || '[]') } catch { return [] }
-  })
+  // 클라이언트가 방금 만든 카테고리 — 문서에 아직 반영 전(업로드 완료 전)이라
+  // stats.by_category에 안 잡힌 값을 이번 세션에서 바로 다시 고를 수 있게 메모리에만 둔다.
+  // localStorage에 영구 저장하지 않는 이유: 관리자가 카테고리 관리 탭에서 이름을 바꾸거나
+  // 삭제해도 여기 캐시가 안 지워지면 그 브라우저에서 이미 없어진 카테고리가 계속 선택지로
+  // 남아 화면마다 다른 카테고리 목록이 보이는 문제가 생긴다 — 새로고침하면 stats.by_category
+  // (서버 실제 값)로만 다시 채워지게 세션 한정으로만 유지한다.
+  const [customCategories, setCustomCategories] = useState([])
   const [newCatOpen, setNewCatOpen] = useState(false)
   const [newCatName, setNewCatName] = useState('')
   const [hoveredCategory, setHoveredCategory] = useState(null)  // 좌측 카테고리 목록 마우스오버 표시용
@@ -155,9 +158,7 @@ export default function UploadPage({ onNavigate }) {
     const name = newCatName.trim().slice(0, 30)
     if (!name) return
     if (!allCategories.some(c => c.toLowerCase() === name.toLowerCase())) {
-      const next = [...customCategories, name]
-      setCustomCategories(next)
-      localStorage.setItem('km_custom_categories', JSON.stringify(next))
+      setCustomCategories(prev => [...prev, name])
     }
     handleCategoryChange(name)
     if (promptFile) setPromptCategory(name)  // 카테고리·특이사항 물어보는 중이면 그 자리에서 바로 반영
@@ -494,10 +495,15 @@ export default function UploadPage({ onNavigate }) {
 
   return (
     <div style={{ maxWidth: 1400, margin: '0 auto', padding: '24px 24px 40px' }}>
-      <Row gutter={20} wrap={false}>
-        {/* ── 좌측 서브메뉴 (스크롤해도 화면에 고정) ───────────────── */}
-        {/* marginTop: 제목·안내문·경고 배너 2개 밑, 업로드 드래그 보드 윗줄과 맞춤 */}
-        <Col flex="200px" style={{ position: 'sticky', top: 80, alignSelf: 'flex-start', marginTop: 220 }}>
+      <Row gutter={20} wrap={isNarrow}>
+        {/* ── 좌측 서브메뉴 — 창이 좁아지면(노트북 반접이 이하) 위로 쌓임 ───── */}
+        {/* marginTop: 제목·안내문·경고 배너 2개 밑, 업로드 드래그 보드 윗줄과 맞춤(넓을 때만) */}
+        <Col
+          flex={isNarrow ? '0 0 100%' : '200px'}
+          style={isNarrow
+            ? { marginBottom: 16 }
+            : { position: 'sticky', top: 80, alignSelf: 'flex-start', marginTop: 220 }}
+        >
           <Menu
             mode="inline"
             selectedKeys={[navKey]}

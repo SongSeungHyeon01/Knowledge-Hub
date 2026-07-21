@@ -20,6 +20,7 @@ import {
   EyeOutlined, UserOutlined, TeamOutlined,
 } from '@ant-design/icons'
 import axios from 'axios'
+import useIsNarrow from './useIsNarrow'
 
 const { Title, Text } = Typography
 
@@ -45,6 +46,7 @@ const FILE_TYPE_COLOR = {
 }
 
 export default function AdminPage({ onNavigate }) {
+  const isNarrow = useIsNarrow()
   const queryClient = useQueryClient()
 
   const [navKey, setNavKey] = useState('docs')  // docs | ocr | history | category | admins
@@ -551,12 +553,12 @@ export default function AdminPage({ onNavigate }) {
           selectedKeys={[navKey]}
           onClick={(e) => setNavKey(e.key)}
           items={leftMenuItems}
-          disabledOverflow
-          style={{ border: 'none', lineHeight: '62px', whiteSpace: 'nowrap' }}
+          disabledOverflow={!isNarrow}
+          style={{ border: 'none', lineHeight: '62px', whiteSpace: isNarrow ? 'normal' : 'nowrap', maxWidth: '100%' }}
         />,
         navSlot
       )}
-      <Row gutter={20} wrap={false}>
+      <Row gutter={20} wrap={isNarrow}>
         {/* ── 중앙 콘텐츠 ───────────────────────────────────────── */}
         {/* minWidth: 0 — flex 아이템의 기본 최소폭(content의 min-content 크기)을 해제.
             안 넣으면 넓은 테이블(문서 목록) 때문에 이 Col이 줄어들지 못하고 3열 Row 전체가
@@ -587,10 +589,10 @@ export default function AdminPage({ onNavigate }) {
               <ACard size="small" style={{ marginBottom: 18, padding: '4px 0' }}>
                 <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
                   <Space wrap size={16}>
-                    <Input placeholder="파일명 검색" prefix={<SearchOutlined style={{ color: '#aaa' }} />} value={filterText} onChange={e => setFilterText(e.target.value)} allowClear style={{ width: 300 }} />
-                    <Select placeholder="카테고리" value={filterCategory} onChange={setFilterCategory} allowClear style={{ width: 170 }} options={allCategoryOptions} />
-                    <Select placeholder="상태" value={filterStatus} onChange={setFilterStatus} allowClear style={{ width: 140 }} options={[{ value: 'success', label: '성공' }, { value: 'failed', label: '실패' }]} />
-                    <Select placeholder="파일 형식" value={filterFileType} onChange={setFilterFileType} allowClear style={{ width: 160 }} options={['pdf','docx','pptx','xlsx','hwp','hwpx','txt','md','png','jpg'].map(ft => ({ value: ft, label: ft.toUpperCase() }))} />
+                    <Input placeholder="파일명 검색" prefix={<SearchOutlined style={{ color: '#aaa' }} />} value={filterText} onChange={e => setFilterText(e.target.value)} allowClear style={{ width: isNarrow ? '100%' : 300 }} />
+                    <Select placeholder="카테고리" value={filterCategory} onChange={setFilterCategory} allowClear style={{ width: isNarrow ? '100%' : 170 }} options={allCategoryOptions} />
+                    <Select placeholder="상태" value={filterStatus} onChange={setFilterStatus} allowClear style={{ width: isNarrow ? '100%' : 140 }} options={[{ value: 'success', label: '성공' }, { value: 'failed', label: '실패' }]} />
+                    <Select placeholder="파일 형식" value={filterFileType} onChange={setFilterFileType} allowClear style={{ width: isNarrow ? '100%' : 160 }} options={['pdf','docx','pptx','xlsx','hwp','hwpx','txt','md','png','jpg'].map(ft => ({ value: ft, label: ft.toUpperCase() }))} />
                     {(filterText || filterCategory || filterStatus || filterFileType) && (
                       <Button onClick={() => { setFilterText(''); setFilterCategory(null); setFilterStatus(null); setFilterFileType(null) }}>필터 초기화</Button>
                     )}
@@ -625,6 +627,7 @@ export default function AdminPage({ onNavigate }) {
                 columns={docColumns} dataSource={filteredDocuments} rowKey="id" loading={loadingDocs}
                 pagination={{ pageSize: 10 }}
                 rowSelection={{ selectedRowKeys, onChange: setSelectedRowKeys }}
+                scroll={isNarrow ? { x: 'max-content' } : undefined}
               />
             </>
           )}
@@ -965,8 +968,13 @@ export default function AdminPage({ onNavigate }) {
           )}
         </Col>
 
-        {/* ── 우측 요약 통계 패널 (스크롤해도 화면에 고정) ────────── */}
-        <Col flex="240px" style={{ position: 'sticky', top: 80, alignSelf: 'flex-start', marginTop: 80, maxHeight: 'calc(100vh - 96px)', overflowY: 'auto' }}>
+        {/* ── 우측 요약 통계 패널 — 창이 좁아지면 콘텐츠 밑으로 쌓임 ────── */}
+        <Col
+          flex={isNarrow ? '0 0 100%' : '240px'}
+          style={isNarrow
+            ? { marginTop: 20 }
+            : { position: 'sticky', top: 80, alignSelf: 'flex-start', marginTop: 80, maxHeight: 'calc(100vh - 96px)', overflowY: 'auto' }}
+        >
           <ACard size="small" style={{ marginBottom: 16 }}>
             <Statistic title="전체 문서 수" value={stats?.total_documents ?? 0} valueStyle={{ color: '#1677ff', fontWeight: 700 }} />
           </ACard>
@@ -980,11 +988,14 @@ export default function AdminPage({ onNavigate }) {
           <ACard size="small" style={{ marginBottom: 16 }}>
             <Statistic title="OCR 검토 대기" value={stats?.flagged_count ?? 0} valueStyle={{ color: (stats?.flagged_count ?? 0) > 0 ? '#d46b08' : '#389e0d', fontWeight: 700 }} />
           </ACard>
-          <ACard size="small" title="가장 최근에 업로드된 문서" style={{ marginBottom: 16 }}>
+          <ACard size="small" title="최근 업로드 문서" style={{ marginBottom: 16 }}>
             {mostRecentDoc ? (
-              <div>
+              <div
+                onClick={() => openDetail(mostRecentDoc)}
+                style={{ cursor: 'pointer' }}
+              >
                 <Text style={{ fontSize: 12.5 }}>{formatDate(mostRecentDoc.uploaded_at)}</Text>
-                <div style={{ fontSize: 12.5, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{mostRecentDoc.filename}</div>
+                <div style={{ fontSize: 12.5, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#1677ff' }}>{mostRecentDoc.filename}</div>
               </div>
             ) : <Text type="secondary" style={{ fontSize: 12.5 }}>기록 없음</Text>}
           </ACard>
