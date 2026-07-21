@@ -267,7 +267,7 @@ export default function App() {
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', minWidth: 0 }}>
                 <Avatar size={28} src={me.picture} icon={!me.picture && <UserOutlined />} />
                 {!isNarrow && (
-                  <span style={{ fontSize: 13, color: '#595959', lineHeight: 1, maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{me.name ?? me.email}</span>
+                  <span style={{ fontSize: 13, color: '#595959', lineHeight: 1.4, maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{me.name ?? me.email}</span>
                 )}
                 {isAdmin && !isNarrow && (
                   <Tag color="blue" style={{ margin: 0, fontSize: 11, lineHeight: '16px', padding: '0 6px' }}>관리자</Tag>
