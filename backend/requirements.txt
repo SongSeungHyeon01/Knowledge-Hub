@@ -5,6 +5,13 @@ sqlalchemy[asyncio]>=2.0.0
 aiosqlite>=0.20.0
 asyncpg>=0.29.0
 python-multipart>=0.0.9
+
+# ── 로그인(구글 OAuth, 회사 도메인 제한) ──────────────────────────────────────
+google-auth>=2.29.0   # 구글 ID 토큰 서명 검증
+requests>=2.32.0      # google-auth의 기본 HTTP 트랜스포트가 요구함
+itsdangerous>=2.2.0   # 자체 세션 쿠키 서명
+python-dotenv>=1.0.0  # backend/.env(git 미추적)에서 GOOGLE_CLIENT_ID 등 로드
+
 # aiofiles·alembic은 현재 코드에서 미사용이라 제거 (2026-07-04 C6 점검).
 # alembic은 설계도의 "Lifespan 7단계(alembic→…)" 도입 시 다시 추가할 것.
 

@@ -1,8 +1,13 @@
 // UploadPage.jsx — 문서 업로드 화면
-// 드래그&드롭으로 PDF를 올리고 카테고리를 선택합니다
+// 2026-07-17: 우측 정보 패널(업로드 팁·오늘 현황·최근 인덱싱) 제거 — 좌측 서브메뉴 + 중앙 업로드 폼 2단 레이아웃.
+// 업로드·배치폴링·중복확인 로직(doUpload/handleUpload/runBatchPoll)은 기존 그대로 유지.
 
-import { useState, useRef } from 'react'
-import { Upload, Select, Card, Typography, Space, Tag, Progress, List, Avatar, Modal, Button, Tooltip } from 'antd'
+import { useState, useEffect, useRef, useMemo } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import {
+  Upload, Table, Typography, Space, Tag, Progress, Modal, Button, Tooltip,
+  Alert, Menu, Row, Col, Card, List, Empty, Input, message, Switch,
+} from 'antd'
 import {
   InboxOutlined,
   FolderOpenOutlined,
@@ -20,20 +25,20 @@ import {
   CloseOutlined,
   ExclamationCircleOutlined,
   SearchOutlined,
+  CloudUploadOutlined,
+  HistoryOutlined,
+  PlusOutlined,
+  EditOutlined,
 } from '@ant-design/icons'
 import axios from 'axios'
+import useIsNarrow from './useIsNarrow'
 
 const { Dragger } = Upload
-const { Title, Text } = Typography
+const { Title, Text, Paragraph } = Typography
 
 const API = import.meta.env.VITE_API_URL
 
-const CATEGORY_OPTIONS = [
-  { value: 'spec',         label: '사양서 (Spec)' },
-  { value: 'research',     label: '연구자료 (Research)' },
-  { value: 'presentation', label: '발표자료 (Presentation)' },
-  { value: 'report',       label: '보고서 (Report)' },
-]
+const CATEGORIES = ['spec', 'research', 'presentation', 'report']
 
 const CATEGORY_COLOR = {
   spec: 'blue', research: 'purple', presentation: 'cyan', report: 'green',
@@ -41,17 +46,11 @@ const CATEGORY_COLOR = {
 const CATEGORY_LABEL = {
   spec: '사양서', research: '연구자료', presentation: '발표자료', report: '보고서',
 }
-const CATEGORY_ACCENT = {
-  spec: '#1677ff', research: '#722ed1', presentation: '#13c2c2', report: '#52c41a',
-}
-const CATEGORY_BG = {
-  spec: '#e6f4ff', research: '#f9f0ff', presentation: '#e6fffb', report: '#f6ffed',
-}
 
 // 파일 확장자별 아이콘
 const getFileIcon = (filename) => {
   const ext = filename?.split('.').pop()?.toLowerCase()
-  const style = { fontSize: 18 }
+  const style = { fontSize: 17 }
   switch (ext) {
     case 'pdf':  return <FilePdfOutlined  style={{ ...style, color: '#ff4d4f' }} />
     case 'docx':
@@ -79,22 +78,131 @@ const formatSize = (bytes) => {
   return `${(bytes / (1024 * 1024)).toFixed(1)}MB`
 }
 
+const STATUS_TAG = {
+  uploading: <Tag icon={<LoadingOutlined />} color="processing">전송 중</Tag>,
+  parsing:   <Tag icon={<LoadingOutlined />} color="warning">처리 중</Tag>,
+  success:   <Tag icon={<CheckCircleOutlined />} color="success">완료</Tag>,
+  failed:    <Tag icon={<CloseCircleOutlined />} color="error">실패</Tag>,
+}
+
 export default function UploadPage({ onNavigate }) {
+  const isNarrow = useIsNarrow()
+  const [navKey, setNavKey] = useState('quick')
   const [category, setCategory] = useState(
-    () => localStorage.getItem('km_last_category') ?? 'report'
+    () => localStorage.getItem('km_last_category') ?? 'spec'
   )
+
+  // AI 자동 카테고리 분류 — AI 요약(SearchPage)과 동일하게 누구나 켜고 끌 수 있는
+  // 클라이언트 설정(localStorage에 기억, 서버 전역 설정 아님). 업로드마다 이 값을 함께 보낸다.
+  const [aiCategoryEnabled, setAiCategoryEnabled] = useState(
+    () => localStorage.getItem('km_ai_category_enabled') !== 'false'
+  )
+  const handleToggleAiCategory = (checked) => {
+    setAiCategoryEnabled(checked)
+    localStorage.setItem('km_ai_category_enabled', checked ? 'true' : 'false')
+  }
+
+  // 카테고리·특이사항 — 배치 업로드 시 파일마다 다른 값이 필요할 수 있어(업로드 전 공용
+  // 입력란 하나로는 모든 파일에 같은 값이 붙어버림), 업로드 폼이 아니라 업로드가 접수된
+  // 직후 파일마다 순서대로 물어본다. /me/documents/{id} PATCH(본인 문서 자가 수정용)를 재사용.
+  const [promptQueue,    setPromptQueue]    = useState([])  // 아직 안 물어본 파일들(대기열)
+  const [promptFile,     setPromptFile]     = useState(null)  // 지금 물어보는 중인 파일(null이면 닫힘)
+  const [promptCategory, setPromptCategory] = useState('spec')
+  const [promptMemo,     setPromptMemo]     = useState('')
+  const [promptSaving,   setPromptSaving]   = useState(false)
 
   const handleCategoryChange = (val) => {
     setCategory(val)
     localStorage.setItem('km_last_category', val)
   }
-  // files: 업로드 중이거나 완료된 파일 목록
+
+  // 클라이언트가 방금 만든 카테고리 — 문서에 아직 반영 전(업로드 완료 전)이라
+  // stats.by_category에 안 잡힌 값을 이번 세션에서 바로 다시 고를 수 있게 메모리에만 둔다.
+  // localStorage에 영구 저장하지 않는 이유: 관리자가 카테고리 관리 탭에서 이름을 바꾸거나
+  // 삭제해도 여기 캐시가 안 지워지면 그 브라우저에서 이미 없어진 카테고리가 계속 선택지로
+  // 남아 화면마다 다른 카테고리 목록이 보이는 문제가 생긴다 — 새로고침하면 stats.by_category
+  // (서버 실제 값)로만 다시 채워지게 세션 한정으로만 유지한다.
+  const [customCategories, setCustomCategories] = useState([])
+  const [newCatOpen, setNewCatOpen] = useState(false)
+  const [newCatName, setNewCatName] = useState('')
+  const [hoveredCategory, setHoveredCategory] = useState(null)  // 좌측 카테고리 목록 마우스오버 표시용
+
+  // files: 이번 브라우저 세션에서 업로드 중이거나 완료된 파일 목록
   // 각 항목: { id, filename, size, category, percent, status, pages, error }
   const [files, setFiles] = useState([])
 
-  // 파일 상태 업데이트 헬퍼 함수
   const updateFile = (id, patch) =>
     setFiles(prev => prev.map(f => f.id === id ? { ...f, ...patch } : f))
+
+  // ── 우측 패널·"최근 업로드" 탭용 실제 데이터 — GET /admin/documents, GET /admin/stats ──
+  // (관리자 전용 엔드포인트지만 현재 MVP엔 로그인·권한 구분이 없어 업로드 화면에서도 그대로 사용)
+  const { data: allDocs = [] } = useQuery({
+    queryKey: ['upload-page-documents'],
+    queryFn: () => axios.get(`${API}/admin/documents`).then(r => r.data),
+    refetchInterval: 8000,
+  })
+  const { data: stats } = useQuery({
+    queryKey: ['upload-page-stats'],
+    queryFn: () => axios.get(`${API}/admin/stats`).then(r => r.data),
+    refetchInterval: 8000,
+  })
+
+  // 고정 5종 + (이 브라우저에서 만든 것 ∪ 실제 서버에 존재하는 것) 커스텀 카테고리
+  const allCategories = useMemo(() => {
+    const observed = Object.keys(stats?.by_category ?? {})
+    const extra = [...customCategories, ...observed].filter(c => !CATEGORIES.includes(c))
+    return [...CATEGORIES, ...Array.from(new Set(extra))]
+  }, [customCategories, stats])
+
+  const handleCreateCategory = () => {
+    const name = newCatName.trim().slice(0, 30)
+    if (!name) return
+    if (!allCategories.some(c => c.toLowerCase() === name.toLowerCase())) {
+      setCustomCategories(prev => [...prev, name])
+    }
+    handleCategoryChange(name)
+    if (promptFile) setPromptCategory(name)  // 카테고리·특이사항 물어보는 중이면 그 자리에서 바로 반영
+    setNewCatName('')
+    setNewCatOpen(false)
+  }
+
+  // 업로드가 접수된 파일을 카테고리·특이사항 대기열에 넣는다 — 지금 아무것도 안 물어보는
+  // 중이면 아래 useEffect가 바로 꺼내서 물어보고, 이미 물어보는 중이면 그게 끝난 뒤 이어서 물어본다.
+  const enqueuePrompt = (f) =>
+    setPromptQueue(prev => [...prev, f])
+
+  useEffect(() => {
+    if (promptFile || promptQueue.length === 0) return
+    const [next, ...rest] = promptQueue
+    setPromptQueue(rest)
+    setPromptFile(next)
+    setPromptCategory(next.category)
+    setPromptMemo(next.memo || '')
+  }, [promptQueue, promptFile])
+
+  // 결과 테이블에서 이미 값이 있는 카테고리·특이사항을 다시 고칠 때도 같은 모달을 재사용
+  const openPrompt = (f) => {
+    setPromptFile(f)
+    setPromptCategory(f.category)
+    setPromptMemo(f.memo || '')
+  }
+
+  const savePrompt = async () => {
+    if (!promptFile) return
+    setPromptSaving(true)
+    try {
+      await axios.patch(`${API}/me/documents/${promptFile.docId}`, {
+        category: promptCategory, memo: promptMemo,
+      })
+      updateFile(promptFile.id, { category: promptCategory, memo: promptMemo.trim() || null })
+      handleCategoryChange(promptCategory)  // 다음 업로드 배치의 기본값으로도 반영
+      setPromptFile(null)
+    } catch {
+      message.error('저장에 실패했습니다')
+    } finally {
+      setPromptSaving(false)
+    }
+  }
 
   // 파싱 상태 폴링 — 업로드는 접수 즉시 응답하고(status='parsing'), 실제 파싱은
   // 서버 백그라운드에서 진행되므로, 완료(success/failed)를 폴링으로 감지한다.
@@ -136,15 +244,34 @@ export default function UploadPage({ onNavigate }) {
         const info = pending.get(docId)
         const doc  = byId.get(docId)
         if (!doc) {
-          // 배치 응답에 없는 docId(삭제됨 등) — 무한 폴링 방지를 위해 제거
           pending.delete(docId)
           continue
         }
-        if (doc.status !== 'parsing') {
-          updateFile(info.localId, {
-            status: doc.status,
-            pages:  doc.page_count ?? 0,
-            error:  doc.error,
+        if (doc.status === 'parsing') continue
+
+        // 파싱 결과(성공/실패)는 알게 되는 즉시 테이블에 반영 — AI 분류를 기다리는 동안에도
+        // "완료/실패" 상태는 바로 보여준다. category는 AI 분류가 끝나기 전후로 값이
+        // 바뀔 수 있어 매 폴링마다 최신값으로 계속 동기화한다(한 번만 반영하면 분류가
+        // 늦게 끝났을 때 테이블 태그가 옛 카테고리에 멈춰 있는 문제가 생김).
+        updateFile(info.localId, {
+          status: doc.status,
+          pages:  doc.page_count ?? 0,
+          error:  doc.error,
+          category: doc.category,
+          aiSuggested: !!doc.category_ai_suggested,
+        })
+        if (!info.resolvedAt) info.resolvedAt = now
+
+        // 실패한 문서는 분류할 내용이 없으니 바로 물어보고, 성공한 문서는 AI 분류
+        // 시도가 끝난 뒤(성공/실패 무관)에만 물어본다 — 단, Ollama가 너무 오래 걸리면
+        // (90초) 무한정 기다리지 않고 그냥 지금 카테고리로 진행한다.
+        const waitedTooLong = info.resolvedAt && (now - info.resolvedAt > 90 * 1000)
+        const readyForPrompt = doc.status === 'failed' || doc.category_ai_checked || waitedTooLong
+        if (readyForPrompt) {
+          enqueuePrompt({
+            id: info.localId, docId, filename: info.filename,
+            category: doc.category, memo: null,
+            aiSuggested: !!doc.category_ai_suggested,
           })
           pending.delete(docId)
         }
@@ -155,8 +282,8 @@ export default function UploadPage({ onNavigate }) {
   }
 
   // 폴링 대상에 문서를 추가하고, 전역 타이머가 없으면 시작한다
-  const addToPolling = (localId, docId) => {
-    pendingRef.current.set(docId, { localId, startedAt: Date.now() })
+  const addToPolling = (localId, docId, filename) => {
+    pendingRef.current.set(docId, { localId, filename, startedAt: Date.now() })
     if (timerRef.current == null) {
       timerRef.current = setInterval(runBatchPoll, 2000)
     }
@@ -166,14 +293,11 @@ export default function UploadPage({ onNavigate }) {
   const removeFile = (id) =>
     setFiles(prev => prev.filter(f => f.id !== id))
 
-  // 지원 파일 형식 목록
   const SUPPORTED_EXT = ['.pdf','.docx','.pptx','.ppt','.xlsx','.xls','.hwp','.hwpx','.txt','.md','.png','.jpg','.jpeg']
   const ACCEPT_ATTR   = SUPPORTED_EXT.join(',')
-  const MAX_SIZE_MB   = 200
+  const MAX_SIZE_MB   = 500  // 2026-07-11: 백엔드 MAX_UPLOAD_SIZE(500MB)와 통일 — 이전엔 200MB로 따로 남아있었음
 
-  // 실제 업로드 실행 함수 (중복 확인 후 호출됩니다)
   const doUpload = async (file) => {
-    // 프론트에서도 200MB 초과 즉시 차단
     if (file.size > MAX_SIZE_MB * 1024 * 1024) {
       const mb = (file.size / (1024 * 1024)).toFixed(1)
       setFiles(prev => [{
@@ -195,14 +319,13 @@ export default function UploadPage({ onNavigate }) {
     const form = new FormData()
     form.append('file', file)
     form.append('category', category)
-    // 폴더 업로드 시 원본 경로 전송 (브라우저가 webkitRelativePath 제공)
+    form.append('ai_category_enabled', aiCategoryEnabled ? 'true' : 'false')
     if (file.webkitRelativePath) {
       form.append('original_path', file.webkitRelativePath)
     }
 
     try {
       const res = await axios.post(`${API}/upload`, form, {
-        // onUploadProgress: 파일이 서버로 전송되는 % 를 실시간으로 받아옵니다
         onUploadProgress: (e) => {
           const percent = Math.round((e.loaded / e.total) * 100)
           updateFile(id, { percent })
@@ -212,7 +335,9 @@ export default function UploadPage({ onNavigate }) {
       if (data.status === 'parsing' && data.id != null) {
         // 접수됨 — 전송 100%, 이제 서버 파싱 대기(폴링으로 완료 감지)
         updateFile(id, { percent: 100, status: 'parsing', docId: data.id, error: null })
-        addToPolling(id, data.id)
+        // 카테고리·특이사항 확인 팝업은 여기서 바로 띄우지 않는다 — AI 자동 분류가
+        // 파싱 완료 후에야 가능해서, runBatchPoll이 분류 시도까지 끝난 걸 확인한 뒤 띄운다.
+        addToPolling(id, data.id, file.name)
       } else {
         // 검사 단계 즉시 실패(지원 안 함·크기 초과 등) 또는 그 외 응답
         updateFile(id, {
@@ -230,7 +355,6 @@ export default function UploadPage({ onNavigate }) {
   }
 
   const handleUpload = async (file) => {
-    // 중복 파일명 확인 후 경고창 표시
     try {
       const res = await axios.get(`${API}/upload/check`, { params: { filename: file.name } })
       if (res.data.exists) {
@@ -260,227 +384,335 @@ export default function UploadPage({ onNavigate }) {
     return false
   }
 
-  // 업로드 중인 파일이 하나라도 있으면 드롭존 비활성화
   const isUploading = files.some(f => f.status === 'uploading')
 
-  return (
-    <div style={{ padding: 32, maxWidth: 800, margin: '0 auto' }}>
-      <Title level={2}>문서 업로드</Title>
-
-      {/* ── 카테고리 선택 ─────────────────────────────────────────── */}
-      <Card
-        style={{
-          marginBottom: 24,
-          borderTop: `3px solid ${CATEGORY_ACCENT[category]}`,
-          borderRadius: 8,
-          background: CATEGORY_BG[category],
-          transition: 'border-top-color 0.3s, background 0.3s',
-        }}
-      >
-        <Space direction="vertical" style={{ width: '100%' }}>
-          <Text strong>1. 카테고리 선택</Text>
-          <Space align="center">
-            <Select
-              value={category}
-              onChange={handleCategoryChange}
-              options={CATEGORY_OPTIONS}
-              style={{ width: 240 }}
-              size="large"
-            />
-            <Tag color={CATEGORY_COLOR[category]} style={{ fontSize: 13, padding: '2px 10px' }}>
-              {CATEGORY_LABEL[category]}
-            </Tag>
+  const columns = [
+    {
+      title: '파일명',
+      dataIndex: 'filename',
+      render: (name, f) => (
+        <Space size={6}>
+          {getFileIcon(name)}
+          <Tooltip title={name}>
+            <Text style={{ maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block' }}>
+              {name}
+            </Text>
+          </Tooltip>
+        </Space>
+      ),
+    },
+    {
+      title: '카테고리',
+      dataIndex: 'category',
+      width: 110,
+      render: (c, f) => (
+        <Tag
+          color={CATEGORY_COLOR[c]}
+          style={{ cursor: f.docId ? 'pointer' : 'default' }}
+          onClick={() => f.docId && openPrompt(f)}
+        >
+          {CATEGORY_LABEL[c] ?? c}
+        </Tag>
+      ),
+    },
+    {
+      title: '크기',
+      dataIndex: 'size',
+      width: 90,
+      render: (s) => <Text type="secondary">{formatSize(s)}</Text>,
+    },
+    {
+      title: '상태',
+      dataIndex: 'status',
+      width: 210,
+      render: (status, f) => {
+        if (status === 'uploading') {
+          return <Progress percent={f.percent} size="small" status="active" style={{ maxWidth: 160 }} />
+        }
+        if (status === 'failed') {
+          return (
+            <Space direction="vertical" size={0}>
+              {STATUS_TAG.failed}
+              <Text type="danger" style={{ fontSize: 11.5 }}>{f.error}</Text>
+            </Space>
+          )
+        }
+        return (
+          <Space size={6}>
+            {STATUS_TAG[status]}
+            {status === 'success' && <Text type="secondary" style={{ fontSize: 12 }}>{f.pages}p</Text>}
           </Space>
-        </Space>
-      </Card>
-
-      {/* ── 드래그&드롭 업로드 영역 ───────────────────────────────── */}
-      <Card
-        style={{
-          marginBottom: 24,
-          borderLeft: `4px solid ${CATEGORY_ACCENT[category]}`,
-          borderRadius: 8,
-          transition: 'border-left-color 0.3s',
-        }}
-      >
-        <Space style={{ width: '100%', justifyContent: 'space-between' }} align="center">
-          <Text strong>2. 파일 업로드</Text>
-          {/* 폴더 선택 — webkitdirectory로 디렉토리 구조를 그대로 유지합니다 */}
-          <Upload
-            directory
-            multiple
-            showUploadList={false}
-            beforeUpload={handleUpload}
-            disabled={isUploading}
-            accept={ACCEPT_ATTR}
+        )
+      },
+    },
+    {
+      title: '특이사항',
+      width: 190,
+      render: (_, f) => {
+        if (!f.docId) return <Text type="secondary" style={{ fontSize: 12 }}>—</Text>
+        return (
+          <Button
+            type="link" size="small"
+            style={{ padding: 0, height: 'auto', maxWidth: 170, textAlign: 'left' }}
+            onClick={() => openPrompt(f)}
           >
-            <Button icon={<FolderOpenOutlined />} disabled={isUploading}>
-              폴더 선택
-            </Button>
-          </Upload>
-        </Space>
-        <Dragger
-          accept={ACCEPT_ATTR}
-          multiple
-          showUploadList={false}
-          beforeUpload={handleUpload}
-          disabled={isUploading}
-          style={{ marginTop: 12 }}
-        >
-          <p className="ant-upload-drag-icon">
-            <InboxOutlined style={{ fontSize: 48, color: isUploading ? '#aaa' : '#1677ff' }} />
-          </p>
-          <p className="ant-upload-text">
-            {isUploading ? '업로드 중...' : '파일을 드래그하거나 클릭해서 선택하세요'}
-          </p>
-          <p className="ant-upload-hint">
-            PDF · DOCX · PPTX · XLSX · HWP · HWPX · TXT · MD · PNG · JPG · 최대 200MB · 여러 파일 동시 업로드
-          </p>
-        </Dragger>
-      </Card>
-
-      {/* ── 파일별 진행바 + 결과 목록 ─────────────────────────────── */}
-      {files.length > 0 && (
-        <Card
-          title={`업로드 이력 (${files.length}건)`}
-          extra={
-            <Button
-              size="small"
-              onClick={() => setFiles([])}
-              disabled={isUploading}
+            <Text
+              style={{ fontSize: 12.5, color: f.memo ? undefined : '#bfbfbf' }}
+              ellipsis={{ tooltip: f.memo }}
             >
-              이력 초기화
-            </Button>
-          }
+              {f.memo || <><EditOutlined style={{ marginRight: 4 }} />메모 추가</>}
+            </Text>
+          </Button>
+        )
+      },
+    },
+    {
+      title: '',
+      width: 90,
+      render: (_, f) => (
+        <Space size={4}>
+          {f.status === 'success' && onNavigate && (
+            <Button
+              type="link" size="small" icon={<SearchOutlined />}
+              onClick={() => {
+                localStorage.setItem('km_launch_query', f.filename.replace(/\.[^.]+$/, ''))
+                onNavigate('search')
+              }}
+            />
+          )}
+          {f.status !== 'uploading' && f.status !== 'parsing' && (
+            <Button type="text" size="small" icon={<CloseOutlined />} onClick={() => removeFile(f.id)} />
+          )}
+        </Space>
+      ),
+    },
+  ]
+
+  const leftMenuItems = [
+    { key: 'quick',  icon: <CloudUploadOutlined />, label: '업로드' },
+    { key: 'recent', icon: <HistoryOutlined />,     label: '최근 업로드' },
+  ]
+
+  return (
+    <div style={{ maxWidth: 1400, margin: '0 auto', padding: '24px 24px 40px' }}>
+      <Row gutter={20} wrap={isNarrow}>
+        {/* ── 좌측 서브메뉴 — 창이 좁아지면(노트북 반접이 이하) 위로 쌓임 ───── */}
+        {/* marginTop: 제목·안내문·경고 배너 2개 밑, 업로드 드래그 보드 윗줄과 맞춤(넓을 때만) */}
+        <Col
+          flex={isNarrow ? '0 0 100%' : '200px'}
+          style={isNarrow
+            ? { marginBottom: 16 }
+            : { position: 'sticky', top: 80, alignSelf: 'flex-start', marginTop: 220 }}
         >
-          <List
-            dataSource={files}
-            renderItem={(f) => (
-              <List.Item
-                key={f.id}
-                style={{
-                  borderLeft: `3px solid ${CATEGORY_ACCENT[f.category] ?? '#d9d9d9'}`,
-                  paddingLeft: 12,
-                  marginBottom: 4,
-                  borderRadius: '0 6px 6px 0',
-                  background:
-                    f.status === 'success' ? '#f6ffed'
-                    : f.status === 'failed' ? '#fff1f0'
-                    : '#fff',
-                  transition: 'background 0.3s',
-                }}
-                extra={
-                  f.status !== 'uploading' && (
-                    <Space size={4}>
-                      {f.status === 'success' && onNavigate && (
-                        <Button
-                          type="link"
-                          size="small"
-                          icon={<SearchOutlined />}
-                          onClick={() => {
-                            const stem = f.filename.replace(/\.[^.]+$/, '')
-                            localStorage.setItem('km_launch_query', stem)
-                            onNavigate('search')
-                          }}
-                          style={{ padding: '0 4px', fontSize: 12 }}
-                        >
-                          검색
-                        </Button>
-                      )}
-                      <Button
-                        type="text"
-                        size="small"
-                        icon={<CloseOutlined />}
-                        onClick={() => removeFile(f.id)}
-                        style={{ color: '#bbb' }}
-                      />
-                    </Space>
-                  )
-                }
-              >
-                <List.Item.Meta
-                  avatar={
-                    <Avatar
-                      icon={
-                        (f.status === 'uploading' || f.status === 'parsing') ? <LoadingOutlined /> :
-                        f.status === 'success'    ? <CheckCircleOutlined /> :
-                                                    <CloseCircleOutlined />
-                      }
-                      style={{
-                        backgroundColor:
-                          f.status === 'uploading' ? '#1677ff' :
-                          f.status === 'parsing'   ? '#fa8c16' :
-                          f.status === 'success'   ? '#52c41a' : '#ff4d4f',
-                      }}
-                    />
-                  }
-                  title={
-                    <Space wrap size={4}>
-                      {getFileIcon(f.filename)}
-                      <Tooltip title={f.filename}>
-                        <Text strong style={{ maxWidth: 260, display: 'inline-block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', verticalAlign: 'bottom' }}>
-                          {f.filename}
-                        </Text>
-                      </Tooltip>
-                      <Tag color={CATEGORY_COLOR[f.category]}>
-                        {CATEGORY_LABEL[f.category]}
-                      </Tag>
-                      {f.size > 0 && (
-                        <Text type="secondary" style={{ fontSize: 12 }}>
-                          {formatSize(f.size)}
-                        </Text>
-                      )}
-                      {f.status === 'success' && (
-                        <Text type="secondary" style={{ fontSize: 12 }}>{f.pages}페이지</Text>
-                      )}
-                      {f.status === 'failed' && (
-                        <Text type="danger" style={{ fontSize: 12 }}>{f.error}</Text>
-                      )}
-                    </Space>
-                  }
-                  description={
-                    f.status === 'uploading' ? (
-                      <Progress
-                        percent={f.percent}
-                        size="small"
-                        status="active"
-                        style={{ marginBottom: 0, maxWidth: 400 }}
-                      />
-                    ) : f.status === 'parsing' ? (
-                      <span style={{
-                        display: 'inline-block',
-                        padding: '1px 10px',
-                        borderRadius: 10,
-                        fontSize: 11,
-                        fontWeight: 600,
-                        background: '#fff7e6',
-                        color: '#d46b08',
-                        border: '1px solid #ffd591',
-                      }}>
-                        <LoadingOutlined style={{ marginRight: 5 }} />
-                        파싱 중… (대용량 문서는 시간이 걸릴 수 있습니다)
-                      </span>
-                    ) : (
-                      <span style={{
-                        display: 'inline-block',
-                        padding: '1px 10px',
-                        borderRadius: 10,
-                        fontSize: 11,
-                        fontWeight: 600,
-                        background: f.status === 'success' ? '#f6ffed' : '#fff1f0',
-                        color: f.status === 'success' ? '#389e0d' : '#cf1322',
-                        border: `1px solid ${f.status === 'success' ? '#b7eb8f' : '#ffa39e'}`,
-                      }}>
-                        {f.status === 'success' ? '✓ 파싱 완료' : '✗ 파싱 실패'}
-                      </span>
-                    )
-                  }
-                />
-              </List.Item>
-            )}
+          <Menu
+            mode="inline"
+            selectedKeys={[navKey]}
+            onClick={(e) => setNavKey(e.key)}
+            items={leftMenuItems}
+            style={{ border: '1px solid #eef0f2', borderRadius: 8 }}
           />
-        </Card>
-      )}
+          <Card size="small" style={{ marginTop: 16 }} title="카테고리">
+            <List
+              size="small"
+              dataSource={allCategories}
+              renderItem={(c) => (
+                <List.Item
+                  onClick={() => {
+                    localStorage.setItem('km_launch_category', c)
+                    onNavigate?.('search')
+                  }}
+                  onMouseEnter={() => setHoveredCategory(c)}
+                  onMouseLeave={() => setHoveredCategory(null)}
+                  style={{
+                    padding: '6px 8px',
+                    margin: '0 -8px',
+                    border: 'none',
+                    borderRadius: 6,
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    cursor: 'pointer',
+                    background: hoveredCategory === c ? '#f0f5ff' : 'transparent',
+                    transition: 'background 0.15s',
+                  }}
+                >
+                  <Text style={{ fontSize: 13 }}>{CATEGORY_LABEL[c] ?? c}</Text>
+                  <Text strong>{stats?.by_category?.[c] ?? 0}</Text>
+                </List.Item>
+              )}
+            />
+            <div style={{ display: 'flex', justifyContent: 'space-between', paddingTop: 8, marginTop: 4, borderTop: '1px solid #f0f0f0' }}>
+              <Text strong style={{ fontSize: 13 }}>합계</Text>
+              <Text strong style={{ color: '#1677ff' }}>{stats?.total_documents ?? 0}</Text>
+            </div>
+          </Card>
+        </Col>
+
+        {/* ── 중앙: 업로드 폼 ───────────────────────────────────── */}
+        {/* minWidth: 0 — 넓은 테이블 때문에 3열 Row가 줄바꿈되는 것을 방지(AdminPage와 동일한 이유) */}
+        <Col flex="auto" style={{ minWidth: 0 }}>
+          {navKey === 'quick' && (
+            <>
+              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 }}>
+                <div>
+                  <Title level={3} style={{ marginBottom: 2 }}>문서 업로드</Title>
+                  <Paragraph type="secondary" style={{ marginBottom: 16 }}>
+                    문서를 업로드하면 자동으로 인덱싱 및 메타데이터 추출이 진행됩니다.
+                  </Paragraph>
+                </div>
+                <Space size={6} style={{ marginTop: 6, flexShrink: 0 }}>
+                  <Switch size="small" checked={aiCategoryEnabled} onChange={handleToggleAiCategory} />
+                  <Text style={{ fontSize: 12.5 }}>AI 자동 분류</Text>
+                </Space>
+              </div>
+
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginBottom: 16 }}
+                message="안정적인 처리를 위해 한 번에 3~4개씩 나눠서 업로드해 주세요"
+              />
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 16 }}
+                message="카테고리·특이사항은 업로드가 접수되면 파일마다 바로 물어봅니다"
+              />
+
+              <Modal
+                title="새 카테고리 만들기"
+                open={newCatOpen}
+                onCancel={() => { setNewCatOpen(false); setNewCatName('') }}
+                onOk={handleCreateCategory}
+                okText="만들고 선택"
+                okButtonProps={{ disabled: !newCatName.trim() }}
+              >
+                <Input
+                  placeholder="예) 회의록, 온보딩 자료"
+                  value={newCatName}
+                  onChange={(e) => setNewCatName(e.target.value)}
+                  onPressEnter={handleCreateCategory}
+                  maxLength={30}
+                  autoFocus
+                />
+                <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 8 }}>
+                  이 이름으로 바로 업로드에 쓸 수 있고, 검색·관리자 화면의 카테고리 필터에도 자동으로 나타납니다.
+                </Text>
+              </Modal>
+
+              <Dragger
+                accept={ACCEPT_ATTR}
+                multiple
+                showUploadList={false}
+                beforeUpload={handleUpload}
+                disabled={isUploading}
+                style={{ marginBottom: 20, background: '#fafcff' }}
+              >
+                <p className="ant-upload-drag-icon">
+                  <InboxOutlined style={{ fontSize: 44, color: isUploading ? '#aaa' : '#1677ff' }} />
+                </p>
+                <p className="ant-upload-text">
+                  {isUploading ? '업로드 중...' : '파일을 드래그하거나 클릭해서 업로드'}
+                </p>
+                <p className="ant-upload-hint">
+                  지원 형식: PDF · HWP · HWPX · DOCX · PPT · PPTX · XLSX (파일당 최대 {MAX_SIZE_MB}MB)
+                  <br />.xls(구버전 엑셀)는 처리 실패가 확인돼 지원 목록에서 제외
+                </p>
+                <Upload
+                  directory multiple showUploadList={false}
+                  beforeUpload={handleUpload} disabled={isUploading} accept={ACCEPT_ATTR}
+                >
+                  <Button icon={<FolderOpenOutlined />} disabled={isUploading} onClick={e => e.stopPropagation()} style={{ marginTop: 10 }}>
+                    폴더째 업로드
+                  </Button>
+                </Upload>
+              </Dragger>
+
+              <Table
+                columns={columns}
+                dataSource={files}
+                rowKey="id"
+                size="middle"
+                pagination={{ pageSize: 8 }}
+                locale={{ emptyText: <Empty description="아직 업로드한 파일이 없습니다" /> }}
+              />
+
+              <Modal
+                title="카테고리·특이사항 설정"
+                open={!!promptFile}
+                onCancel={() => setPromptFile(null)}
+                onOk={savePrompt}
+                okText="저장"
+                confirmLoading={promptSaving}
+              >
+                <Text type="secondary" style={{ fontSize: 12.5, display: 'block', marginBottom: 14 }}>
+                  {promptFile?.filename}
+                </Text>
+
+                {promptFile?.aiSuggested && (
+                  <Alert
+                    type="info"
+                    showIcon
+                    style={{ marginBottom: 14 }}
+                    message="AI가 문서 내용을 분석해 카테고리를 자동으로 설정했어요"
+                    description="AI가 실수할 수도 있으니, 맞는 카테고리인지 확인하고 다르면 아래에서 직접 선택해 주세요."
+                  />
+                )}
+
+                <div style={{ marginBottom: 14 }}>
+                  <Text strong style={{ fontSize: 12.5 }}>카테고리</Text>
+                  <div style={{ marginTop: 8 }}>
+                    <Space wrap size={[8, 8]}>
+                      {allCategories.map(c => (
+                        <Button
+                          key={c} size="small"
+                          type={promptCategory === c ? 'primary' : 'default'}
+                          onClick={() => setPromptCategory(c)}
+                        >
+                          {CATEGORY_LABEL[c] ?? c}
+                        </Button>
+                      ))}
+                      <Button size="small" icon={<PlusOutlined />} onClick={() => setNewCatOpen(true)}>
+                        새 카테고리
+                      </Button>
+                    </Space>
+                  </div>
+                </div>
+
+                <div>
+                  <Text strong style={{ fontSize: 12.5 }}>특이사항 (선택)</Text>
+                  <Input.TextArea
+                    style={{ marginTop: 8 }}
+                    rows={3}
+                    maxLength={1000}
+                    placeholder="이 문서에 대해 알아두면 좋을 내용을 적어주세요 (예: 구버전 초안, 승인 대기 중 등) — 검색 결과에 함께 표시됩니다"
+                    value={promptMemo}
+                    onChange={(e) => setPromptMemo(e.target.value)}
+                  />
+                </div>
+              </Modal>
+            </>
+          )}
+
+          {navKey === 'recent' && (
+            <>
+              <Title level={3}>최근 업로드</Title>
+              <Table
+                dataSource={[...allDocs].sort((a, b) => new Date(b.uploaded_at) - new Date(a.uploaded_at))}
+                rowKey="id"
+                size="middle"
+                pagination={{ pageSize: 12 }}
+                columns={[
+                  { title: '파일명', dataIndex: 'filename', render: (n) => <Space size={6}>{getFileIcon(n)}<Text>{n}</Text></Space> },
+                  { title: '카테고리', dataIndex: 'category', width: 110, render: (c) => <Tag color={CATEGORY_COLOR[c]}>{CATEGORY_LABEL[c] ?? c}</Tag> },
+                  { title: '상태', dataIndex: 'status', width: 110, render: (s) => STATUS_TAG[s] ?? <Tag>{s}</Tag> },
+                  { title: '업로드 시각', dataIndex: 'uploaded_at', width: 160 },
+                ]}
+              />
+            </>
+          )}
+
+        </Col>
+      </Row>
     </div>
   )
 }

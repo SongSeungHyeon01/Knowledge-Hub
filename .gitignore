@@ -70,8 +70,24 @@ desktop.ini
 # ===== 임시 시연용 (윤준서 — 팀 공유 불필요) =====
 temp_demo/
 
-# 백엔드 런타임 데이터 (업로드 원본·파싱 결과·인덱스 — 커밋 금지)
+# ===== 프론트 빌드/의존성 (용량 큼, npm install로 재생성 가능) =====
+node_modules/
+frontend/dist/
+backend/static/
+
+# ===== 개발 중 생성되는 서버 로그 =====
+*.log
+*.err
+
+# ===== 런타임 데이터(업로드 원본·파싱 결과·인덱스) — 코드가 아니라 실행 시 생성되는 데이터 =====
 backend/data/
 
-backend/static/
-node_modules/
+# ===== 개인 백업/스크래치 (팀 공유 불필요) =====
+backend/app/
+backend/demo_parse_check.py
+backend/make_demo_pptx.py
+backend/search_result*.json
+backend/test_office_parsers_backup_*.py
+
+# ===== OMC 에이전트 로컬 상태 (개인 도구 설정) =====
+.omc/
