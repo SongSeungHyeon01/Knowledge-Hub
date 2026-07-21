@@ -2467,4 +2467,7 @@ if os.path.isdir(_STATIC_DIR):
             index_path = os.path.join(_STATIC_DIR, "index.html")
             if os.path.exists(index_path):
                 return FileResponse(index_path)
-        raise exc
+        # [수정] 여기서 raise exc로 같은 예외를 다시 던지면 이 핸들러가 자기 자신에게
+        # 다시 걸려 처리되지 못하고 500으로 떨어진다(실제로 없는 정적 파일 요청이 전부
+        # 500이 되는 걸로 확인됨) — 원래 상태 코드를 그대로 응답으로 돌려줘야 한다.
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
