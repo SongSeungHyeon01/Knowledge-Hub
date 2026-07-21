@@ -6,7 +6,7 @@ import { useState, useEffect, useRef, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   Upload, Table, Typography, Space, Tag, Progress, Modal, Button, Tooltip,
-  Alert, Menu, Row, Col, Card, List, Empty, Input, message, Switch,
+  Alert, Menu, Row, Col, Card, List, Empty, Input, message,
 } from 'antd'
 import {
   InboxOutlined,
@@ -88,33 +88,15 @@ const STATUS_TAG = {
 export default function UploadPage({ onNavigate }) {
   const isNarrow = useIsNarrow()
   const [navKey, setNavKey] = useState('quick')
-  const [category, setCategory] = useState(
-    () => localStorage.getItem('km_last_category') ?? 'spec'
-  )
-
-  // AI 자동 카테고리 분류 — AI 요약(SearchPage)과 동일하게 누구나 켜고 끌 수 있는
-  // 클라이언트 설정(localStorage에 기억, 서버 전역 설정 아님). 업로드마다 이 값을 함께 보낸다.
-  const [aiCategoryEnabled, setAiCategoryEnabled] = useState(
-    () => localStorage.getItem('km_ai_category_enabled') !== 'false'
-  )
-  const handleToggleAiCategory = (checked) => {
-    setAiCategoryEnabled(checked)
-    localStorage.setItem('km_ai_category_enabled', checked ? 'true' : 'false')
-  }
 
   // 카테고리·특이사항 — 배치 업로드 시 파일마다 다른 값이 필요할 수 있어(업로드 전 공용
   // 입력란 하나로는 모든 파일에 같은 값이 붙어버림), 업로드 폼이 아니라 업로드가 접수된
   // 직후 파일마다 순서대로 물어본다. /me/documents/{id} PATCH(본인 문서 자가 수정용)를 재사용.
   const [promptQueue,    setPromptQueue]    = useState([])  // 아직 안 물어본 파일들(대기열)
   const [promptFile,     setPromptFile]     = useState(null)  // 지금 물어보는 중인 파일(null이면 닫힘)
-  const [promptCategory, setPromptCategory] = useState('spec')
+  const [promptCategory, setPromptCategory] = useState('')
   const [promptMemo,     setPromptMemo]     = useState('')
   const [promptSaving,   setPromptSaving]   = useState(false)
-
-  const handleCategoryChange = (val) => {
-    setCategory(val)
-    localStorage.setItem('km_last_category', val)
-  }
 
   // 클라이언트가 방금 만든 카테고리 — 문서에 아직 반영 전(업로드 완료 전)이라
   // stats.by_category에 안 잡힌 값을 이번 세션에서 바로 다시 고를 수 있게 메모리에만 둔다.
@@ -160,8 +142,7 @@ export default function UploadPage({ onNavigate }) {
     if (!allCategories.some(c => c.toLowerCase() === name.toLowerCase())) {
       setCustomCategories(prev => [...prev, name])
     }
-    handleCategoryChange(name)
-    if (promptFile) setPromptCategory(name)  // 카테고리·특이사항 물어보는 중이면 그 자리에서 바로 반영
+    setPromptCategory(name)
     setNewCatName('')
     setNewCatOpen(false)
   }
@@ -195,7 +176,6 @@ export default function UploadPage({ onNavigate }) {
         category: promptCategory, memo: promptMemo,
       })
       updateFile(promptFile.id, { category: promptCategory, memo: promptMemo.trim() || null })
-      handleCategoryChange(promptCategory)  // 다음 업로드 배치의 기본값으로도 반영
       setPromptFile(null)
     } catch {
       message.error('저장에 실패했습니다')
@@ -249,32 +229,18 @@ export default function UploadPage({ onNavigate }) {
         }
         if (doc.status === 'parsing') continue
 
-        // 파싱 결과(성공/실패)는 알게 되는 즉시 테이블에 반영 — AI 분류를 기다리는 동안에도
-        // "완료/실패" 상태는 바로 보여준다. category는 AI 분류가 끝나기 전후로 값이
-        // 바뀔 수 있어 매 폴링마다 최신값으로 계속 동기화한다(한 번만 반영하면 분류가
-        // 늦게 끝났을 때 테이블 태그가 옛 카테고리에 멈춰 있는 문제가 생김).
+        // 파싱 결과(성공/실패)는 알게 되는 즉시 테이블에 반영하고, 바로 카테고리·특이사항을 물어본다.
         updateFile(info.localId, {
           status: doc.status,
           pages:  doc.page_count ?? 0,
           error:  doc.error,
           category: doc.category,
-          aiSuggested: !!doc.category_ai_suggested,
         })
-        if (!info.resolvedAt) info.resolvedAt = now
-
-        // 실패한 문서는 분류할 내용이 없으니 바로 물어보고, 성공한 문서는 AI 분류
-        // 시도가 끝난 뒤(성공/실패 무관)에만 물어본다 — 단, Ollama가 너무 오래 걸리면
-        // (90초) 무한정 기다리지 않고 그냥 지금 카테고리로 진행한다.
-        const waitedTooLong = info.resolvedAt && (now - info.resolvedAt > 90 * 1000)
-        const readyForPrompt = doc.status === 'failed' || doc.category_ai_checked || waitedTooLong
-        if (readyForPrompt) {
-          enqueuePrompt({
-            id: info.localId, docId, filename: info.filename,
-            category: doc.category, memo: null,
-            aiSuggested: !!doc.category_ai_suggested,
-          })
-          pending.delete(docId)
-        }
+        enqueuePrompt({
+          id: info.localId, docId, filename: info.filename,
+          category: doc.category, memo: null,
+        })
+        pending.delete(docId)
       }
     } catch {
       // 일시적 네트워크 오류는 무시하고 다음 주기에 다시 시도 (pending 유지)
@@ -302,7 +268,7 @@ export default function UploadPage({ onNavigate }) {
       const mb = (file.size / (1024 * 1024)).toFixed(1)
       setFiles(prev => [{
         id: `${file.name}-${Date.now()}`,
-        filename: file.name, category,
+        filename: file.name, category: '',
         percent: 100, status: 'failed', pages: 0,
         error: `파일 크기 초과 (${mb}MB). 최대 ${MAX_SIZE_MB}MB까지 허용됩니다`,
       }, ...prev])
@@ -312,14 +278,15 @@ export default function UploadPage({ onNavigate }) {
     const id = `${file.name}-${Date.now()}`
 
     setFiles(prev => [{
-      id, filename: file.name, size: file.size, category,
+      id, filename: file.name, size: file.size, category: '',
       percent: 0, status: 'uploading', pages: 0, error: null,
     }, ...prev])
 
     const form = new FormData()
     form.append('file', file)
-    form.append('category', category)
-    form.append('ai_category_enabled', aiCategoryEnabled ? 'true' : 'false')
+    // 카테고리는 여기서 아무 기본값도 보내지 않는다 — 파싱이 끝난 뒤 "카테고리·특이사항
+    // 설정" 팝업에서 사용자가 직접 고르기 전까지는 미지정 상태로 남아 있어야 한다.
+    form.append('category', '')
     if (file.webkitRelativePath) {
       form.append('original_path', file.webkitRelativePath)
     }
@@ -335,8 +302,8 @@ export default function UploadPage({ onNavigate }) {
       if (data.status === 'parsing' && data.id != null) {
         // 접수됨 — 전송 100%, 이제 서버 파싱 대기(폴링으로 완료 감지)
         updateFile(id, { percent: 100, status: 'parsing', docId: data.id, error: null })
-        // 카테고리·특이사항 확인 팝업은 여기서 바로 띄우지 않는다 — AI 자동 분류가
-        // 파싱 완료 후에야 가능해서, runBatchPoll이 분류 시도까지 끝난 걸 확인한 뒤 띄운다.
+        // 카테고리·특이사항 확인 팝업은 여기서 바로 띄우지 않는다 — 파싱이 끝나야
+        // 문서가 확정되므로, runBatchPoll이 파싱 완료(성공/실패)를 확인한 뒤 띄운다.
         addToPolling(id, data.id, file.name)
       } else {
         // 검사 단계 즉시 실패(지원 안 함·크기 초과 등) 또는 그 외 응답
@@ -407,11 +374,11 @@ export default function UploadPage({ onNavigate }) {
       width: 110,
       render: (c, f) => (
         <Tag
-          color={CATEGORY_COLOR[c]}
-          style={{ cursor: f.docId ? 'pointer' : 'default' }}
+          color={c ? CATEGORY_COLOR[c] : undefined}
+          style={{ cursor: f.docId ? 'pointer' : 'default', ...(c ? {} : { borderStyle: 'dashed', color: '#bfbfbf' }) }}
           onClick={() => f.docId && openPrompt(f)}
         >
-          {CATEGORY_LABEL[c] ?? c}
+          {c ? (CATEGORY_LABEL[c] ?? c) : '미지정'}
         </Tag>
       ),
     },
@@ -552,17 +519,11 @@ export default function UploadPage({ onNavigate }) {
         <Col flex="auto" style={{ minWidth: 0 }}>
           {navKey === 'quick' && (
             <>
-              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 }}>
-                <div>
-                  <Title level={3} style={{ marginBottom: 2 }}>문서 업로드</Title>
-                  <Paragraph type="secondary" style={{ marginBottom: 16 }}>
-                    문서를 업로드하면 자동으로 인덱싱 및 메타데이터 추출이 진행됩니다.
-                  </Paragraph>
-                </div>
-                <Space size={6} style={{ marginTop: 6, flexShrink: 0 }}>
-                  <Switch size="small" checked={aiCategoryEnabled} onChange={handleToggleAiCategory} />
-                  <Text style={{ fontSize: 12.5 }}>AI 자동 분류</Text>
-                </Space>
+              <div>
+                <Title level={3} style={{ marginBottom: 2 }}>문서 업로드</Title>
+                <Paragraph type="secondary" style={{ marginBottom: 16 }}>
+                  문서를 업로드하면 자동으로 인덱싱 및 메타데이터 추출이 진행됩니다.
+                </Paragraph>
               </div>
 
               <Alert
@@ -648,16 +609,6 @@ export default function UploadPage({ onNavigate }) {
                   {promptFile?.filename}
                 </Text>
 
-                {promptFile?.aiSuggested && (
-                  <Alert
-                    type="info"
-                    showIcon
-                    style={{ marginBottom: 14 }}
-                    message="AI가 문서 내용을 분석해 카테고리를 자동으로 설정했어요"
-                    description="AI가 실수할 수도 있으니, 맞는 카테고리인지 확인하고 다르면 아래에서 직접 선택해 주세요."
-                  />
-                )}
-
                 <div style={{ marginBottom: 14 }}>
                   <Text strong style={{ fontSize: 12.5 }}>카테고리</Text>
                   <div style={{ marginTop: 8 }}>
@@ -703,7 +654,7 @@ export default function UploadPage({ onNavigate }) {
                 pagination={{ pageSize: 12 }}
                 columns={[
                   { title: '파일명', dataIndex: 'filename', render: (n) => <Space size={6}>{getFileIcon(n)}<Text>{n}</Text></Space> },
-                  { title: '카테고리', dataIndex: 'category', width: 110, render: (c) => <Tag color={CATEGORY_COLOR[c]}>{CATEGORY_LABEL[c] ?? c}</Tag> },
+                  { title: '카테고리', dataIndex: 'category', width: 110, render: (c) => <Tag color={c ? CATEGORY_COLOR[c] : undefined}>{c ? (CATEGORY_LABEL[c] ?? c) : '미지정'}</Tag> },
                   { title: '상태', dataIndex: 'status', width: 110, render: (s) => STATUS_TAG[s] ?? <Tag>{s}</Tag> },
                   { title: '업로드 시각', dataIndex: 'uploaded_at', width: 160 },
                 ]}

@@ -118,8 +118,8 @@ export default function BookmarksPage({ onNavigate }) {
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
                   {FILE_TYPE_ICON[doc.file_type] ?? <FileOutlined style={{ color: '#8c8c8c' }} />}
-                  <Tag color={CATEGORY_COLOR[doc.category]} style={{ margin: 0 }}>
-                    {CATEGORY_LABEL[doc.category] ?? doc.category}
+                  <Tag color={doc.category ? CATEGORY_COLOR[doc.category] : undefined} style={{ margin: 0 }}>
+                    {doc.category ? (CATEGORY_LABEL[doc.category] ?? doc.category) : '미지정'}
                   </Tag>
                   {doc.file_type && (
                     <Tag color={FILE_TYPE_COLOR[doc.file_type] ?? 'default'} style={{ margin: 0 }}>

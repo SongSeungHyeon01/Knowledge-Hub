@@ -12,7 +12,7 @@
 import { useState, useEffect, useRef } from 'react'
 import {
   Input, Button, Card, Tag, Typography,
-  Space, Divider, Empty, Spin, Radio, List, Pagination, Tooltip, Alert, Select, Switch,
+  Space, Divider, Empty, Spin, Radio, List, Pagination, Tooltip, Alert, Select,
   Row, Col, Modal, message, DatePicker, AutoComplete,
 } from 'antd'
 import dayjs from 'dayjs'
@@ -20,8 +20,8 @@ import {
   SearchOutlined, FileTextOutlined, HistoryOutlined, CloseOutlined,
   FilePdfOutlined, FileWordOutlined, FilePptOutlined, FileExcelOutlined,
   FileImageOutlined, FileMarkdownOutlined, FileOutlined, DownloadOutlined,
-  RobotOutlined, AimOutlined, ApartmentOutlined, ShareAltOutlined,
-  StarOutlined, StarFilled, EyeOutlined, UserOutlined, LockOutlined,
+  AimOutlined, ApartmentOutlined, ShareAltOutlined,
+  StarOutlined, StarFilled, EyeOutlined, UserOutlined,
   UnorderedListOutlined, AppstoreOutlined,
 } from '@ant-design/icons'
 import axios from 'axios'
@@ -123,6 +123,14 @@ export default function SearchPage({ onNavigate }) {
     return c || null
   })
 
+  // 알림(댓글 등)에서 넘어온 경우 — 검색 결과가 오면 그 문서를 바로 상세 팝업으로 열어준다.
+  // ref로 두는 이유: 한 번 쓰고 나면(useEffect에서 openDetail 호출) 다시 안 열리게 지워야 해서.
+  const pendingOpenDocIdRef = useRef((() => {
+    const id = localStorage.getItem('km_launch_doc_id')
+    if (id) localStorage.removeItem('km_launch_doc_id')
+    return id ? Number(id) : null
+  })())
+
   const closeTip = () => {
     setTipVisible(false)
     localStorage.setItem('km_tip_closed', 'true')
@@ -144,14 +152,6 @@ export default function SearchPage({ onNavigate }) {
   const [topQueries,    setTopQueries]    = useState([])  // 인기 검색어 (0건 결과 시 표시)
   const [sortBy,        setSortBy]        = useState('score')
   const [viewMode,      setViewMode]      = useState('list')  // 'list'(상세) | 'grid'(카드)
-  const [aiAnswer,      setAiAnswer]      = useState(null)
-  const [aiLoading,     setAiLoading]     = useState(false)
-  const [aiAvail,       setAiAvail]       = useState(false)
-  // 파일마다 AI 요약이 따로 있어 검색 결과의 "AI에게 묻기"는 자동 생성으로 바꾸고,
-  // 대신 켜고 끌 수 있는 스위치를 둔다 (기본값: 켜짐, localStorage에 기억)
-  const [aiEnabled,     setAiEnabled]     = useState(
-    () => localStorage.getItem('km_ai_answer_enabled') !== 'false'
-  )
   const PAGE_SIZE = 10
   const inputRef = useRef(null)
   const [extraCategories, setExtraCategories] = useState([])  // 고정 5종 외에 실제로 쓰인 커스텀 카테고리
@@ -175,11 +175,6 @@ export default function SearchPage({ onNavigate }) {
   const [newComment,      setNewComment]      = useState('')
   const [commentPosting,  setCommentPosting]  = useState(false)
 
-  // AI 요약(qwen2.5:7b) — 팝업 열릴 때 자동으로 요청, 댓글 영역 위에 표시
-  const [summary,        setSummary]        = useState(null)
-  const [summaryLoading, setSummaryLoading] = useState(false)
-  const [summaryError,   setSummaryError]   = useState(null)
-
   const openDetail = (doc) => {
     setDetailDoc(doc)
     setNewComment('')
@@ -189,16 +184,6 @@ export default function SearchPage({ onNavigate }) {
       .then(res => setComments(res.data))
       .catch(() => {})
       .finally(() => setCommentsLoading(false))
-
-    setSummary(null)
-    setSummaryError(null)
-    // "AI 답변" 스위치는 검색 결과뿐 아니라 이 문서별 AI 요약도 함께 켜고 끈다 — 꺼져 있으면 요청 자체를 보내지 않는다
-    if (!aiEnabled) return
-    setSummaryLoading(true)
-    axios.get(`${API}/documents/${doc.doc_id}/summary`)
-      .then(res => setSummary(res.data.summary))
-      .catch((e) => setSummaryError(e?.response?.data?.detail || 'AI 요약을 만들지 못했습니다'))
-      .finally(() => setSummaryLoading(false))
   }
 
   const postComment = async () => {
@@ -244,12 +229,9 @@ export default function SearchPage({ onNavigate }) {
     }
   }
 
-  // 마운트 시 자동 포커스 + Ollama 가용 여부 확인 + 커스텀 카테고리 존재 여부 확인 + 북마크 목록
+  // 마운트 시 자동 포커스 + 커스텀 카테고리 존재 여부 확인 + 북마크 목록
   useEffect(() => {
     inputRef.current?.focus()
-    axios.get(`${API}/ask/status`)
-      .then(res => setAiAvail(res.data.available))
-      .catch(() => {})
     refreshBookmarks()
     axios.get(`${API}/admin/stats`)
       .then(res => {
@@ -340,40 +322,6 @@ export default function SearchPage({ onNavigate }) {
       .catch(() => message.error('검색 기록 삭제에 실패했습니다'))
   }
 
-  // resultsData를 인자로 받는 이유: setResults 직후엔 results state가 아직 갱신 전이라
-  // (React 배치 업데이트), handleSearch에서 자동 호출할 때 방금 받은 응답을 직접 넘겨야 한다.
-  const runAskAI = async (resultsData) => {
-    if (!resultsData?.results?.length) return
-    setAiLoading(true)
-    setAiAnswer(null)
-    try {
-      const snippets = resultsData.results.slice(0, 5).map(r => r.snippet).filter(Boolean)
-      const res = await axios.post(`${API}/ask`, { q: resultsData.query, snippets })
-      setAiAnswer(res.data)
-    } catch {
-      setAiAnswer({ answer: 'AI 요약 생성에 실패했습니다. Ollama가 실행 중인지 확인하세요.', model: '' })
-    } finally {
-      setAiLoading(false)
-    }
-  }
-  const handleToggleAi = (checked) => {
-    setAiEnabled(checked)
-    localStorage.setItem('km_ai_answer_enabled', checked ? 'true' : 'false')
-    if (checked) {
-      if (results?.query && results.total > 0 && !aiAnswer) runAskAI(results)
-      if (detailDoc && !summary && !summaryLoading) {
-        setSummaryError(null)
-        setSummaryLoading(true)
-        axios.get(`${API}/documents/${detailDoc.doc_id}/summary`)
-          .then(res => setSummary(res.data.summary))
-          .catch((e) => setSummaryError(e?.response?.data?.detail || 'AI 요약을 만들지 못했습니다'))
-          .finally(() => setSummaryLoading(false))
-      }
-    } else {
-      setAiAnswer(null)
-    }
-  }
-
   // categoryOverride: UploadPage의 "카테고리" 클릭처럼, category state를 막 setCategory한
   // 직후 곧바로 검색을 트리거해야 할 때 쓴다 — setCategory 직후엔 state가 아직 안 바뀐 상태라
   // (React 배치 업데이트) category를 그대로 읽으면 이전 값으로 검색돼 버린다.
@@ -384,7 +332,6 @@ export default function SearchPage({ onNavigate }) {
     setShowRecent(false)
     setPage(1)
     setLoading(true)
-    setAiAnswer(null)
     try {
       const res = await axios.get(`${API}/search`, {
         params: {
@@ -399,18 +346,19 @@ export default function SearchPage({ onNavigate }) {
       setResults(res.data)
       setQuery(q)
 
+      // 알림에서 넘어온 경우 — 검색 결과 중 그 문서를 찾아 바로 상세 팝업으로 연다(한 번만).
+      if (pendingOpenDocIdRef.current != null) {
+        const target = res.data.results?.find(r => r.doc_id === pendingOpenDocIdRef.current)
+        pendingOpenDocIdRef.current = null
+        if (target) openDetail(target)
+      }
+
       if (res.data.total === 0) {
         axios.get(`${API}/admin/stats`)
           .then(s => setTopQueries(s.data.top_queries ?? []))
           .catch(() => {})
       } else {
         setTopQueries([])
-      }
-
-      // AI 답변이 검색의 "기본 결과" — 실제 질문(필터만으로 둘러보기가 아닌 경우)에는
-      // 자동으로 생성한다. 결과가 없거나 Ollama가 꺼져 있거나, 스위치로 꺼둔 경우엔 스킵.
-      if (aiEnabled && q.trim() && res.data.total > 0 && aiAvail) {
-        runAskAI(res.data)
       }
 
       // 검색 자체가 서버에 SearchLog(user_email 포함)로 이미 기록되므로, 여기서는
@@ -513,12 +461,8 @@ export default function SearchPage({ onNavigate }) {
         </div>
       </div>
 
-      {/* ── AI 답변 켜기/끄기 + 고급 검색 토글 ───────────────────────── */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: advancedOpen ? 12 : 20 }}>
-        <Space size={6}>
-          <Switch size="small" checked={aiEnabled} onChange={handleToggleAi} />
-          <Text style={{ fontSize: 12.5 }}>AI 요약</Text>
-        </Space>
+      {/* ── 고급 검색 토글 ───────────────────────────────────────── */}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', marginBottom: advancedOpen ? 12 : 20 }}>
         <Button type="link" size="small" onClick={() => setAdvancedOpen(v => !v)} style={{ padding: 0 }}>
           고급 검색 {advancedOpen ? '▲' : '▾'}
         </Button>
@@ -667,51 +611,6 @@ export default function SearchPage({ onNavigate }) {
           </div>
           <Divider style={{ margin: '12px 0' }} />
 
-          {/* AI 답변이 검색의 기본 결과 — 생성 중엔 스켈레톤, 꺼져 있으면 안내를 이 자리에 바로 보여준다.
-              스위치로 꺼둔 경우엔 이 블록 전체를 아예 표시하지 않는다. */}
-          {aiEnabled && (
-            <>
-              {aiLoading && !aiAnswer && (
-                <Card size="small" style={{ marginBottom: 16, background: '#f0f5ff', borderColor: '#91caff' }} styles={{ body: { padding: '12px 16px' } }}>
-                  <Space size={6}><RobotOutlined style={{ color: '#1677ff' }} spin /><Text type="secondary">AI가 문서를 바탕으로 요약을 만들고 있어요...</Text></Space>
-                </Card>
-              )}
-
-              {!aiAvail && results.total > 0 && !!results.query && (
-                <div style={{
-                  marginBottom: 16, padding: '12px 16px', borderRadius: 8,
-                  background: '#fafafa', border: '1px dashed #e0e0e0', color: '#bfbfbf',
-                  display: 'flex', alignItems: 'center', gap: 10, fontSize: 12.5,
-                }}>
-                  <LockOutlined />
-                  <div>
-                    <div>AI 요약 (Ollama 미가동)</div>
-                    <div style={{ fontSize: 11.5 }}>로컬 Ollama 서버가 켜져 있으면 검색어에 대한 답을 문서 기반으로 바로 요약해 드립니다.</div>
-                  </div>
-                </div>
-              )}
-
-              {aiAnswer && (
-                <Card
-                  size="small"
-                  style={{ marginBottom: 16, background: '#f0f5ff', borderColor: '#91caff' }}
-                  styles={{ body: { padding: '12px 16px' } }}
-                  title={
-                    <Space size={6}>
-                      <RobotOutlined style={{ color: '#1677ff' }} />
-                      <Text strong style={{ color: '#1677ff' }}>AI 요약</Text>
-                      {aiAnswer.model && <Text type="secondary" style={{ fontSize: 11 }}>· {aiAnswer.model}</Text>}
-                      <Text type="secondary" style={{ fontSize: 11 }}>· 상위 5개 문서 기반</Text>
-                    </Space>
-                  }
-                  extra={<Button type="text" size="small" onClick={() => setAiAnswer(null)}>✕</Button>}
-                >
-                  <Paragraph style={{ margin: 0, whiteSpace: 'pre-wrap', lineHeight: 1.8 }}>{aiAnswer.answer}</Paragraph>
-                </Card>
-              )}
-            </>
-          )}
-
           {results.total === 0 ? (
             <div style={{ textAlign: 'center', padding: '32px 0' }}>
               <Empty description={results.query ? `"${results.query}"에 대한 검색 결과가 없습니다` : '조건에 맞는 문서가 없습니다'} />
@@ -769,7 +668,7 @@ export default function SearchPage({ onNavigate }) {
                           <Row justify="space-between" align="middle">
                             <Col>
                               <Space size={4}>
-                                <Tag color={CATEGORY_COLOR[r.category]} style={{ marginRight: 0 }}>{CATEGORY_LABEL[r.category] ?? r.category}</Tag>
+                                <Tag color={r.category ? CATEGORY_COLOR[r.category] : undefined} style={{ marginRight: 0 }}>{r.category ? (CATEGORY_LABEL[r.category] ?? r.category) : '미지정'}</Tag>
                                 {r.score > 0 && (
                                   <Tooltip title={`관련도 ${Math.round(r.score * 100)}%`}>
                                     <Tag style={{ margin: 0 }}>{Math.round(r.score * 100)}%</Tag>
@@ -842,7 +741,7 @@ export default function SearchPage({ onNavigate }) {
                         }
                       >
                         <Space style={{ marginBottom: 12 }} size={6} wrap>
-                          <Tag color={CATEGORY_COLOR[r.category]} style={{ margin: 0 }}>{CATEGORY_LABEL[r.category] ?? r.category}</Tag>
+                          <Tag color={r.category ? CATEGORY_COLOR[r.category] : undefined} style={{ margin: 0 }}>{r.category ? (CATEGORY_LABEL[r.category] ?? r.category) : '미지정'}</Tag>
                           {r.file_type && <Tag color={FILE_TYPE_COLOR[r.file_type] ?? 'default'} style={{ margin: 0 }}>{r.file_type.toUpperCase()}</Tag>}
                           {r.score > 0 && (
                             <Tooltip title={`관련도 ${Math.round(r.score * 100)}%`}>
@@ -994,7 +893,7 @@ export default function SearchPage({ onNavigate }) {
                     <Row justify="space-between" align="middle">
                       <Col>
                         <Space size={4}>
-                          <Tag color={CATEGORY_COLOR[doc.category]} style={{ marginRight: 0 }}>{CATEGORY_LABEL[doc.category] ?? doc.category}</Tag>
+                          <Tag color={doc.category ? CATEGORY_COLOR[doc.category] : undefined} style={{ marginRight: 0 }}>{doc.category ? (CATEGORY_LABEL[doc.category] ?? doc.category) : '미지정'}</Tag>
                           {doc.memo && (
                             <Tooltip title="클릭해서 특이사항 확인">
                               <Tag style={{ margin: 0, background: '#fffbe6', border: '1px solid #ffe58f', color: '#7c6000' }}>특이사항</Tag>
@@ -1060,7 +959,7 @@ export default function SearchPage({ onNavigate }) {
                     }
                   >
                     <Space style={{ marginBottom: 12 }} size={6} wrap>
-                      <Tag color={CATEGORY_COLOR[doc.category]} style={{ margin: 0 }}>{CATEGORY_LABEL[doc.category] ?? doc.category}</Tag>
+                      <Tag color={doc.category ? CATEGORY_COLOR[doc.category] : undefined} style={{ margin: 0 }}>{doc.category ? (CATEGORY_LABEL[doc.category] ?? doc.category) : '미지정'}</Tag>
                       {doc.file_type && <Tag color={FILE_TYPE_COLOR[doc.file_type] ?? 'default'} style={{ margin: 0 }}>{doc.file_type.toUpperCase()}</Tag>}
                     </Space>
 
@@ -1117,8 +1016,8 @@ export default function SearchPage({ onNavigate }) {
           <>
             <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 14 }}>
               <Space wrap size={6}>
-                <Tag color={CATEGORY_COLOR[detailDoc.category]} style={{ margin: 0 }}>
-                  {CATEGORY_LABEL[detailDoc.category] ?? detailDoc.category}
+                <Tag color={detailDoc.category ? CATEGORY_COLOR[detailDoc.category] : undefined} style={{ margin: 0 }}>
+                  {detailDoc.category ? (CATEGORY_LABEL[detailDoc.category] ?? detailDoc.category) : '미지정'}
                 </Tag>
                 {detailDoc.file_type && (
                   <Tag color={FILE_TYPE_COLOR[detailDoc.file_type] ?? 'default'} style={{ margin: 0 }}>
@@ -1148,32 +1047,6 @@ export default function SearchPage({ onNavigate }) {
                 <Text strong style={{ fontSize: 12, color: '#7c6000', display: 'block', marginBottom: 4 }}>특이사항</Text>
                 <Text style={{ fontSize: 13.5, color: '#7c6000', whiteSpace: 'pre-wrap' }}>{detailDoc.memo}</Text>
               </div>
-            )}
-
-            {aiEnabled && (
-              <>
-                <Divider style={{ margin: '16px 0' }} />
-
-                <div style={{ marginBottom: 16 }}>
-                  <Space size={6} style={{ marginBottom: 8 }}>
-                    <RobotOutlined style={{ color: '#1677ff' }} />
-                    <Text strong style={{ fontSize: 13, color: '#1677ff' }}>AI 요약</Text>
-                  </Space>
-                  {summaryLoading ? (
-                    <div style={{ background: '#f0f5ff', border: '1px solid #91caff', borderRadius: 8, padding: '10px 14px' }}>
-                      <Space size={6}><Spin size="small" /><Text type="secondary" style={{ fontSize: 12.5 }}>AI가 문서를 요약하고 있어요...</Text></Space>
-                    </div>
-                  ) : summary ? (
-                    <div style={{ background: '#f0f5ff', border: '1px solid #91caff', borderRadius: 8, padding: '10px 14px' }}>
-                      <Paragraph style={{ margin: 0, whiteSpace: 'pre-wrap', fontSize: 13, lineHeight: 1.7 }}>{summary}</Paragraph>
-                    </div>
-                  ) : (
-                    <div style={{ background: '#fafafa', border: '1px dashed #e0e0e0', borderRadius: 8, padding: '10px 14px', color: '#bfbfbf', fontSize: 12.5 }}>
-                      {summaryError || '요약을 표시할 수 없습니다'}
-                    </div>
-                  )}
-                </div>
-              </>
             )}
 
             <Divider style={{ margin: '16px 0' }} />

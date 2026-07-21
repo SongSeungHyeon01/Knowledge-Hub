@@ -397,7 +397,14 @@ async def 내_정보(request: Request, db: AsyncSession = Depends(get_db)):
     if not data or await _is_session_revoked(data.get("sid"), db):
         raise HTTPException(status_code=401, detail="로그인이 필요합니다")
     email = data["email"]
-    return {"email": email, "is_admin": _is_admin(email)}
+    user = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
+    return {
+        "email": email,
+        "is_admin": _is_admin(email),
+        "name": user.name if user else None,
+        "picture": user.picture if user else None,
+        "department": user.department if user else None,
+    }
 
 
 @app.post("/auth/logout")
@@ -707,6 +714,22 @@ async def 사용자_부서_지정(email: str, department: str | None = Body(None
     return {"email": email, "department": department}
 
 
+# 사용자 완전 삭제("내보내기") — 부서 관리 탭에서 관리자가 특정 계정을 시스템에서 제거한다.
+# User 테이블 행(부서·이름·사진 기억)과 추가 관리자 지정을 함께 지운다.
+# 주의: Google 로그인 자체는 여기서 막지 못한다 — 다시 로그인하면 User 행이 새로 생기며
+# 부서 미지정 상태로 돌아간다(도메인 제한 없다면). 완전한 접근 차단은 별도 기능이 필요하다.
+@app.delete("/admin/users/{email}")
+async def 사용자_내보내기(email: str, db: AsyncSession = Depends(get_db)):
+    email = email.strip().lower()
+    if _is_admin(email):
+        raise HTTPException(status_code=400, detail="관리자 계정은 여기서 내보낼 수 없습니다")
+    await db.execute(sa_delete(User).where(User.email == email))
+    await db.execute(sa_delete(AdminEmail).where(AdminEmail.email == email))
+    _extra_admin_emails.discard(email)
+    await db.commit()
+    return {"email": email, "removed": True}
+
+
 # 로그인 기능이 켜져 있으면(AUTH_ENABLED) 아래 목록을 제외한 모든 API가 유효한
 # 세션 쿠키를 요구한다. 꺼져 있으면 기존 무인증 동작 그대로 통과시킨다.
 _AUTH_PUBLIC_PATHS = {"/", "/auth/config", "/auth/google", "/auth/me", "/auth/logout", "/docs", "/openapi.json", "/redoc", "/favicon.svg"}
@@ -767,12 +790,7 @@ def _stem_ko(word: str) -> str:
     return word
 
 
-# ── 임베딩 / BM25 / AI 설정 ──────────────────────────────────────────────────
-# [수정] Gemma 3는 Google Custom ToU 원격 서비스 제한 조항이 있어 PRD가 명시적으로
-# 배제한 모델이었는데 기본값으로 남아있던 것을 발견 — 상업적 이용 제한 없는
-# Apache 2.0 라이선스 모델(Qwen2.5)로 교체. 실제 로컬 Ollama에도 이미 설치돼 있음.
-OLLAMA_MODEL    = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
-OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+# ── 임베딩 / BM25 설정 ────────────────────────────────────────────────────
 _embed_model  = None
 
 def _get_embed_model():
@@ -962,35 +980,6 @@ def _build_chunks(pages: list) -> tuple:
     return chunks, pnums
 
 
-def _generate_embeddings_sync(doc_id: int, pages: list):
-    """임베딩 생성 + 디스크 저장 (동기 — asyncio.to_thread로 호출). 호환성 유지용."""
-    model = _get_embed_model()
-    if model is None:
-        return
-    chunks, pnums = _build_chunks(pages)
-    if not chunks:
-        return
-    try:
-        embs = model.encode(
-            chunks, batch_size=32, normalize_embeddings=True, show_progress_bar=False
-        )
-        path = os.path.join(PARSED_DIR, f"{doc_id}_emb.npz")
-        np.savez_compressed(
-            path,
-            embeddings=embs.astype(np.float32),
-            chunks=np.array(chunks, dtype=object),
-            pnums=np.array(pnums, dtype=np.int32),
-        )
-        print(f"[embed] doc_id={doc_id} 완료 ({len(chunks)}청크)")
-    except Exception as e:
-        print(f"[embed] doc_id={doc_id} 실패: {e}")
-
-
-async def _embed_background(doc_id: int, pages: list):
-    """백그라운드 임베딩 생성 (async wrapper). 호환성 유지용."""
-    await asyncio.to_thread(_generate_embeddings_sync, doc_id, pages)
-
-
 async def _ingest_chunks_to_db(doc_id: int, pages: list):
     """청크 분할 → MiniLM 임베딩 → CHUNKS 테이블 저장 → turbovec 색인."""
     model = _get_embed_model()
@@ -1101,7 +1090,7 @@ _PARSE_CONCURRENCY = max(1, int(os.environ.get("PARSE_CONCURRENCY", "1")))
 _parse_semaphore = asyncio.Semaphore(_PARSE_CONCURRENCY)
 
 
-async def _parse_and_ingest(doc_id: int, save_path: str, source_file: str, ext: str, ai_category_enabled: bool = True):
+async def _parse_and_ingest(doc_id: int, save_path: str, source_file: str, ext: str):
     """[비동기 파싱 파이프라인] 업로드/재시도 응답을 즉시 돌려준 뒤 백그라운드에서 실행된다.
 
     ⭐ 왜 이렇게 하나 (2026-07-05):
@@ -1148,26 +1137,6 @@ async def _parse_and_ingest(doc_id: int, save_path: str, source_file: str, ext: 
                 doc.title = _extract_title(result.get("pages", []))
             await sess.commit()
 
-        # AI 자동 카테고리 분류 — Ollama 호출(수 초 이상 걸릴 수 있음)은 DB 세션을
-        # 닫아둔 채로 하고, 결과가 나온 뒤에만 짧게 다시 열어 category만 갱신한다.
-        # category_ai_checked는 성공/실패와 무관하게 "시도가 끝났다"는 뜻으로 항상 세운다 —
-        # 프론트가 이 값을 보고서야 "카테고리·특이사항 확인" 팝업을 띄우기 때문에, 세우지
-        # 않으면 Ollama가 꺼져 있을 때 팝업이 영원히 안 뜨는 문제가 생긴다.
-        if result.get("status") == "success":
-            full_text = "\n".join(p.get("text", "") for p in result.get("pages", []))
-            suggested = None
-            if ai_category_enabled and full_text.strip():
-                suggested = await asyncio.to_thread(_ollama_classify_category, full_text)
-            async with AsyncSessionLocal() as sess3:
-                doc3 = (await sess3.execute(
-                    select(Document).where(Document.id == doc_id)
-                )).scalar_one_or_none()
-                if doc3 is not None:
-                    if suggested:
-                        doc3.category = suggested
-                        doc3.category_ai_suggested = True
-                    doc3.category_ai_checked = True
-                    await sess3.commit()
     except Exception:
         # 결과 반영 자체가 실패 — "parsing" 영구 정체를 막기 위해 failed로 강제 복구 시도
         try:
@@ -1203,16 +1172,15 @@ async def 파일_업로드(
     background_tasks: BackgroundTasks,
     request: Request,
     file: UploadFile = File(...),
-    category: str = Form("report"),
+    category: str | None = Form(None),
     original_path: str = Form(None),   # 폴더 업로드 시 상대 경로 (없으면 None)
     memo: str = Form(None),            # 업로드 시점에 바로 남기는 특이사항 — 검색 결과에 그대로 노출됨
-    ai_category_enabled: bool = Form(True),  # AI 요약처럼 누구나 켜고 끄는 클라이언트 설정(localStorage) — 업로드마다 전달받음
     db: AsyncSession = Depends(get_db),
 ):
     # 카테고리는 고정 5종(spec/research/presentation/report/other) 외에도 클라이언트가
     # 자유롭게 새 이름을 입력해 만들 수 있다 — category는 단순 문자열 컬럼이라
     # 별도 마이그레이션·사전 등록 없이 그대로 저장·조회된다.
-    category = category.strip()[:30] or "report"
+    category = (category or "").strip()[:30]
     memo = (memo or "").strip()[:1000] or None
 
     # ── 검사 1: 파일이 아예 안 온 경우 ──────────────────────────────────
@@ -1305,7 +1273,7 @@ async def 파일_업로드(
     await db.refresh(doc)  # auto-increment id 가져오기
 
     # 응답 후 백그라운드에서 파싱 → 상태 갱신 → JSON 저장 → 임베딩 색인
-    background_tasks.add_task(_parse_and_ingest, doc.id, save_path, file.filename, ext, ai_category_enabled)
+    background_tasks.add_task(_parse_and_ingest, doc.id, save_path, file.filename, ext)
 
     return {
         "id":       doc.id,
@@ -1344,30 +1312,10 @@ async def 문서_상태_배치(ids: str, db: AsyncSession = Depends(get_db)):
             "page_count":  d.page_count,
             "has_flagged": d.has_flagged,
             "error":       d.error,
-            "category":              d.category,
-            "category_ai_suggested": d.category_ai_suggested,
-            "category_ai_checked":   d.category_ai_checked,
+            "category": d.category,
         }
         for d in docs
     ]
-
-
-# GET /documents/{doc_id}/status — 업로드/재파싱 진행 상태 폴링용 (가벼운 응답)
-# 프론트 업로드 화면은 배치 엔드포인트(/documents/statuses)를 사용한다.
-# 이 개별 엔드포인트는 다른 화면(예: 상세보기 단건 확인)에서 쓸 수 있어 유지한다.
-@app.get("/documents/{doc_id}/status")
-async def 문서_상태(doc_id: int, db: AsyncSession = Depends(get_db)):
-    doc = (await db.execute(select(Document).where(Document.id == doc_id))).scalar_one_or_none()
-    if doc is None:
-        raise HTTPException(status_code=404, detail="해당 문서를 찾을 수 없습니다")
-    return {
-        "id":          doc.id,
-        "filename":    doc.filename,
-        "status":      doc.status,        # parsing | success | failed
-        "page_count":  doc.page_count,
-        "has_flagged": doc.has_flagged,
-        "error":       doc.error,
-    }
 
 
 # GET /files/{doc_id} — 원본 파일을 다운로드합니다
@@ -1428,6 +1376,23 @@ async def _문서_완전삭제(doc: Document, db: AsyncSession):
     _invalidate_bm25_cache()
 
     await db.delete(doc)
+
+
+# DELETE /admin/documents/bulk — 여러 문서 일괄 삭제
+# ⚠ 반드시 /admin/documents/{doc_id} 보다 먼저 등록해야 한다 — 순서가 뒤바뀌면
+# "bulk"라는 문자열이 {doc_id}(int)로 파싱 시도되어 422로 실패하고, 이 라우트는
+# 영원히 호출되지 않는 죽은 코드가 된다(2026-07-21 실제로 이 상태였음).
+@app.delete("/admin/documents/bulk")
+async def 문서_일괄_삭제(ids: list[int] = Body(...), db: AsyncSession = Depends(get_db)):
+    deleted = []
+    for doc_id in ids:
+        result = await db.execute(select(Document).where(Document.id == doc_id))
+        doc = result.scalar_one_or_none()
+        if doc:
+            await _문서_완전삭제(doc, db)
+            deleted.append(doc_id)
+    await db.commit()
+    return {"deleted": deleted, "count": len(deleted)}
 
 
 # DELETE /admin/documents/{id} — 문서를 DB와 디스크에서 삭제합니다
@@ -2001,20 +1966,6 @@ async def 문서_일괄_카테고리_변경(
     return {"updated": [doc.id for doc in docs], "count": len(docs), "category": category}
 
 
-# DELETE /admin/documents/bulk — 여러 문서 일괄 삭제
-@app.delete("/admin/documents/bulk")
-async def 문서_일괄_삭제(ids: list[int] = Body(...), db: AsyncSession = Depends(get_db)):
-    deleted = []
-    for doc_id in ids:
-        result = await db.execute(select(Document).where(Document.id == doc_id))
-        doc = result.scalar_one_or_none()
-        if doc:
-            await _문서_완전삭제(doc, db)
-            deleted.append(doc_id)
-    await db.commit()
-    return {"deleted": deleted, "count": len(deleted)}
-
-
 # PATCH /admin/documents/{doc_id}/memo — 문서 메모(설명) 수정
 @app.patch("/admin/documents/{doc_id}/memo")
 async def 메모_수정(
@@ -2131,7 +2082,7 @@ async def 통계(db: AsyncSession = Depends(get_db)):
         select(Document.category, func.count().label("cnt"))
         .group_by(Document.category)
     )).all()
-    by_category = {row.category: row.cnt for row in cat_rows}
+    by_category = {row.category: row.cnt for row in cat_rows if row.category}
 
     # OCR 검토 필요 문서 수
     flagged = (await db.execute(
@@ -2292,154 +2243,6 @@ async def 내_검색_기록_삭제(request: Request, db: AsyncSession = Depends(
     await db.execute(sa_delete(SearchLog).where(SearchLog.user_email == email))
     await db.commit()
     return {"message": "검색 기록이 삭제됐습니다"}
-
-
-# ── AI 답변 (Ollama + OLLAMA_MODEL) ─────────────────────────────────────────
-
-# Qwen2.5는 한국어 프롬프트에도 가끔 한자(중국어)를 섞어 내는 알려진 모델 특성이 있다
-# (https://github.com/QwenLM/Qwen/issues/543). 프롬프트 지시만으로는 완전히 막을 수
-# 없어서, 응답에 한자가 섞이면 온도를 낮춰 재시도하고, 그래도 남으면 강제로 지운다.
-_CJK_HAN_RE = _re.compile(r'[一-鿿]')
-
-def _ollama_generate_korean(prompt: str, max_retries: int = 2) -> dict:
-    import urllib.request, json as _json
-    data = None
-    for _attempt in range(max_retries + 1):
-        payload = _json.dumps({
-            "model": OLLAMA_MODEL,
-            "prompt": prompt,
-            "stream": False,
-            "options": {"temperature": 0.2},
-        }).encode()
-        req = urllib.request.Request(
-            f"{OLLAMA_BASE_URL}/api/generate",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=120) as r:
-            data = _json.loads(r.read())
-        if not _CJK_HAN_RE.search(data.get("response", "")):
-            return data
-    data["response"] = _CJK_HAN_RE.sub("", data.get("response", ""))
-    return data
-
-
-# ── 업로드 시 AI 자동 카테고리 분류 (Ollama + OLLAMA_MODEL) ──────────────────
-# 파싱이 끝나 실제 본문이 확보된 시점에만 호출한다 — 업로드 직후(파싱 전)엔 분류할
-# 내용이 없다. 실패(Ollama 미가동, 응답이 넷 중 무엇과도 안 맞음 등)하면 None을
-# 반환하고, 호출부는 업로드 시 사용자가 고른 카테고리를 그대로 둔다.
-_CATEGORY_OPTIONS = ["spec", "research", "presentation", "report"]
-_CATEGORY_PROMPT_DESC = (
-    "- spec: 사양서 (제품/기술 스펙, 요구사항 정의서)\n"
-    "- research: 연구자료 (조사·분석 자료, 논문, 학습자료)\n"
-    "- presentation: 발표자료 (슬라이드, 데모/발표용 자료)\n"
-    "- report: 보고서 (진행 상황 보고, 회의록, 그 외 일반 문서)"
-)
-
-def _ollama_classify_category(text: str) -> str | None:
-    prompt = (
-        "다음은 방금 업로드된 문서의 본문 일부입니다. 아래 네 가지 카테고리 중 이 문서에 "
-        f"가장 알맞은 것 하나를 골라 그 영문 코드로만 답하세요.\n{_CATEGORY_PROMPT_DESC}\n\n"
-        f"문서 내용:\n{text[:4000]}\n\n"
-        "다른 설명 없이 spec / research / presentation / report 중 하나의 단어로만 답하세요."
-    )
-    try:
-        data = _ollama_generate_korean(prompt, max_retries=0)
-    except Exception:
-        return None
-    raw = data.get("response", "").strip().lower()
-    for opt in _CATEGORY_OPTIONS:
-        if opt in raw:
-            return opt
-    return None
-
-
-@app.get("/ask/status")
-async def ai_status():
-    """Ollama 서버 가용 여부 및 OLLAMA_MODEL(설치된 모델) 확인."""
-    import urllib.request, json as _json
-    def _check():
-        req = urllib.request.Request(f"{OLLAMA_BASE_URL}/api/tags")
-        with urllib.request.urlopen(req, timeout=2) as r:
-            return _json.loads(r.read())
-    try:
-        data   = await asyncio.to_thread(_check)
-        models = [m["name"] for m in data.get("models", [])]
-        # "gemma" 고정 문자열이 아니라 OLLAMA_MODEL의 모델명(태그 앞부분)이 실제
-        # 설치돼 있는지로 판단 — 모델을 qwen 등으로 바꿔도 가용성 체크가 맞게 동작하게 함.
-        target_name = OLLAMA_MODEL.split(":")[0].lower()
-        ok = any(m.split(":")[0].lower() == target_name for m in models)
-        return {"available": ok, "models": models, "target": OLLAMA_MODEL}
-    except Exception:
-        return {"available": False, "models": [], "target": OLLAMA_MODEL}
-
-
-@app.post("/ask")
-async def ai_ask(
-    q:        str       = Body(..., embed=True),
-    snippets: list[str] = Body(..., embed=True),
-):
-    """검색 결과 스니펫을 컨텍스트로 로컬 Ollama 모델에게 질문합니다."""
-    context_text = "\n\n".join(
-        f"[문서 {i+1}]\n{s.strip()}" for i, s in enumerate(snippets[:5]) if s.strip()
-    )
-    prompt = (
-        "다음은 사내 문서에서 검색한 관련 내용입니다.\n\n"
-        f"{context_text}\n\n"
-        f"질문: {q}\n\n"
-        "위 문서 내용을 바탕으로 질문에 간결하게 답해 주세요. "
-        "문서에 없는 내용은 추측하지 말고 '문서에서 찾을 수 없습니다'라고 답하세요. "
-        "반드시 한국어로만 답변하세요(중국어나 다른 언어를 절대 섞지 마세요)."
-    )
-    try:
-        data = await asyncio.to_thread(_ollama_generate_korean, prompt)
-        return {"answer": data.get("response", ""), "model": data.get("model", OLLAMA_MODEL)}
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"AI 답변 생성 실패: {e}")
-
-
-# GET /documents/{doc_id}/summary — 문서 상세 팝업에서 "이 문서 요약해줘" 용도.
-# /ask와 달리 검색 스니펫이 아니라 문서 본문 전체(파싱 결과 JSON)를 컨텍스트로 쓴다.
-@app.get("/documents/{doc_id}/summary")
-async def 문서_요약(doc_id: int, db: AsyncSession = Depends(get_db)):
-    doc = (await db.execute(select(Document).where(Document.id == doc_id))).scalar_one_or_none()
-    if doc is None:
-        raise HTTPException(status_code=404, detail="해당 문서를 찾을 수 없습니다")
-
-    parsed_path = os.path.join(PARSED_DIR, f"{doc_id}.json")
-    if not os.path.exists(parsed_path):
-        raise HTTPException(status_code=400, detail="문서 본문을 찾을 수 없습니다 (파싱 결과 없음)")
-    with open(parsed_path, "r", encoding="utf-8") as f:
-        pd = json.load(f)
-    full_text = "\n".join(p.get("text", "") for p in pd.get("pages", []))
-    if not full_text.strip():
-        raise HTTPException(status_code=400, detail="요약할 본문 텍스트가 없습니다")
-
-    # 컨텍스트 길이 안전장치 — 매우 긴 문서(수백~수천 페이지)는 앞부분만 사용.
-    # qwen2.5:7b 컨텍스트(32K 토큰)엔 여유가 있지만, 그래도 상한을 둬 응답 지연을 막는다.
-    MAX_CHARS = 12000
-    truncated = full_text[:MAX_CHARS]
-    truncated_note = "\n\n(문서가 길어 앞부분만 사용했습니다)" if len(full_text) > MAX_CHARS else ""
-
-    # [수정] Qwen2.5는 한국어 프롬프트에도 가끔 중국어 토큰을 섞어 내는 걸로 알려진
-    # 모델 특성이 있어(https://github.com/QwenLM/Qwen/issues/543), 답변 언어를
-    # 명시적으로 지시해 이탈을 줄인다. 요약도 상세 요약이 아니라 "대략 무슨 내용인지"
-    # 감만 잡을 수 있는 1~2문장으로 짧게 바꿈.
-    prompt = (
-        f"다음은 '{doc.title or doc.filename}' 문서의 본문입니다.\n\n"
-        f"{truncated}\n\n"
-        "이 문서가 대략 어떤 내용인지 1~2문장으로 간단히 알려주세요. "
-        "반드시 한국어로만 답변하세요(중국어나 다른 언어를 절대 섞지 마세요)."
-    )
-
-    try:
-        data = await asyncio.to_thread(_ollama_generate_korean, prompt)
-        return {
-            "summary": data.get("response", "") + truncated_note,
-            "model": data.get("model", OLLAMA_MODEL),
-        }
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"요약 생성 실패: {e}")
 
 
 # ── 프론트 정적 서빙 (배포용 통합 서빙) ──────────────────────────────────────

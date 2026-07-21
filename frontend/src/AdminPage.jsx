@@ -14,8 +14,8 @@ import {
   Progress, Tooltip, Modal, Radio, Empty, Menu, AutoComplete,
 } from 'antd'
 import {
-  DeleteOutlined, WarningOutlined, FileTextOutlined, HistoryOutlined, FileOutlined,
-  SearchOutlined, ExclamationCircleOutlined, ReloadOutlined, SyncOutlined, EditOutlined,
+  DeleteOutlined, WarningOutlined, FileTextOutlined, HistoryOutlined,
+  SearchOutlined, ReloadOutlined, SyncOutlined, EditOutlined,
   DownloadOutlined, FolderOutlined, UnorderedListOutlined,
   EyeOutlined, UserOutlined, TeamOutlined,
 } from '@ant-design/icons'
@@ -176,7 +176,7 @@ export default function AdminPage({ onNavigate }) {
     const header = ['ID', '파일명', '파일형식', '원본경로', '카테고리', '상태', '페이지수', 'OCR저신뢰', '업로드시각']
     const rows = filteredDocuments.map(d => [
       d.id, `"${d.filename}"`, d.file_type ?? '', `"${d.original_path ?? ''}"`,
-      CAT_LABEL[d.category] ?? d.category, d.status === 'success' ? '성공' : '실패',
+      d.category ? (CAT_LABEL[d.category] ?? d.category) : '미지정', d.status === 'success' ? '성공' : '실패',
       d.page_count, d.has_flagged ? '검토필요' : '정상', `"${d.uploaded_at}"`,
     ])
     const csv = '﻿' + [header, ...rows].map(r => r.join(',')).join('\n')
@@ -287,6 +287,14 @@ export default function AdminPage({ onNavigate }) {
       message.success('부서가 저장됐습니다')
     },
     onError: () => message.error('부서 저장 중 오류가 발생했습니다'),
+  })
+  const removeUserMutation = useMutation({
+    mutationFn: (email) => axios.delete(`${API}/admin/users/${encodeURIComponent(email)}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['users'] })
+      message.success('내보냈습니다')
+    },
+    onError: (e) => message.error(e?.response?.data?.detail || '내보내기 중 오류가 발생했습니다'),
   })
   const knownDepartments = useMemo(
     () => Array.from(new Set(users.map(u => u.department).filter(Boolean))),
@@ -428,7 +436,7 @@ export default function AdminPage({ onNavigate }) {
       title: '카테고리', dataIndex: 'category', width: 110, onHeaderCell: nowrapHeader,
       render: (cat, record) => (
         <Select
-          value={cat} size="small" style={{ width: 92 }}
+          value={cat || undefined} placeholder="미지정" size="small" style={{ width: 92 }}
           onChange={(val) => categoryMutation.mutate({ id: record.id, category: val })}
           options={allCategoryOptions}
         />
@@ -759,7 +767,7 @@ export default function AdminPage({ onNavigate }) {
                                   {doc.title || doc.filename}
                                 </Text>
                                 <Row justify="space-between" align="middle" style={{ marginBottom: 6 }}>
-                                  <Col><Tag color={CAT_COLOR[doc.category]} style={{ marginRight: 0 }}>{CAT_LABEL[doc.category] ?? doc.category}</Tag></Col>
+                                  <Col><Tag color={doc.category ? CAT_COLOR[doc.category] : undefined} style={{ marginRight: 0 }}>{doc.category ? (CAT_LABEL[doc.category] ?? doc.category) : '미지정'}</Tag></Col>
                                   <Col><Text type="secondary" style={{ fontSize: 11.5 }}>{(doc.uploaded_at || '').slice(0, 10)}</Text></Col>
                                 </Row>
                                 <Row justify="space-between" align="middle">
@@ -888,6 +896,20 @@ export default function AdminPage({ onNavigate }) {
                               저장
                             </Button>
                           </Space.Compact>
+                          <Popconfirm
+                            title={`"${u.email}"를 내보낼까요?`}
+                            description="시스템에서 완전히 제거됩니다(부서·이름·관리자 지정 전부 삭제). 다시 로그인하면 부서 미지정 상태로 새로 등록됩니다."
+                            okText="내보내기" okButtonProps={{ danger: true }} cancelText="취소"
+                            onConfirm={() => removeUserMutation.mutate(u.email)}
+                          >
+                            <Button
+                              size="small" danger
+                              icon={<DeleteOutlined />}
+                              loading={removeUserMutation.isPending && removeUserMutation.variables === u.email}
+                            >
+                              내보내기
+                            </Button>
+                          </Popconfirm>
                         </Space>
                       </List.Item>
                     )
@@ -1053,7 +1075,7 @@ export default function AdminPage({ onNavigate }) {
 
             <ACard size="small" style={{ marginBottom: 20 }}>
               <Row gutter={[16, 16]}>
-                <Col span={12}><Text type="secondary">카테고리</Text><br /><Tag color={CAT_COLOR[detailData.category]}>{CAT_LABEL[detailData.category] ?? detailData.category}</Tag></Col>
+                <Col span={12}><Text type="secondary">카테고리</Text><br /><Tag color={detailData.category ? CAT_COLOR[detailData.category] : undefined}>{detailData.category ? (CAT_LABEL[detailData.category] ?? detailData.category) : '미지정'}</Tag></Col>
                 <Col span={12}><Text type="secondary">상태</Text><br /><Tag color={detailData.status === 'success' ? 'green' : 'red'}>{detailData.status === 'success' ? '성공' : '실패'}</Tag></Col>
                 <Col span={12}><Text type="secondary">총 페이지</Text><br /><Text>{detailData.page_count}페이지</Text></Col>
                 <Col span={12}><Text type="secondary">조회수</Text><br /><Text><EyeOutlined style={{ marginRight: 4 }} />{detailData.view_count ?? 0}</Text></Col>

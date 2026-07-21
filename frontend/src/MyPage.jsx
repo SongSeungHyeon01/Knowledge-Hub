@@ -87,7 +87,7 @@ export default function MyPage({ me }) {
         </div>
       ),
     },
-    { title: '카테고리', dataIndex: 'category', width: 110, render: (c) => <Tag color={CATEGORY_COLOR[c]}>{CATEGORY_LABEL[c] ?? c}</Tag> },
+    { title: '카테고리', dataIndex: 'category', width: 110, render: (c) => <Tag color={c ? CATEGORY_COLOR[c] : undefined}>{c ? (CATEGORY_LABEL[c] ?? c) : '미지정'}</Tag> },
     { title: '형식', dataIndex: 'file_type', width: 80, render: (t) => t ? <Tag>{t.toUpperCase()}</Tag> : '—' },
     { title: '상태', dataIndex: 'status', width: 100, render: (s) => STATUS_TAG[s] ?? <Tag>{s}</Tag> },
     { title: '조회수', dataIndex: 'view_count', width: 80, render: (v) => <span><EyeOutlined style={{ marginRight: 4 }} />{v ?? 0}</span> },
@@ -121,7 +121,10 @@ export default function MyPage({ me }) {
       }}>
         <Avatar size={52} src={me?.picture} icon={!me?.picture && <UserOutlined />} />
         <div>
-          <div style={{ fontSize: 15, fontWeight: 700 }}>{me?.name ?? me?.email}</div>
+          <div style={{ fontSize: 15, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8 }}>
+            {me?.name ?? me?.email}
+            {me?.department && <Tag color="blue" style={{ margin: 0 }}>{me.department}</Tag>}
+          </div>
           <Text type="secondary" style={{ fontSize: 12.5 }}>{me?.email}</Text>
         </div>
         <div style={{ marginLeft: 'auto', textAlign: 'right' }}>
