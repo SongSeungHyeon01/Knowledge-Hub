@@ -1148,15 +1148,21 @@ export default function AdminPage({ onNavigate }) {
               </ACard>
 
               <ACard title="현재 관리자 목록" size="small" loading={loadingAdmins}>
+                {/* 부서 관리 탭과 같은 형태로 통일 — 이름(굵게) 자리에 이메일, 그 아래 부가정보,
+                    삭제 버튼은 항상 같은 위치에 고정되도록 flex 행으로 정렬한다(2026-07-22) */}
                 <List
                   size="small"
                   dataSource={adminEmails.env_admins.map(email => ({ email, fixed: true }))}
                   renderItem={({ email }) => (
                     <List.Item>
-                      <Space>
-                        <Text>{email}</Text>
-                        <Tag>고정 관리자</Tag>
-                      </Space>
+                      <div style={{ display: 'flex', alignItems: 'center', width: '100%', gap: 12 }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <Text strong style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {email}
+                          </Text>
+                          <Text type="secondary" style={{ fontSize: 11.5, display: 'block' }}>고정 관리자</Text>
+                        </div>
+                      </div>
                     </List.Item>
                   )}
                 />
@@ -1165,24 +1171,24 @@ export default function AdminPage({ onNavigate }) {
                   dataSource={adminEmails.extra_admins}
                   locale={{ emptyText: '웹 화면에서 추가한 관리자가 아직 없습니다' }}
                   renderItem={(row) => (
-                    <List.Item
-                      actions={[
+                    <List.Item>
+                      <div style={{ display: 'flex', alignItems: 'center', width: '100%', gap: 12 }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <Text strong style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {row.email}
+                          </Text>
+                          <Text type="secondary" style={{ fontSize: 11.5, display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {row.added_by ? `${row.added_by} 추가` : ''} {(row.created_at || '').slice(0, 16)}
+                          </Text>
+                        </div>
                         <Popconfirm
-                          key="del"
                           title={`"${row.email}"를 관리자에서 제외할까요?`}
                           okText="제외" cancelText="취소"
                           onConfirm={() => removeAdminMutation.mutate(row.email)}
                         >
-                          <Button type="text" danger size="small" icon={<DeleteOutlined />} loading={removeAdminMutation.isPending} />
-                        </Popconfirm>,
-                      ]}
-                    >
-                      <Space direction="vertical" size={0}>
-                        <Text>{row.email}</Text>
-                        <Text type="secondary" style={{ fontSize: 11.5 }}>
-                          {row.added_by ? `${row.added_by} 추가` : ''} {(row.created_at || '').slice(0, 16)}
-                        </Text>
-                      </Space>
+                          <Button type="text" danger size="small" icon={<DeleteOutlined />} loading={removeAdminMutation.isPending} style={{ flexShrink: 0 }} />
+                        </Popconfirm>
+                      </div>
                     </List.Item>
                   )}
                 />
