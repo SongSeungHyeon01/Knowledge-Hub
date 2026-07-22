@@ -635,7 +635,7 @@ export default function AdminPage({ onNavigate }) {
                 columns={docColumns} dataSource={filteredDocuments} rowKey="id" loading={loadingDocs}
                 pagination={{ pageSize: 10 }}
                 rowSelection={{ selectedRowKeys, onChange: setSelectedRowKeys }}
-                scroll={isNarrow ? { x: 'max-content' } : undefined}
+                scroll={{ x: 'max-content' }}
               />
             </>
           )}
@@ -649,7 +649,7 @@ export default function AdminPage({ onNavigate }) {
                 message="OCR 인식 신뢰도가 낮은 페이지만 모아둔 목록입니다"
                 description="스캔 PDF 등 이미지 기반 문서를 OCR로 읽었을 때 인식 결과를 못 믿을 만큼 신뢰도가 낮은 페이지는 검색 결과 품질을 해치지 않도록 검색 인덱싱에서 자동 제외됩니다. 여기서 '수정' 버튼으로 해당 페이지 텍스트를 직접 확인·수정하면, 그 페이지가 다시 검색 대상에 포함됩니다."
               />
-              <Table columns={flaggedColumns} dataSource={flagged} rowKey="id" loading={loadingFlagged} pagination={{ pageSize: 10 }} />
+              <Table columns={flaggedColumns} dataSource={flagged} rowKey="id" loading={loadingFlagged} pagination={{ pageSize: 10 }} scroll={{ x: 'max-content' }} />
             </>
           )}
 
@@ -662,7 +662,7 @@ export default function AdminPage({ onNavigate }) {
                   </Popconfirm>
                 </div>
               )}
-              <Table columns={historyColumns} dataSource={history} rowKey="id" loading={loadingHistory} pagination={{ pageSize: 20 }} />
+              <Table columns={historyColumns} dataSource={history} rowKey="id" loading={loadingHistory} pagination={{ pageSize: 20 }} scroll={{ x: 'max-content' }} />
             </>
           )}
 
