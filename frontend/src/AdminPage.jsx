@@ -9,9 +9,9 @@ import { useState, useEffect, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
-  Table, Button, Tag, message, Popconfirm, Typography, Row, Col, Statistic,
+  Table, Button, Tag, message, Popconfirm, Typography, Row, Col,
   Card as ACard, List, Drawer, Collapse, Spin, Alert, Input, Space, Select,
-  Progress, Tooltip, Modal, Radio, Empty, Menu, AutoComplete,
+  Progress, Tooltip, Modal, Radio, Empty, Menu, AutoComplete, Popover,
 } from 'antd'
 import {
   DeleteOutlined, WarningOutlined, FileTextOutlined, HistoryOutlined,
@@ -36,6 +36,14 @@ const deleteDocument = (id) => axios.delete(`${API}/admin/documents/${id}`)
 
 const CAT_LABEL = { spec: '사양서', research: '연구자료', presentation: '발표자료', report: '보고서' }
 const CAT_COLOR = { spec: 'blue', research: 'purple', presentation: 'cyan', report: 'green' }
+
+// 제목 옆 요약 통계(전체 문서 수·실패 문서·OCR 검토 대기·최근 업로드) 박스 공통 스타일
+const statBoxStyle = {
+  display: 'flex', alignItems: 'center', gap: 6,
+  padding: '6px 14px', borderRadius: 8,
+  border: 'none', background: '#fafcff',
+  outline: 'none',
+}
 // 카테고리 랜딩(태그 브라우징) 카드 전용 — 체크형 태그의 선택 상태 배경/글자색
 const CAT_ACCENT_HEX = { spec: '#4C6FFF', research: '#8456DB', presentation: '#0EA5B0', report: '#1E9E5A' }
 const CAT_SOFT_BG    = { spec: '#EEF1FF', research: '#F3EEFC', presentation: '#E6F8F9', report: '#E9F9EF' }
@@ -50,6 +58,20 @@ export default function AdminPage({ onNavigate }) {
   const queryClient = useQueryClient()
 
   const [navKey, setNavKey] = useState('docs')  // docs | ocr | history | category | admins
+
+  // 제목 옆 요약 통계 박스·드롭다운 목록 항목에 마우스오버 표시를 주기 위한 상태
+  const [hoveredStatBox,  setHoveredStatBox]  = useState(null)  // 'total' | 'failed' | 'review' | 'recent'
+  const [hoveredStatItem, setHoveredStatItem] = useState(null)  // 드롭다운 안 문서 id
+  const statBoxHover = (key) => ({
+    ...statBoxStyle,
+    cursor: 'pointer',
+    ...(hoveredStatBox === key ? { background: '#eef4ff' } : {}),
+  })
+  const statItemHover = (id) => ({
+    cursor: 'pointer', padding: '6px 8px', borderRadius: 6,
+    background: hoveredStatItem === id ? '#f0f5ff' : 'transparent',
+    outline: 'none',
+  })
 
   // 좌측 서브메뉴가 상단 헤더(AdminRoute.jsx의 #admin-nav-slot)로 이동 — 마운트된 뒤에야
   // 그 DOM 노드가 존재하므로 useEffect에서 한 번 찾아 포털 대상으로 저장한다.
@@ -535,11 +557,13 @@ export default function AdminPage({ onNavigate }) {
   })
 
   const failedPct = stats?.total_documents ? Math.round((stats.failed_count / stats.total_documents) * 1000) / 10 : 0
-  const mostRecentDoc = [...documents].sort((a, b) => new Date(b.uploaded_at) - new Date(a.uploaded_at))[0]
+  const recentDocs    = [...documents].sort((a, b) => new Date(b.uploaded_at) - new Date(a.uploaded_at)).slice(0, 5)
+  const mostRecentDoc = recentDocs[0]
+  const failedDocs    = documents.filter(d => d.status === 'failed')
 
   const leftMenuItems = [
     { key: 'docs',           icon: <UnorderedListOutlined />, label: '문서 목록' },
-    { key: 'ocr',            icon: <WarningOutlined />,       label: `OCR 검토 (${flagged.length})` },
+    { key: 'ocr',            icon: <WarningOutlined />,       label: `실패 문서 (${flagged.length})` },
     { key: 'history',        icon: <HistoryOutlined />,       label: '검색 기록' },
     { key: 'category',       icon: <FolderOutlined />,        label: '카테고리 관리' },
     { key: 'departments',    icon: <TeamOutlined />,          label: '부서 관리' },
@@ -547,7 +571,7 @@ export default function AdminPage({ onNavigate }) {
   ]
 
   const NAV_TITLE = {
-    docs: '문서 목록', ocr: 'OCR 검토', history: '검색 기록',
+    docs: '문서 목록', ocr: '실패 문서', history: '검색 기록',
     category: '카테고리 관리', departments: '부서 관리', admins: '관리자 계정',
   }
 
@@ -572,8 +596,175 @@ export default function AdminPage({ onNavigate }) {
             안 넣으면 넓은 테이블(문서 목록) 때문에 이 Col이 줄어들지 못하고 3열 Row 전체가
             줄바꿈되어(사이드바 아래로 콘텐츠가 통째로 떨어짐) 표시됨. */}
         <Col flex="auto" style={{ minWidth: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 22 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 22, flexWrap: 'wrap', gap: 16 }}>
             <Title level={3} style={{ margin: 0 }}>관리자 · {NAV_TITLE[navKey]}</Title>
+
+            {/* 우측 사이드바로 따로 빼두면 넓은 문서 테이블과 자리를 다퉈 겹쳐 보이는 문제가
+                있어, 요약 통계는 제목 옆에 나란히 배치한다(2026-07-22). 각 통계는 박스로
+                구분하고, "최근 업로드"는 마우스를 올리면 최근 5건이 드롭다운으로 펼쳐진다. */}
+            <Space size={20} wrap>
+              <div
+                style={statBoxHover('total')}
+                onMouseEnter={() => setHoveredStatBox('total')}
+                onMouseLeave={() => setHoveredStatBox(null)}
+                onClick={() => {
+                  setNavKey('docs')
+                  setFilterText(''); setFilterCategory(null); setFilterStatus(null); setFilterFileType(null)
+                }}
+              >
+                <Text type="secondary" style={{ fontSize: 12.5 }}>전체 문서</Text>
+                <Text strong style={{ color: '#1677ff', fontSize: 15 }}>{stats?.total_documents ?? 0}</Text>
+              </div>
+              {failedDocs.length > 0 ? (
+                <Popover
+                  trigger="hover"
+                  placement="bottomRight"
+                  content={
+                    <List
+                      size="small"
+                      style={{ width: 280 }}
+                      dataSource={failedDocs.slice(0, 5)}
+                      renderItem={(doc) => (
+                        <List.Item
+                          style={statItemHover(doc.id)}
+                          onMouseEnter={() => setHoveredStatItem(doc.id)}
+                          onMouseLeave={() => setHoveredStatItem(null)}
+                          onClick={() => openDetail(doc)}
+                        >
+                          <div style={{ minWidth: 0, width: '100%' }}>
+                            <div style={{ fontSize: 12.5, color: '#cf1322', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {doc.filename}
+                            </div>
+                            <Text type="secondary" style={{ fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>
+                              {doc.error || '알 수 없는 오류'}
+                            </Text>
+                          </div>
+                        </List.Item>
+                      )}
+                    />
+                  }
+                >
+                  <div
+                    style={statBoxHover('failed')}
+                    onMouseEnter={() => setHoveredStatBox('failed')}
+                    onMouseLeave={() => setHoveredStatBox(null)}
+                    onClick={() => {
+                      setNavKey('docs')
+                      setFilterText(''); setFilterCategory(null); setFilterFileType(null)
+                      setFilterStatus('failed')
+                    }}
+                  >
+                    <Text type="secondary" style={{ fontSize: 12.5 }}>실패 문서</Text>
+                    <Text strong style={{ color: '#cf1322', fontSize: 15 }}>{stats?.failed_count ?? 0}</Text>
+                    <Text type="secondary" style={{ fontSize: 11.5 }}>({failedPct}%)</Text>
+                  </div>
+                </Popover>
+              ) : (
+                <div
+                  style={statBoxHover('failed')}
+                  onMouseEnter={() => setHoveredStatBox('failed')}
+                  onMouseLeave={() => setHoveredStatBox(null)}
+                  onClick={() => {
+                    setNavKey('docs')
+                    setFilterText(''); setFilterCategory(null); setFilterFileType(null)
+                    setFilterStatus('failed')
+                  }}
+                >
+                  <Text type="secondary" style={{ fontSize: 12.5 }}>실패 문서</Text>
+                  <Text strong style={{ color: '#389e0d', fontSize: 15 }}>0</Text>
+                  <Text type="secondary" style={{ fontSize: 11.5 }}>({failedPct}%)</Text>
+                </div>
+              )}
+              {flagged.length > 0 ? (
+                <Popover
+                  trigger="hover"
+                  placement="bottomRight"
+                  content={
+                    <List
+                      size="small"
+                      style={{ width: 280 }}
+                      dataSource={flagged.slice(0, 5)}
+                      renderItem={(doc) => (
+                        <List.Item
+                          style={statItemHover(doc.id)}
+                          onMouseEnter={() => setHoveredStatItem(doc.id)}
+                          onMouseLeave={() => setHoveredStatItem(null)}
+                          onClick={() => openOcrEdit(doc)}
+                        >
+                          <div style={{ minWidth: 0, width: '100%' }}>
+                            <div style={{ fontSize: 12.5, color: '#d46b08', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {doc.filename}
+                            </div>
+                            <Text type="secondary" style={{ fontSize: 11 }}>{formatDate(doc.uploaded_at)}</Text>
+                          </div>
+                        </List.Item>
+                      )}
+                    />
+                  }
+                >
+                  <div
+                    style={statBoxHover('review')}
+                    onMouseEnter={() => setHoveredStatBox('review')}
+                    onMouseLeave={() => setHoveredStatBox(null)}
+                    onClick={() => setNavKey('ocr')}
+                  >
+                    <Text type="secondary" style={{ fontSize: 12.5 }}>검토</Text>
+                    <Text strong style={{ color: '#d46b08', fontSize: 15 }}>{stats?.flagged_count ?? 0}</Text>
+                  </div>
+                </Popover>
+              ) : (
+                <div
+                  style={statBoxHover('review')}
+                  onMouseEnter={() => setHoveredStatBox('review')}
+                  onMouseLeave={() => setHoveredStatBox(null)}
+                  onClick={() => setNavKey('ocr')}
+                >
+                  <Text type="secondary" style={{ fontSize: 12.5 }}>검토</Text>
+                  <Text strong style={{ color: '#389e0d', fontSize: 15 }}>0</Text>
+                </div>
+              )}
+              {mostRecentDoc && (
+                <Popover
+                  trigger="hover"
+                  placement="bottomRight"
+                  content={
+                    <List
+                      size="small"
+                      style={{ width: 280 }}
+                      dataSource={recentDocs}
+                      renderItem={(doc) => (
+                        <List.Item
+                          style={statItemHover(doc.id)}
+                          onMouseEnter={() => setHoveredStatItem(doc.id)}
+                          onMouseLeave={() => setHoveredStatItem(null)}
+                          onClick={() => openDetail(doc)}
+                        >
+                          <div style={{ minWidth: 0, width: '100%' }}>
+                            <div style={{ fontSize: 12.5, color: '#1677ff', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {doc.filename}
+                            </div>
+                            <Text type="secondary" style={{ fontSize: 11 }}>{formatDate(doc.uploaded_at)}</Text>
+                          </div>
+                        </List.Item>
+                      )}
+                    />
+                  }
+                >
+                  <div
+                    style={statBoxHover('recent')}
+                    onMouseEnter={() => setHoveredStatBox('recent')}
+                    onMouseLeave={() => setHoveredStatBox(null)}
+                    onClick={() => openDetail(mostRecentDoc)}
+                  >
+                    <Text type="secondary" style={{ fontSize: 12.5 }}>최근 업로드</Text>
+                    <Text style={{ fontSize: 13, color: '#1677ff', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block' }}>
+                      {mostRecentDoc.filename}
+                    </Text>
+                  </div>
+                </Popover>
+              )}
+            </Space>
+
             <Space>
               <Tooltip title="30초마다 자동으로 데이터를 갱신합니다">
                 <Button icon={<SyncOutlined spin={autoRefresh} />} type={autoRefresh ? 'primary' : 'default'} onClick={() => setAutoRefresh(v => !v)}>
@@ -635,7 +826,7 @@ export default function AdminPage({ onNavigate }) {
                 columns={docColumns} dataSource={filteredDocuments} rowKey="id" loading={loadingDocs}
                 pagination={{ pageSize: 10 }}
                 rowSelection={{ selectedRowKeys, onChange: setSelectedRowKeys }}
-                scroll={{ x: 'max-content' }}
+                scroll={isNarrow ? { x: 'max-content' } : undefined}
               />
             </>
           )}
@@ -649,7 +840,7 @@ export default function AdminPage({ onNavigate }) {
                 message="OCR 인식 신뢰도가 낮은 페이지만 모아둔 목록입니다"
                 description="스캔 PDF 등 이미지 기반 문서를 OCR로 읽었을 때 인식 결과를 못 믿을 만큼 신뢰도가 낮은 페이지는 검색 결과 품질을 해치지 않도록 검색 인덱싱에서 자동 제외됩니다. 여기서 '수정' 버튼으로 해당 페이지 텍스트를 직접 확인·수정하면, 그 페이지가 다시 검색 대상에 포함됩니다."
               />
-              <Table columns={flaggedColumns} dataSource={flagged} rowKey="id" loading={loadingFlagged} pagination={{ pageSize: 10 }} scroll={{ x: 'max-content' }} />
+              <Table columns={flaggedColumns} dataSource={flagged} rowKey="id" loading={loadingFlagged} pagination={{ pageSize: 10 }} />
             </>
           )}
 
@@ -662,7 +853,7 @@ export default function AdminPage({ onNavigate }) {
                   </Popconfirm>
                 </div>
               )}
-              <Table columns={historyColumns} dataSource={history} rowKey="id" loading={loadingHistory} pagination={{ pageSize: 20 }} scroll={{ x: 'max-content' }} />
+              <Table columns={historyColumns} dataSource={history} rowKey="id" loading={loadingHistory} pagination={{ pageSize: 20 }} />
             </>
           )}
 
@@ -873,12 +1064,21 @@ export default function AdminPage({ onNavigate }) {
                     const dirty = draft !== (u.department ?? '')
                     return (
                       <List.Item>
-                        <Space style={{ width: '100%', justifyContent: 'space-between' }} wrap>
-                          <Space direction="vertical" size={0}>
-                            <Text strong>{u.name || u.email}</Text>
-                            {u.name && <Text type="secondary" style={{ fontSize: 11.5 }}>{u.email}</Text>}
-                          </Space>
-                          <Space.Compact>
+                        {/* 이름 칸은 flex:1(+minWidth:0)로 남는 공간만 먹고 잘리게 하고, 부서 입력·저장·
+                            내보내기는 고정폭으로 둔다 — 이름 길이에 따라 뒤쪽 요소들 위치가 흔들리지
+                            않고 항상 같은 자리에 정렬되게 하기 위함(2026-07-22) */}
+                        <div style={{ display: 'flex', alignItems: 'center', width: '100%', gap: 12 }}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <Text strong style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {u.name || u.email}
+                            </Text>
+                            {u.name && (
+                              <Text type="secondary" style={{ fontSize: 11.5, display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {u.email}
+                              </Text>
+                            )}
+                          </div>
+                          <Space.Compact style={{ flexShrink: 0 }}>
                             <AutoComplete
                               size="small"
                               style={{ width: 180 }}
@@ -906,11 +1106,12 @@ export default function AdminPage({ onNavigate }) {
                               size="small" danger
                               icon={<DeleteOutlined />}
                               loading={removeUserMutation.isPending && removeUserMutation.variables === u.email}
+                              style={{ flexShrink: 0 }}
                             >
                               내보내기
                             </Button>
                           </Popconfirm>
-                        </Space>
+                        </div>
                       </List.Item>
                     )
                   }}
@@ -990,38 +1191,6 @@ export default function AdminPage({ onNavigate }) {
           )}
         </Col>
 
-        {/* ── 우측 요약 통계 패널 — 창이 좁아지면 콘텐츠 밑으로 쌓임 ────── */}
-        <Col
-          flex={isNarrow ? '0 0 100%' : '240px'}
-          style={isNarrow
-            ? { marginTop: 20 }
-            : { position: 'sticky', top: 80, alignSelf: 'flex-start', marginTop: 80, maxHeight: 'calc(100vh - 96px)', overflowY: 'auto' }}
-        >
-          <ACard size="small" style={{ marginBottom: 16 }}>
-            <Statistic title="전체 문서 수" value={stats?.total_documents ?? 0} valueStyle={{ color: '#1677ff', fontWeight: 700 }} />
-          </ACard>
-          <ACard size="small" style={{ marginBottom: 16 }}>
-            <Statistic
-              title="실패 문서" value={stats?.failed_count ?? 0}
-              suffix={<span style={{ fontSize: 13, color: '#8c8c8c' }}>({failedPct}%)</span>}
-              valueStyle={{ color: (stats?.failed_count ?? 0) > 0 ? '#cf1322' : '#389e0d', fontWeight: 700 }}
-            />
-          </ACard>
-          <ACard size="small" style={{ marginBottom: 16 }}>
-            <Statistic title="OCR 검토 대기" value={stats?.flagged_count ?? 0} valueStyle={{ color: (stats?.flagged_count ?? 0) > 0 ? '#d46b08' : '#389e0d', fontWeight: 700 }} />
-          </ACard>
-          <ACard size="small" title="최근 업로드 문서" style={{ marginBottom: 16 }}>
-            {mostRecentDoc ? (
-              <div
-                onClick={() => openDetail(mostRecentDoc)}
-                style={{ cursor: 'pointer' }}
-              >
-                <Text style={{ fontSize: 12.5 }}>{formatDate(mostRecentDoc.uploaded_at)}</Text>
-                <div style={{ fontSize: 12.5, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#1677ff' }}>{mostRecentDoc.filename}</div>
-              </div>
-            ) : <Text type="secondary" style={{ fontSize: 12.5 }}>기록 없음</Text>}
-          </ACard>
-        </Col>
       </Row>
 
       {/* ── OCR 수동 수정 모달 ──────────────────────────────────────── */}
