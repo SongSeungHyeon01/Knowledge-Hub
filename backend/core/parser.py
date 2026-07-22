@@ -55,6 +55,29 @@ CAMELOT_SKIP_TEXT_LEN = int(os.environ.get("CAMELOT_SKIP_TEXT_LEN", "100"))
 CAMELOT_MAX_PAGES   = int(os.environ.get("CAMELOT_MAX_PAGES", "50"))
 CAMELOT_TIMEOUT_SEC = float(os.environ.get("CAMELOT_TIMEOUT_SEC", "120"))
 
+# ── STEP 3: 문서 단위 페이지 수 가드레일 (2026-07-22, 대용량 문서 처리방어) ──────
+# camelot 게이트(STEP 1)로 텍스트 PDF의 camelot 비용은 없앴지만, 스캔 위주 PDF의
+# OCR(extract_ocr_pages)이나 수만 청크의 임베딩(main.py _ingest_chunks_to_db)은
+# 여전히 페이지·청크 수에 비례해 무제한으로 늘어난다(단계별 타임아웃/부분 성공은
+# 정합성·GIL 경쟁 위험 때문에 채택하지 않기로 함 — STEP 3-A/3-B 검토 결과). 대신
+# "애초에 지나치게 큰 문서를 비싼 파이프라인에 들이지 않는" 입구 가드레일을 둔다.
+#
+# SOFT_PAGE_LIMIT 초과: 처리는 그대로 진행하되 로그만 남긴다(조용한 실패 금지 —
+#   운영자가 대용량 문서 유입을 알아챌 수 있게). 사용자 처리 결과에는 영향 없음.
+# HARD_PAGE_LIMIT 초과: 처리를 아예 시작하지 않고 즉시 실패 처리한다. 이 문서는
+#   partial하게라도 색인하지 않는다 — 부분 성공은 PK↔turbovec 벡터 ID 정합성
+#   위험 때문에 이 프로젝트에서 채택하지 않는다(STEP 2-A/3-B 결론).
+SOFT_PAGE_LIMIT = int(os.environ.get("SOFT_PAGE_LIMIT", "500"))
+HARD_PAGE_LIMIT = int(os.environ.get("HARD_PAGE_LIMIT", "3000"))
+
+
+def count_pdf_pages(path_or_fp) -> int:
+    """PDF의 페이지 수만 센다 (텍스트 추출 없음 — classify_pdf보다 훨씬 가벼운 사전 체크).
+    path_or_fp: 파일 경로(str) 또는 파일류 객체(BytesIO 등) — pdfplumber.open()이 둘 다 받는다.
+    main.py 업로드 핸들러(디스크 저장 전 메모리 바이트)와 parse_pdf(디스크 경로) 양쪽에서 재사용한다."""
+    with pdfplumber.open(path_or_fp) as pdf:
+        return len(pdf.pages)
+
 
 class _CamelotBudget:
     """문서 하나(parse_pdf 1회 호출) 동안의 camelot 실행 횟수·누적 시간을 추적한다.
@@ -490,6 +513,23 @@ def parse_pdf(filepath: str, source_file: str = None) -> dict:
     """
     if source_file is None:
         source_file = filepath
+
+    # ── STEP 3: 페이지 수 가드레일 — classify_pdf의 전체 페이지 루프보다 먼저 확인 ──
+    # (재시도 경로 등 main.py 업로드 검사를 거치지 않고 이 함수가 직접 호출되는
+    #  경우에도 빠짐없이 걸리도록 하는 안전망 — main.py의 업로드 시점 체크와는 별개)
+    try:
+        page_count = count_pdf_pages(filepath)
+    except Exception as e:
+        return _failed_result(source_file, str(e))
+
+    if page_count > HARD_PAGE_LIMIT:
+        print(f"[parser] {source_file}: 페이지 수 {page_count}쪽 — 상한({HARD_PAGE_LIMIT}쪽) 초과로 처리 거부")
+        return _failed_result(
+            source_file,
+            f"페이지 수 초과 ({page_count}쪽). 최대 {HARD_PAGE_LIMIT}쪽까지 지원합니다 — 문서를 분할해 나눠 업로드해 주세요.",
+        )
+    elif page_count > SOFT_PAGE_LIMIT:
+        print(f"[parser] {source_file}: 페이지 수 {page_count}쪽 — 권장 상한({SOFT_PAGE_LIMIT}쪽) 초과, 처리는 계속 진행")
 
     classified = classify_pdf(filepath)
     if classified["status"] == "failed":

@@ -2,6 +2,7 @@
 # 이 파일을 실행하면 백엔드 서버가 켜집니다
 
 import asyncio
+import io
 import os
 import json
 import hashlib
@@ -24,7 +25,7 @@ from database import engine, get_db, Base, AsyncSessionLocal
 from models import Document, SearchLog, Chunk, Bookmark, DocumentPermission, User, Comment, AdminEmail, RevokedSession, Notification
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
-from core.parser import parse_pdf                   # 백엔드 배포 정본 파서 — 최신 parser 브랜치(parser/parser.py) 기준, import only
+from core.parser import parse_pdf, count_pdf_pages, HARD_PAGE_LIMIT   # 백엔드 배포 정본 파서 — 최신 parser 브랜치(parser/parser.py) 기준, import only
 from core.office_adapter import parse_non_pdf       # 비-PDF 입구: ② hwp_postprocess 정본 + TXT/MD 리더
 
 # .env 파일(backend/.env, git 추적 안 됨)이 있으면 여기서 로드 — GOOGLE_CLIENT_ID·SESSION_SECRET·
@@ -60,6 +61,15 @@ SUPPORTED_EXTENSIONS = {
 
 # 파일 크기 상한 (500MB — OOM 방지 1MB 스트리밍)
 MAX_UPLOAD_SIZE = 500 * 1024 * 1024
+
+# ── STEP 3: 비-PDF 형식 크기 상한 (2026-07-22, 대용량 문서 처리방어) ──────────────
+# DOCX/HWP는 페이지 루프 자체가 없고(문서 전체를 한 번에 처리), XLSX/HWPX는
+# 시트·섹션 수를 페이지처럼 세도 실제 처리 비용과 상관관계가 약해(예: 시트 1개에
+# 수백만 행) 페이지 수 가드레일(SOFT/HARD_PAGE_LIMIT, core/parser.py)을 의미 있게
+# 적용할 수 없다(STEP 3-B 조사 결론). 이 형식들은 파일 크기만으로 방어한다 — PDF
+# 전용 전역 상한(MAX_UPLOAD_SIZE)보다 더 타이트한 값을 별도로 둔다.
+NON_PDF_MAX_SIZE_MB = int(os.environ.get("NON_PDF_MAX_SIZE_MB", "100"))
+NON_PDF_MAX_SIZE = NON_PDF_MAX_SIZE_MB * 1024 * 1024
 
 
 # ── turbovec 인덱스 (전역, 지연 초기화) ──────────────────────────────────────
@@ -1195,7 +1205,10 @@ async def 파일_업로드(
         return {"source_file": file.filename, "status": "failed",
                 "error": f"지원하지 않는 형식입니다 ({ext}). 지원 형식: {supported}", "pages": []}
 
-    # ── 검사 3: 파일 크기 제한 — 1MB 스트리밍 (OOM 방지, 최대 500MB) ──────
+    # ── 검사 3: 파일 크기 제한 — 1MB 스트리밍 (OOM 방지) ─────────────────
+    # PDF는 전역 상한(MAX_UPLOAD_SIZE)을 그대로 쓰고, 비-PDF는 페이지 수 가드레일이
+    # 의미가 없어(위 NON_PDF_MAX_SIZE_MB 주석 참고) 더 타이트한 상한을 적용한다.
+    effective_max_size = MAX_UPLOAD_SIZE if ext == '.pdf' else min(MAX_UPLOAD_SIZE, NON_PDF_MAX_SIZE)
     hasher = hashlib.sha256()
     chunks_data = []
     total = 0
@@ -1204,14 +1217,35 @@ async def 파일_업로드(
         if not chunk_bytes:
             break
         total += len(chunk_bytes)
-        if total > MAX_UPLOAD_SIZE:
+        if total > effective_max_size:
             mb = round(total / (1024 * 1024), 1)
+            limit_mb = effective_max_size // (1024 * 1024)
+            print(f"[upload] {file.filename}: 크기 {mb}MB — 상한({limit_mb}MB, {ext}) 초과로 업로드 거부")
             return {"source_file": file.filename, "status": "failed",
-                    "error": f"파일 크기 초과 ({mb}MB). 최대 {MAX_UPLOAD_SIZE // (1024*1024)}MB까지 지원합니다", "pages": []}
+                    "error": f"파일 크기 초과 ({mb}MB). 최대 {limit_mb}MB까지 지원합니다", "pages": []}
         hasher.update(chunk_bytes)
         chunks_data.append(chunk_bytes)
     sha256_hex = hasher.hexdigest()
     contents = b"".join(chunks_data)
+
+    # ── 검사 4: PDF 페이지 수 상한 (STEP 3, 2026-07-22) ──────────────────
+    # 디스크 저장·Document 행 생성 전, 메모리에 있는 바이트로 바로 카운트한다
+    # (classify_pdf의 전체 페이지 텍스트 추출 루프보다 훨씬 가볍고, "parsing" 상태를
+    #  거치지도 않은 채 업로드 응답 자체에서 즉시 거부된다). /admin/documents/{id}/retry
+    # 처럼 이 업로드 핸들러를 거치지 않는 경로를 위한 안전망은 core/parser.py의
+    # parse_pdf() 진입부에 별도로 있다(재시도 시에도 반드시 거른다).
+    if ext == '.pdf':
+        try:
+            page_count = await asyncio.to_thread(count_pdf_pages, io.BytesIO(contents))
+        except Exception as e:
+            print(f"[upload] {file.filename}: PDF 페이지 수 확인 실패 — {e}")
+            return {"source_file": file.filename, "status": "failed",
+                    "error": "PDF를 열 수 없습니다 (파일이 손상되었거나 형식이 올바르지 않습니다)", "pages": []}
+        if page_count > HARD_PAGE_LIMIT:
+            print(f"[upload] {file.filename}: 페이지 수 {page_count}쪽 — 상한({HARD_PAGE_LIMIT}쪽) 초과로 업로드 거부")
+            return {"source_file": file.filename, "status": "failed",
+                    "error": f"페이지 수 초과 ({page_count}쪽). 최대 {HARD_PAGE_LIMIT}쪽까지 지원합니다 — 문서를 분할해 나눠 업로드해 주세요.",
+                    "pages": []}
 
     # ── SHA-256 중복 체크 — 이미 같은 내용의 파일이 있으면 409 ──────────
     dup = (await db.execute(select(Document).where(Document.sha256 == sha256_hex))).scalar_one_or_none()
