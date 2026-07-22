@@ -1185,6 +1185,7 @@ async def 파일_업로드(
     category: str | None = Form(None),
     original_path: str = Form(None),   # 폴더 업로드 시 상대 경로 (없으면 None)
     memo: str = Form(None),            # 업로드 시점에 바로 남기는 특이사항 — 검색 결과에 그대로 노출됨
+    overwrite: bool = Form(False),     # 덮어쓰기 확인창에서 "덮어쓰기" 선택 시 true (STEP 4)
     db: AsyncSession = Depends(get_db),
 ):
     # 카테고리는 고정 5종(spec/research/presentation/report/other) 외에도 클라이언트가
@@ -1246,6 +1247,35 @@ async def 파일_업로드(
             return {"source_file": file.filename, "status": "failed",
                     "error": f"페이지 수 초과 ({page_count}쪽). 최대 {HARD_PAGE_LIMIT}쪽까지 지원합니다 — 문서를 분할해 나눠 업로드해 주세요.",
                     "pages": []}
+
+    # ── 덮어쓰기 (STEP 4, 2026-07-22) — SHA-256 중복 체크보다 반드시 먼저 처리한다 ──
+    # /upload/check(파일명 기준)에서 "이미 있는 파일" 확인창을 띄운 뒤 사용자가
+    # "덮어쓰기"를 선택하면 프론트가 overwrite=true로 다시 보낸다. 순서가 중요하다:
+    # 아래 SHA-256 체크보다 늦게 하면, 내용이 동일한 일반적인 재업로드 시 "아직 안 지운
+    # 예전 문서 자신"과 충돌해 409가 먼저 떨어져 덮어쓰기가 사실상 항상 실패한다
+    # (STEP 4-A에서 실제로 확인된 원인 — 재발 방지를 위해 순서를 여기 고정한다).
+    #
+    # 삭제 대상은 SHA-256이 아니라 "파일명"으로 찾는다 — /upload/check가 애초에
+    # 사용자에게 경고한 기준과 동일해야, 내용을 수정해 같은 파일명으로 재업로드하는
+    # 경우(SHA-256은 달라짐)에도 덮어쓰기가 의도대로 예전 버전을 지운다.
+    #
+    # 삭제는 기존 문서 삭제 3곳(관리자 단건/일괄, 본인 문서 삭제)이 쓰는 공용 헬퍼
+    # _문서_완전삭제()를 그대로 재사용한다 — Chunk DB 행 삭제 + 그 PK로 turbovec
+    # idx.remove()까지 이미 검증된 방식으로 처리되어 유령 벡터가 남지 않는다.
+    #
+    # 여기서 바로 commit하지 않는다 — 이 함수 끝의 새 Document 행 commit과 하나의
+    # 트랜잭션으로 묶어, 이후 단계(파일 저장 등)가 실패해도 롤백으로 예전 문서가
+    # 그대로 복원되게 한다(삭제만 되고 새 문서는 못 만들어지는 데이터 유실 창구 방지).
+    if overwrite:
+        old_doc = (await db.execute(
+            select(Document).where(Document.filename == file.filename)
+        )).scalar_one_or_none()
+        if old_doc is not None:
+            print(f"[upload] {file.filename}: 덮어쓰기 — 기존 문서(id={old_doc.id}) 삭제 후 재업로드 진행")
+            await _문서_완전삭제(old_doc, db)
+        else:
+            print(f"[upload] {file.filename}: overwrite=true인데 동일 파일명 문서가 없음"
+                  f"(이미 삭제됐거나 경쟁 상황) — 신규 업로드로 진행")
 
     # ── SHA-256 중복 체크 — 이미 같은 내용의 파일이 있으면 409 ──────────
     dup = (await db.execute(select(Document).where(Document.sha256 == sha256_hex))).scalar_one_or_none()
