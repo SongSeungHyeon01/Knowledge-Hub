@@ -16,6 +16,7 @@ import {
   StarOutlined,
   IdcardOutlined,
   BellOutlined,
+  CloseOutlined,
 } from '@ant-design/icons'
 import { useState, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -85,6 +86,11 @@ export default function App() {
   }
   const markAllNotificationsRead = async () => {
     await axios.post(`${API}/notifications/read-all`)
+    queryClient.invalidateQueries({ queryKey: ['notif-unread'] })
+    queryClient.invalidateQueries({ queryKey: ['notifications'] })
+  }
+  const deleteNotification = async (id) => {
+    await axios.delete(`${API}/notifications/${id}`)
     queryClient.invalidateQueries({ queryKey: ['notif-unread'] })
     queryClient.invalidateQueries({ queryKey: ['notifications'] })
   }
@@ -237,9 +243,28 @@ export default function App() {
                           style={{ cursor: 'pointer', background: n.is_read ? 'transparent' : '#f0f5ff', padding: '8px 6px', borderRadius: 6 }}
                           onClick={() => openNotification(n)}
                         >
-                          <div style={{ width: '100%' }}>
-                            <div style={{ fontSize: 12.5 }}>{n.message}</div>
-                            <div style={{ fontSize: 11, color: '#8c8c8c', marginTop: 2 }}>{n.created_at}</div>
+                          <div style={{ display: 'flex', alignItems: 'flex-start', width: '100%', gap: 4 }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontSize: 12.5, marginBottom: 3 }}>
+                                <Typography.Text strong>{n.commenter_name}</Typography.Text>님이{' '}
+                                <Tag color="blue" style={{ margin: '0 2px' }}>{n.doc_label}</Tag>
+                                에 댓글
+                              </div>
+                              {/* 목록에선 한 줄로 잘라 보여주고, 잘린 전체 내용은 마우스를 올리면 툴팁으로 바로 확인 */}
+                              <Tooltip title={n.comment_content ?? n.message} placement="bottomLeft">
+                                <div style={{ fontSize: 12, color: '#595959', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                  {n.comment_content ?? n.message}
+                                </div>
+                              </Tooltip>
+                              <div style={{ fontSize: 11, color: '#8c8c8c', marginTop: 2 }}>{(n.created_at || '').slice(0, 16)}</div>
+                            </div>
+                            <Tooltip title="알림 삭제">
+                              <Button
+                                type="text" size="small" icon={<CloseOutlined style={{ fontSize: 11 }} />}
+                                style={{ flexShrink: 0 }}
+                                onClick={(e) => { e.stopPropagation(); deleteNotification(n.id) }}
+                              />
+                            </Tooltip>
                           </div>
                         </List.Item>
                       )}

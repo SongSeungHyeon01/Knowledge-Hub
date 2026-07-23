@@ -603,24 +603,32 @@ async def 댓글_삭제(doc_id: int, comment_id: int, request: Request, db: Asyn
 
 
 # ── 알림 (내 문서에 달린 댓글 등) ────────────────────────────────────────────
+# 프론트가 "누가·어디에·뭐라고"를 각각 따로 표시할 수 있도록, 미리 조합해둔 message
+# 문자열 대신 댓글 원본(Comment)까지 조인해 필드를 나눠서 돌려준다. 알림이 만들어진
+# 뒤 댓글이 삭제됐을 수도 있어 outer join(isouter) — 그 경우 comment_content는 None.
 @app.get("/notifications")
 async def 알림_목록(request: Request, db: AsyncSession = Depends(get_db)):
     email = _current_user_email(request)
     rows = (await db.execute(
-        select(Notification, Document.title, Document.filename)
+        select(Notification, Document.title, Document.filename, Comment.content, Comment.user_email)
         .join(Document, Document.id == Notification.doc_id)
+        .outerjoin(Comment, Comment.id == Notification.comment_id)
         .where(Notification.recipient == email)
         .order_by(Notification.created_at.desc())
         .limit(50)
     )).all()
+    names = await _resolve_names(db, [row.user_email for row in rows])
     return [
         {
             "id": row.Notification.id,
             "doc_id": row.Notification.doc_id,
-            "message": row.Notification.message,
+            "doc_label": row.title or row.filename,
             "is_read": row.Notification.is_read,
             "created_at": str(row.Notification.created_at),
-            "doc_label": row.title or row.filename,
+            "commenter_email": row.user_email,
+            "commenter_name": names.get(row.user_email, row.user_email),
+            "comment_content": row.content,
+            "message": row.Notification.message,  # 옛 알림 등 댓글이 삭제된 경우의 대체 표시용
         }
         for row in rows
     ]
@@ -659,6 +667,19 @@ async def 알림_전체_읽음_처리(request: Request, db: AsyncSession = Depen
     )
     await db.commit()
     return {"message": "모두 읽음 처리됐습니다"}
+
+
+@app.delete("/notifications/{notification_id}")
+async def 알림_삭제(notification_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    email = _current_user_email(request)
+    notif = (await db.execute(
+        select(Notification).where(Notification.id == notification_id, Notification.recipient == email)
+    )).scalar_one_or_none()
+    if notif is None:
+        raise HTTPException(status_code=404, detail="알림을 찾을 수 없습니다")
+    await db.delete(notif)
+    await db.commit()
+    return {"id": notification_id, "deleted": True}
 
 
 # ── 문서별 읽기 권한 (관리자 전용 — /admin 접두사라 미들웨어가 이미 관리자만 통과시킴) ──────
