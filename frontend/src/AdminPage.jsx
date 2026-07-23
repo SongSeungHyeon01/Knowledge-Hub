@@ -17,7 +17,7 @@ import {
   DeleteOutlined, WarningOutlined, FileTextOutlined,
   SearchOutlined, ReloadOutlined, SyncOutlined, EditOutlined,
   DownloadOutlined, FolderOutlined, UnorderedListOutlined, AppstoreOutlined,
-  EyeOutlined, UserOutlined, TeamOutlined,
+  EyeOutlined, UserOutlined, TeamOutlined, CloseCircleOutlined,
 } from '@ant-design/icons'
 import axios from 'axios'
 import useIsNarrow from './useIsNarrow'
@@ -28,7 +28,6 @@ const API = import.meta.env.VITE_API_URL
 
 // ── API 호출 함수들 ───────────────────────────────────────────────────────────
 const fetchDocuments = () => axios.get(`${API}/admin/documents`).then(r => r.data)
-const fetchFlagged   = () => axios.get(`${API}/admin/flagged`).then(r => r.data)
 const fetchStats     = () => axios.get(`${API}/admin/stats`).then(r => r.data)
 const fetchTrend     = (period = 7) => axios.get(`${API}/admin/stats/trend`, { params: { period } }).then(r => r.data)
 const deleteDocument = (id) => axios.delete(`${API}/admin/documents/${id}`)
@@ -163,7 +162,6 @@ export default function AdminPage({ onNavigate }) {
       })
       message.success(`${pageNum}페이지 저장 완료`)
       setOcrDoc(prev => ({ ...prev, pages: prev.pages.filter(p => p.page_num !== pageNum) }))
-      queryClient.invalidateQueries({ queryKey: ['flagged'] })
       queryClient.invalidateQueries({ queryKey: ['documents'] })
       queryClient.invalidateQueries({ queryKey: ['stats'] })
     } catch {
@@ -247,7 +245,6 @@ export default function AdminPage({ onNavigate }) {
   }
 
   const { data: documents = [], isLoading: loadingDocs } = useQuery({ queryKey: ['documents'], queryFn: fetchDocuments })
-  const { data: flagged   = [], isLoading: loadingFlagged } = useQuery({ queryKey: ['flagged'],   queryFn: fetchFlagged })
   const { data: stats } = useQuery({ queryKey: ['stats'], queryFn: fetchStats })
 
   // 관리자 계정 관리 — .env 고정 관리자(env_admins, 삭제 불가) + 웹 화면에서 추가한 관리자(extra_admins)
@@ -353,7 +350,6 @@ export default function AdminPage({ onNavigate }) {
     mutationFn: (ids) => axios.delete(`${API}/admin/documents/bulk`, { data: ids }),
     onSuccess: (_, ids) => {
       queryClient.invalidateQueries({ queryKey: ['documents'] })
-      queryClient.invalidateQueries({ queryKey: ['flagged'] })
       queryClient.invalidateQueries({ queryKey: ['stats'] })
       setSelectedRowKeys([])
       message.success(`${ids.length}개 문서가 삭제됐습니다`)
@@ -376,7 +372,6 @@ export default function AdminPage({ onNavigate }) {
     mutationFn: (id) => axios.post(`${API}/admin/documents/${id}/retry`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['documents'] })
-      queryClient.invalidateQueries({ queryKey: ['flagged'] })
       queryClient.invalidateQueries({ queryKey: ['stats'] })
       message.success('재시도가 완료됐습니다')
     },
@@ -387,7 +382,6 @@ export default function AdminPage({ onNavigate }) {
     mutationFn: deleteDocument,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['documents'] })
-      queryClient.invalidateQueries({ queryKey: ['flagged'] })
       message.success('문서가 삭제됐습니다')
     },
     onError: () => message.error('삭제 중 오류가 발생했습니다'),
@@ -430,7 +424,10 @@ export default function AdminPage({ onNavigate }) {
     },
     {
       title: '상태', dataIndex: 'status', width: 68, onHeaderCell: nowrapHeader,
-      render: (status) => <Tag color={status === 'success' ? 'green' : 'red'}>{status === 'success' ? '성공' : '실패'}</Tag>,
+      render: (status, record) => {
+        const tag = <Tag color={status === 'success' ? 'green' : 'red'}>{status === 'success' ? '성공' : '실패'}</Tag>
+        return status === 'failed' && record.error ? <Tooltip title={record.error}>{tag}</Tooltip> : tag
+      },
     },
     { title: '페이지', dataIndex: 'page_count', width: 60, align: 'center', onHeaderCell: nowrapHeader, sorter: (a, b) => a.page_count - b.page_count },
     {
@@ -446,7 +443,9 @@ export default function AdminPage({ onNavigate }) {
     },
     {
       title: 'OCR', dataIndex: 'has_flagged', width: 60, align: 'center', onHeaderCell: nowrapHeader,
-      render: (f) => f ? <Tooltip title="검토 필요"><Tag color="orange" icon={<WarningOutlined />} /></Tooltip> : <Tag color="default">정상</Tag>,
+      render: (f, record) => f
+        ? <Tooltip title="검토 필요 — 클릭해서 저신뢰 페이지 수정"><Tag color="orange" icon={<WarningOutlined />} style={{ cursor: 'pointer' }} onClick={() => openOcrEdit(record)}>검토</Tag></Tooltip>
+        : <Tag color="default">정상</Tag>,
     },
     {
       title: '업로드', dataIndex: 'uploaded_at', width: 100, defaultSortOrder: 'descend',
@@ -478,25 +477,11 @@ export default function AdminPage({ onNavigate }) {
     },
   ]
 
-  // OCR 검토 탭: 스캔 문서 등 이미지 기반 페이지를 OCR로 읽었을 때 신뢰도가 낮으면(has_flagged)
-  // 오인식 텍스트가 검색 품질을 해치지 않도록 검색 인덱싱에서 자동 제외된다(main.py _build_chunks 참고).
-  // 이 탭은 그렇게 제외된 페이지들을 모아 보여줘서, 관리자가 직접 읽고 텍스트를 고치면
-  // (PATCH /admin/documents/{id}/pages/{page_num}) flagged가 풀리고 다시 검색 대상에 포함된다.
-  const flaggedColumns = [
-    { title: 'ID', dataIndex: 'id', width: 60 },
-    { title: '파일명', dataIndex: 'filename', render: (n) => <span><WarningOutlined style={{ color: 'orange', marginRight: 6 }} />{n}</span> },
-    { title: '페이지 수', dataIndex: 'page_count', width: 100, align: 'center' },
-    { title: '업로드 시각', dataIndex: 'uploaded_at', render: (d) => <Tooltip title={d}><span>{formatDate(d)}</span></Tooltip> },
-    { title: 'OCR 수정', width: 90, align: 'center', render: (_, r) => <Button icon={<EditOutlined />} size="small" type="primary" ghost onClick={() => openOcrEdit(r)}>수정</Button> },
-    {
-      title: '삭제', width: 80, align: 'center',
-      render: (_, r) => (
-        <Popconfirm title="정말 삭제할까요?" okText="삭제" cancelText="취소" onConfirm={() => deleteMutation.mutate(r.id)}>
-          <Button danger icon={<DeleteOutlined />} size="small" />
-        </Popconfirm>
-      ),
-    },
-  ]
+  // 실패 문서 탭: 파싱 자체가 실패(status === 'failed')한 문서만 모아 보여준다. 같은
+  // docColumns를 재사용해 문서 목록 탭과 동일한 조작(재시도·상세보기·삭제)을 그대로 쓴다.
+  // OCR 저신뢰 페이지 검토(has_flagged)는 별개 개념 — 문서 목록 탭의 "OCR" 열에서 태그를
+  // 클릭하면 그 문서의 저신뢰 페이지를 바로 수정할 수 있다(openOcrEdit).
+  const failedDocuments = documents.filter(doc => doc.status === 'failed')
 
   const filteredDocuments = documents.filter(doc => {
     if (filterText     && !doc.filename.toLowerCase().includes(filterText.toLowerCase())) return false
@@ -508,14 +493,14 @@ export default function AdminPage({ onNavigate }) {
 
   const leftMenuItems = [
     { key: 'docs',           icon: <UnorderedListOutlined />, label: '문서 목록' },
-    { key: 'ocr',            icon: <WarningOutlined />,       label: `실패 문서 (${flagged.length})` },
+    { key: 'failed',         icon: <CloseCircleOutlined />,   label: `실패 문서 (${failedDocuments.length})` },
     { key: 'category',       icon: <FolderOutlined />,        label: '카테고리' },
     { key: 'departments',    icon: <TeamOutlined />,          label: '부서 관리' },
     { key: 'admins',         icon: <UserOutlined />,          label: '관리자 계정' },
   ]
 
   const NAV_TITLE = {
-    docs: '문서 목록', ocr: '실패 문서',
+    docs: '문서 목록', failed: '실패 문서',
     category: '카테고리', departments: '부서 관리', admins: '관리자 계정',
   }
 
@@ -609,16 +594,16 @@ export default function AdminPage({ onNavigate }) {
             </>
           )}
 
-          {navKey === 'ocr' && (
+          {navKey === 'failed' && (
             <>
               <Alert
-                type="info"
+                type="error"
                 showIcon
                 style={{ marginBottom: 16 }}
-                title="OCR 인식 신뢰도가 낮은 페이지만 모아둔 목록입니다"
-                description="스캔 PDF 등 이미지 기반 문서를 OCR로 읽었을 때 인식 결과를 못 믿을 만큼 신뢰도가 낮은 페이지는 검색 결과 품질을 해치지 않도록 검색 인덱싱에서 자동 제외됩니다. 여기서 '수정' 버튼으로 해당 페이지 텍스트를 직접 확인·수정하면, 그 페이지가 다시 검색 대상에 포함됩니다."
+                title="파싱에 실패한 문서만 모아둔 목록입니다"
+                description="상태(빨간 태그)에 마우스를 올리면 실패 사유가 보입니다. '재시도' 버튼으로 다시 파싱을 시도하거나, 필요 없는 문서는 삭제할 수 있습니다."
               />
-              <Table columns={flaggedColumns} dataSource={flagged} rowKey="id" loading={loadingFlagged} pagination={{ pageSize: 10 }} />
+              <Table columns={docColumns} dataSource={failedDocuments} rowKey="id" loading={loadingDocs} pagination={{ pageSize: 10 }} />
             </>
           )}
 

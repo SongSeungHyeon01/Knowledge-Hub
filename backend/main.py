@@ -1660,31 +1660,6 @@ async def 문서_삭제(doc_id: int, db: AsyncSession = Depends(get_db)):
     return {"message": f"'{filename}' 문서가 삭제됐습니다", "id": doc_id}
 
 
-# GET /admin/flagged — OCR 신뢰도가 낮은 문서 목록만 돌려줍니다
-# OCR 신뢰도란? 스캔 PDF를 글자로 변환할 때 얼마나 정확한지 점수(0~1)
-# 0.7 미만이면 "저신뢰" = 사람이 직접 확인해야 할 문서
-@app.get("/admin/flagged")
-async def 저신뢰_문서_목록(db: AsyncSession = Depends(get_db)):
-    # has_flagged 가 True 인 문서만 최신순으로 가져옵니다
-    result = await db.execute(
-        select(Document)
-        .where(Document.has_flagged == True)
-        .order_by(Document.uploaded_at.desc())
-    )
-    docs = result.scalars().all()
-
-    return [
-        {
-            "id":          doc.id,
-            "filename":    doc.filename,
-            "status":      doc.status,
-            "page_count":  doc.page_count,
-            "uploaded_at": str(doc.uploaded_at),
-        }
-        for doc in docs
-    ]
-
-
 # ── DB 백업 관리 (관리자 전용) ────────────────────────────────────────────────
 @app.post("/admin/backup")
 async def 백업_실행():
