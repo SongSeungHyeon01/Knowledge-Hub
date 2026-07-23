@@ -39,6 +39,12 @@ FROM python:3.11-slim
 #                          (실제 배포 오류 원인: `ImportError: libGL.so.1: cannot open
 #                          shared object file` — core/parser.py의 `import camelot`에서 발생)
 #   postgresql-client   → pg_dump 바이너리 (2026-07-23 자동 DB 백업 기능이 사용)
+#   locales             → UTF-8 로케일 생성용. 베이스 이미지엔 로케일이 전혀 없어 기본이
+#                          C/POSIX인데, 이 상태로 LibreOffice headless가 한글 등 비ASCII
+#                          파일명이 있는 문서를 변환하면 soffice는 성공(exit 0)했다고
+#                          보고하면서도 실제로는 예상한 이름의 결과 파일을 안 만드는 경우가
+#                          있다(실제 배포 오류: '이력서 양식 한글 원본.hwp' 업로드 시
+#                          "변환 결과 파일을 찾을 수 없습니다" 실패 — 2026-07-24 확인).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libreoffice-writer \
         libreoffice-impress \
@@ -46,7 +52,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1 \
         libglib2.0-0 \
         postgresql-client \
+        locales \
+    && sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen \
+    && locale-gen \
     && rm -rf /var/lib/apt/lists/*
+
+ENV LANG=en_US.UTF-8 \
+    LC_ALL=en_US.UTF-8
 
 WORKDIR /app
 

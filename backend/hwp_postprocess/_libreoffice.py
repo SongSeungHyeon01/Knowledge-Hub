@@ -65,6 +65,14 @@ def convert(src_path: str, target_fmt: str) -> str:
     stem = Path(src_path).stem
     out_path = Path(out_dir) / f"{stem}.{target_fmt}"
     if not out_path.exists():
+        # 컨테이너에 UTF-8 로케일이 없으면 LibreOffice가 한글 등 비ASCII 파일명을
+        # 내부적으로 다르게 처리해, soffice는 성공(exit 0)했는데도 예상한 이름의
+        # 파일이 없는 경우가 생긴다. 정확한 이름 대신 out_dir 안의 확장자만
+        # 일치하는 파일을 찾아 그걸 결과로 쓴다(진짜 변환 실패와는 구분됨 —
+        # 그 경우 out_dir가 아예 비어 있음).
+        candidates = list(Path(out_dir).glob(f"*.{target_fmt}"))
+        if len(candidates) == 1:
+            return str(candidates[0])
         raise RuntimeError(f"변환 결과 파일을 찾을 수 없습니다: {out_path}")
 
     return str(out_path)
