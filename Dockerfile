@@ -45,6 +45,8 @@ FROM python:3.11-slim
 #                          보고하면서도 실제로는 예상한 이름의 결과 파일을 안 만드는 경우가
 #                          있다(실제 배포 오류: '이력서 양식 한글 원본.hwp' 업로드 시
 #                          "변환 결과 파일을 찾을 수 없습니다" 실패 — 2026-07-24 확인).
+#   curl                → H2Orestart 확장 파일(.oxt) 다운로드용 (바로 아래)
+#   default-jre-headless → unopkg(확장 설치)·일부 LibreOffice 필터가 Java에 의존
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libreoffice-writer \
         libreoffice-impress \
@@ -53,12 +55,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libglib2.0-0 \
         postgresql-client \
         locales \
+        curl \
+        default-jre-headless \
     && sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen \
     && locale-gen \
     && rm -rf /var/lib/apt/lists/*
 
 ENV LANG=en_US.UTF-8 \
     LC_ALL=en_US.UTF-8
+
+# H2Orestart — LibreOffice에는 HWP(한글) 임포트 필터가 기본 내장돼 있지 않다(이 베이스
+# 이미지의 Debian 저장소에도 없음). 이 확장 없이는 유효한 HWP5 파일조차 LibreOffice가
+# "source file could not be loaded"로 거부한다 — 로케일·파일명 문제가 아니라 필터
+# 자체가 없었던 것 (실제 배포 오류: '이력서 양식 한글 원본.hwp' 업로드 실패로 확인,
+# 2026-07-24). HWP5/HWPx 포맷을 지원하며, 옛 HWP 2.0/3.0은 지원하지 않는다.
+RUN curl -fsSL -o /tmp/H2Orestart.oxt \
+        https://github.com/ebandal/H2Orestart/releases/download/v0.7.13/H2Orestart.oxt \
+    && unopkg add --shared --suppress-license /tmp/H2Orestart.oxt \
+    && rm -f /tmp/H2Orestart.oxt
 
 WORKDIR /app
 
