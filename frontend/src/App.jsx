@@ -78,6 +78,7 @@ export default function App() {
       queryClient.invalidateQueries({ queryKey: ['notifications'] })
     }
     localStorage.setItem('km_launch_query', n.doc_label)
+    localStorage.setItem('km_launch_doc_id', String(n.doc_id))
     setCurrent('search')
     setHomeKey(k => k + 1)  // 이미 검색 탭이어도 SearchPage를 새로 마운트해 방금 넣은 검색어를 바로 실행시킨다
     setNotifOpen(false)
@@ -93,6 +94,10 @@ export default function App() {
   }
   const handleLogout = async () => {
     await axios.post(`${API}/auth/logout`)
+    // invalidateQueries만으로는 부족하다 — /auth/me 재요청이 401로 실패해도 react-query는
+    // 기본적으로 직전 성공 데이터(me)를 그대로 들고 있어서 로그아웃 후에도 화면이 안 바뀐다.
+    // 캐시를 직접 비워 me를 즉시 null로 만든다.
+    queryClient.setQueryData(['auth-me'], null)
     queryClient.invalidateQueries({ queryKey: ['auth-me'] })
   }
 

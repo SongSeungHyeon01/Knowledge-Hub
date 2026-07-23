@@ -90,7 +90,7 @@ export default function LoginPage({ googleClientId, onLogin }) {
         display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16, minWidth: 320,
       }}>
         {verifying ? <Spin tip="확인 중..." /> : <div ref={buttonRef} />}
-        {error && <Alert type="error" showIcon message={error} style={{ width: '100%' }} />}
+        {error && <Alert type="error" showIcon title={error} style={{ width: '100%' }} />}
       </div>
     </div>
   )

@@ -398,7 +398,7 @@ export default function SearchPage({ onNavigate }) {
           closable
           onClose={closeTip}
           style={{ marginBottom: 20 }}
-          message="검색 팁"
+          title="검색 팁"
           description={
             <ul style={{ margin: '4px 0 0', paddingLeft: 20, lineHeight: 2 }}>
               <li>파일명이 아닌 <strong>내용</strong>으로 검색합니다. 예) <Typography.Text code>모터 설계 사양</Typography.Text></li>
@@ -688,7 +688,7 @@ export default function SearchPage({ onNavigate }) {
                     ))}
                 </Row>
               ) : (
-              <Space direction="vertical" style={{ width: '100%' }} size={10}>
+              <Space orientation="vertical" style={{ width: '100%' }} size={10}>
                 {sortResults(results.results, sortBy)
                   .slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
                   .map((r) => {
@@ -908,7 +908,7 @@ export default function SearchPage({ onNavigate }) {
               ))}
             </Row>
           ) : (
-            <Space direction="vertical" style={{ width: '100%' }} size={10}>
+            <Space orientation="vertical" style={{ width: '100%' }} size={10}>
               {browseDocs.slice((browsePage - 1) * PAGE_SIZE, browsePage * PAGE_SIZE).map(doc => {
                 const CAT_ACCENT = { spec: '#1677ff', research: '#722ed1', presentation: '#13c2c2', report: '#52c41a' }
                 const accent = CAT_ACCENT[doc.category] ?? '#8c8c8c'
@@ -1058,7 +1058,7 @@ export default function SearchPage({ onNavigate }) {
               ) : comments.length === 0 ? (
                 <Text type="secondary" style={{ fontSize: 12.5 }}>아직 댓글이 없습니다</Text>
               ) : (
-                <Space direction="vertical" style={{ width: '100%' }} size={8}>
+                <Space orientation="vertical" style={{ width: '100%' }} size={8}>
                   {comments.map((c) => (
                     <div key={c.id} style={{ background: '#fafafa', border: '1px solid #f0f0f0', borderRadius: 6, padding: '8px 10px' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>

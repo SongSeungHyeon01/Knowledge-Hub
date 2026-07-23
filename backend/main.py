@@ -9,7 +9,7 @@ import hashlib
 import secrets
 import numpy as np
 from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, Query, Body, BackgroundTasks, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware  # CORS 설정용
 import itsdangerous
 from google.oauth2 import id_token as google_id_token
@@ -1985,14 +1985,6 @@ async def 작성자_목록(db: AsyncSession = Depends(get_db)):
     return uploaders
 
 
-# DELETE /admin/history — 검색 기록 전체 삭제
-@app.delete("/admin/history")
-async def 검색_기록_초기화(db: AsyncSession = Depends(get_db)):
-    await db.execute(SearchLog.__table__.delete())
-    await db.commit()
-    return {"message": "검색 기록이 모두 삭제됐습니다"}
-
-
 # PATCH /admin/documents/{doc_id}/category — 문서 카테고리 변경
 @app.patch("/admin/documents/{doc_id}/category")
 async def 카테고리_변경(
@@ -2091,26 +2083,6 @@ async def 페이지_텍스트_수정(
     background_tasks.add_task(_ingest_chunks_to_db, doc_id, parse_data.get("pages", []))
 
     return {"doc_id": doc_id, "page_num": page_num, "has_flagged": has_flagged}
-
-
-# GET /admin/history — 검색 기록 목록을 돌려줍니다
-@app.get("/admin/history")
-async def 검색_기록(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(SearchLog).order_by(SearchLog.searched_at.desc()).limit(100)
-    )
-    logs = result.scalars().all()
-
-    return [
-        {
-            "id":           log.id,
-            "query":        log.query,
-            "alpha":        log.alpha,
-            "result_count": log.result_count,
-            "searched_at":  str(log.searched_at),
-        }
-        for log in logs
-    ]
 
 
 # GET /admin/stats/trend — 최근 7일 일별 업로드 건수

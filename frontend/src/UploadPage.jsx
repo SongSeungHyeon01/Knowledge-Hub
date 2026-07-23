@@ -421,7 +421,7 @@ export default function UploadPage({ onNavigate }) {
         }
         if (status === 'failed') {
           return (
-            <Space direction="vertical" size={0}>
+            <Space orientation="vertical" size={0}>
               {STATUS_TAG.failed}
               <Text type="danger" style={{ fontSize: 11.5 }}>{f.error}</Text>
             </Space>
@@ -553,13 +553,13 @@ export default function UploadPage({ onNavigate }) {
                 type="warning"
                 showIcon
                 style={{ marginBottom: 16 }}
-                message="안정적인 처리를 위해 한 번에 3~4개씩 나눠서 업로드해 주세요"
+                title="안정적인 처리를 위해 한 번에 3~4개씩 나눠서 업로드해 주세요"
               />
               <Alert
                 type="info"
                 showIcon
                 style={{ marginBottom: 16 }}
-                message="카테고리·특이사항은 업로드가 접수되면 파일마다 바로 물어봅니다"
+                title="카테고리·특이사항은 업로드가 접수되면 파일마다 바로 물어봅니다"
               />
 
               <Modal
