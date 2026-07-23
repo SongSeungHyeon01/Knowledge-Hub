@@ -59,7 +59,7 @@ export default function BookmarksPage({ onNavigate }) {
   }
 
   const filtered = bookmarks.filter(b =>
-    !search || (b.title || b.filename || '').toLowerCase().includes(search.toLowerCase())
+    !search || (b.filename || '').toLowerCase().includes(search.toLowerCase())
   )
 
   return (
@@ -105,8 +105,8 @@ export default function BookmarksPage({ onNavigate }) {
                 size="small"
                 styles={{ body: { padding: 14 } }}
                 title={
-                  <Text strong style={{ fontSize: 13 }} ellipsis={{ tooltip: doc.title || doc.filename }}>
-                    {doc.title || doc.filename}
+                  <Text strong style={{ fontSize: 13 }} ellipsis={{ tooltip: doc.filename }}>
+                    {doc.filename}
                   </Text>
                 }
                 extra={

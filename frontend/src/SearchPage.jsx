@@ -1,13 +1,13 @@
 // SearchPage.jsx — 검색 화면
-// 2026-07-11 목업 반영:
-//  - 관리자 진입은 이제 App.jsx 최상위 탭이 담당 — 이 화면의 톱니바퀴+Drawer는 제거.
-//  - alpha 연속 슬라이더 상시 노출 → "고급 검색" 토글(기본 접힘) 안에 3단 프리셋 버튼
-//    (정확히 일치=키워드 위주/균형/비슷한 내용=의미 위주)으로 대체.
-//    ⚠ 프리셋의 alpha 매핑은 목업 프롬프트킷 예시(0.9/0.5/0.1)가 아니라 실제 백엔드 주석
-//    (main.py: "alpha=0.0 → BM25 전용 / alpha=1.0 → 시맨틱 전용")에 맞춰 반대로 정정함:
-//    정확히 일치=0.1, 균형=0.5, 비슷한 내용=0.9.
-//  - 카테고리·파일형식 필터는 삭제하지 않고 같은 "고급 검색" 안으로 이동(기존 기능 보존).
-//  - alpha·검색 로직·검색 기록·AI 답변 등 기존 기능/엔드포인트 호출은 전부 유지.
+// 2026-07-11 목업 반영: 관리자 진입은 이제 App.jsx 최상위 탭이 담당 — 이 화면의
+// 톱니바퀴+Drawer는 제거. 카테고리·파일형식 필터는 "고급 검색"(기본 접힘) 안에 위치.
+//
+// 2026-07-23: 검색 모드를 2단으로 재정의 — "파일명 검색"(기본값, 파일명 문자열에
+// 검색어가 그대로 있는 문서만)과 "유사 검색"(문서 내용을 MiniLM 임베딩 유사도로 찾음,
+// 모호한 문구도 폭넓게 잡히도록 임계값 없이 다 보여줌). 예전 alpha 슬라이더/3단
+// 프리셋(정확히 일치/균형/비슷한 내용)과 "정확한 검색"+"유사 의미 검색" 동시 표시 방식은
+// 모두 이 2단 모드 토글로 대체됐다 — /search는 이제 선택된 모드 하나에 대한
+// 단일 results 목록만 반환한다.
 
 import { useState, useEffect, useRef } from 'react'
 import {
@@ -20,9 +20,9 @@ import {
   SearchOutlined, FileTextOutlined, HistoryOutlined, CloseOutlined,
   FilePdfOutlined, FileWordOutlined, FilePptOutlined, FileExcelOutlined,
   FileImageOutlined, FileMarkdownOutlined, FileOutlined, DownloadOutlined,
-  AimOutlined, ApartmentOutlined, ShareAltOutlined,
   StarOutlined, StarFilled, EyeOutlined, UserOutlined,
   UnorderedListOutlined, AppstoreOutlined,
+  FileSearchOutlined, BulbOutlined,
 } from '@ant-design/icons'
 import axios from 'axios'
 import useIsNarrow from './useIsNarrow'
@@ -65,6 +65,13 @@ const sortResults = (results, sortBy) => [...results].sort((a, b) => {
   return b.score - a.score
 })
 
+// 검색 모드 2단 — "파일명 검색"(기본값, 파일명 문자열 포함 여부)과 "유사 검색"(문서
+// 내용을 임베딩 유사도로 찾음). 실제 검색 로직 분기는 백엔드(main.py의 mode 파라미터)가 담당.
+const SEARCH_MODES = [
+  { key: 'filename', label: '파일명 검색', icon: <FileSearchOutlined /> },
+  { key: 'semantic', label: '유사 검색',   icon: <BulbOutlined /> },
+]
+
 const CATEGORY_COLOR = {
   spec: 'blue', research: 'purple', presentation: 'cyan', report: 'green',
 }
@@ -94,13 +101,6 @@ const FILE_TYPE_ICON = {
   md:   <FileMarkdownOutlined style={{ color: '#722ed1' }} />,
   txt:  <FileTextOutlined style={{ color: '#8c8c8c' }} />,
 }
-
-// 검색 모드 3단 프리셋 — alpha=0(BM25 전용) ↔ alpha=1(시맨틱 전용), 실제 백엔드 정의 기준
-const SEARCH_MODES = [
-  { key: 'exact',    label: '정확히 일치', icon: <AimOutlined />,      alpha: 0.1 },
-  { key: 'balanced', label: '균형',        icon: <ApartmentOutlined />, alpha: 0.5 },
-  { key: 'similar',  label: '비슷한 내용', icon: <ShareAltOutlined />, alpha: 0.9 },
-]
 
 export default function SearchPage({ onNavigate }) {
   const isNarrow = useIsNarrow()
@@ -137,8 +137,7 @@ export default function SearchPage({ onNavigate }) {
   }
 
   const [query,      setQuery]      = useState('')
-  const [searchMode, setSearchMode] = useState('balanced')
-  const alpha = SEARCH_MODES.find(m => m.key === searchMode).alpha
+  const [searchMode, setSearchMode] = useState('filename')  // 'filename'(기본) | 'semantic'
   const [category,   setCategory]   = useState(null)
   const [fileType,   setFileType]   = useState(null)
   const [author,     setAuthor]     = useState(null)   // 작성자(업로더) 이메일 필터
@@ -255,7 +254,7 @@ export default function SearchPage({ onNavigate }) {
     const fetchBrowse = (showSpinner) => {
       if (showSpinner) setBrowseLoading(true)
       axios.get(`${API}/search`, {
-        params: { q: '', alpha: 0.5, ...(browseCategory ? { category: browseCategory } : {}) },
+        params: { q: '', ...(browseCategory ? { category: browseCategory } : {}) },
       })
         .then(res => { if (!cancelled) setBrowseDocs(res.data.results ?? []) })
         .catch(() => { if (!cancelled) setBrowseDocs([]) })
@@ -282,14 +281,6 @@ export default function SearchPage({ onNavigate }) {
       handleSearch('', pendingCategory)
     }
   }, []) // eslint-disable-line
-
-  // 검색 모드(alpha) 변경 시 자동 재검색 (검색 결과가 있을 때만)
-  useEffect(() => {
-    if (!results?.query) return
-    const q = results.query
-    const timer = setTimeout(() => handleSearch(q), 200)
-    return () => clearTimeout(timer)
-  }, [searchMode]) // eslint-disable-line
 
   // "/" 단축키: 검색 페이지에 있을 때 어디서든 포커스
   useEffect(() => {
@@ -335,7 +326,7 @@ export default function SearchPage({ onNavigate }) {
     try {
       const res = await axios.get(`${API}/search`, {
         params: {
-          q, alpha,
+          q, mode: searchMode,
           ...(categoryOverride ? { category: categoryOverride } : {}),
           ...(fileType  ? { file_type: fileType } : {}),
           ...(author    ? { uploaded_by: author } : {}),
@@ -348,7 +339,7 @@ export default function SearchPage({ onNavigate }) {
 
       // 알림에서 넘어온 경우 — 검색 결과 중 그 문서를 찾아 바로 상세 팝업으로 연다(한 번만).
       if (pendingOpenDocIdRef.current != null) {
-        const target = res.data.results?.find(r => r.doc_id === pendingOpenDocIdRef.current)
+        const target = (res.data.results ?? []).find(r => r.doc_id === pendingOpenDocIdRef.current)
         pendingOpenDocIdRef.current = null
         if (target) openDetail(target)
       }
@@ -365,11 +356,17 @@ export default function SearchPage({ onNavigate }) {
       // 그 최신 상태를 다시 읽어오기만 한다 — 로컬에서 직접 조작하지 않는다.
       if (q.trim()) loadRecent()
     } catch {
-      setResults({ query: q, alpha, total: 0, results: [], error: '서버 연결 오류' })
+      setResults({ query: q, mode: searchMode, total: 0, results: [], error: '서버 연결 오류' })
     } finally {
       setLoading(false)
     }
   }
+
+  // 검색 모드 변경 시 자동 재검색 (이미 검색을 실행한 상태일 때만)
+  useEffect(() => {
+    if (!results?.query) return
+    handleSearch(results.query)
+  }, [searchMode]) // eslint-disable-line
 
   const handleKeyDown = (e) => {
     if (e.key === 'Enter') handleSearch()
@@ -381,6 +378,188 @@ export default function SearchPage({ onNavigate }) {
     handleSearch(q)
   }
 
+  // 카드형 보기 — "정확한 검색"/"유사 의미 검색" 두 섹션이 똑같은 카드 모양을 쓰므로 공용 함수로 뺐다
+  const renderGridCard = (r) => (
+    <Col key={r.doc_id} xs={24} sm={12} md={8}>
+      <Card
+        size="small" hoverable
+        style={{ borderRadius: 8 }}
+        styles={{ body: { padding: 12 } }}
+        onClick={() => openDetail(r)}
+      >
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, marginBottom: 10 }}>
+          <Tooltip title={r.content_preview || '미리보기를 불러올 수 없습니다'} placement="topLeft" mouseEnterDelay={0.3}>
+            <Text strong style={{ fontSize: 13.5, lineHeight: 1.4 }} ellipsis>
+              {r.filename}
+            </Text>
+          </Tooltip>
+          <Space size={4} style={{ flexShrink: 0 }}>
+            {r.file_type && (
+              <Tag color={FILE_TYPE_COLOR[r.file_type] ?? 'default'} style={{ margin: 0 }}>
+                {r.file_type.toUpperCase()}
+              </Tag>
+            )}
+            <Tooltip title="북마크">
+              <Button
+                size="small" type="text"
+                style={{ padding: 0, width: 20, height: 20 }}
+                icon={bookmarkedIds.has(r.doc_id)
+                  ? <StarFilled style={{ color: '#faad14' }} />
+                  : <StarOutlined style={{ color: '#bfbfbf' }} />}
+                onClick={(e) => { e.stopPropagation(); toggleBookmark(r.doc_id) }}
+              />
+            </Tooltip>
+          </Space>
+        </div>
+        <Row justify="space-between" align="middle">
+          <Col>
+            <Space size={4}>
+              <Tag color={r.category ? CATEGORY_COLOR[r.category] : undefined} style={{ marginRight: 0 }}>{r.category ? (CATEGORY_LABEL[r.category] ?? r.category) : '미지정'}</Tag>
+              {r.score > 0 && (
+                <Tooltip title={`관련도 ${Math.round(r.score * 100)}%`}>
+                  <Tag style={{ margin: 0 }}>{Math.round(r.score * 100)}%</Tag>
+                </Tooltip>
+              )}
+              {r.memo && (
+                <Tooltip title="클릭해서 특이사항 확인">
+                  <Tag style={{ margin: 0, background: '#fffbe6', border: '1px solid #ffe58f', color: '#7c6000' }}>특이사항</Tag>
+                </Tooltip>
+              )}
+            </Space>
+          </Col>
+          <Col><Text type="secondary" style={{ fontSize: 11.5 }}>{formatDate(r.uploaded_at)}</Text></Col>
+        </Row>
+      </Card>
+    </Col>
+  )
+
+  // 리스트형 보기
+  const renderListCard = (r) => {
+    const CAT_ACCENT = { spec: '#1677ff', research: '#722ed1', presentation: '#13c2c2', report: '#52c41a' }
+    const accent = CAT_ACCENT[r.category] ?? '#8c8c8c'
+    return (
+      <Card
+        key={r.doc_id}
+        size="small"
+        hoverable
+        onClick={() => openDetail(r)}
+        style={{ borderLeft: `4px solid ${accent}`, borderRadius: 8, boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}
+        styles={{ body: { padding: '12px 16px' } }}
+        title={
+          <Tooltip title={r.content_preview || '미리보기를 불러올 수 없습니다'} placement="topLeft" mouseEnterDelay={0.3}>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, minWidth: 0 }}>
+              <span style={{ fontSize: 18, flexShrink: 0 }}>
+                {FILE_TYPE_ICON[r.file_type] ?? <FileOutlined style={{ color: '#8c8c8c' }} />}
+              </span>
+              <Text strong ellipsis style={{ fontSize: 14 }}>{highlight(r.filename, results?.query)}</Text>
+            </div>
+          </Tooltip>
+        }
+        extra={
+          <Space size={4}>
+            <Tooltip title={'북마크'}>
+              <Button
+                size="small" type="text"
+                icon={bookmarkedIds.has(r.doc_id)
+                  ? <StarFilled style={{ color: '#faad14' }} />
+                  : <StarOutlined />}
+                onClick={(e) => { e.stopPropagation(); toggleBookmark(r.doc_id) }}
+              />
+            </Tooltip>
+            <Button
+              size="small" icon={<DownloadOutlined />} href={`${API}/files/${r.doc_id}`} download
+              type="primary" ghost
+              onClick={(e) => e.stopPropagation()}
+            >
+              다운로드
+            </Button>
+          </Space>
+        }
+      >
+        <Space style={{ marginBottom: 12 }} size={6} wrap>
+          <Tag color={r.category ? CATEGORY_COLOR[r.category] : undefined} style={{ margin: 0 }}>{r.category ? (CATEGORY_LABEL[r.category] ?? r.category) : '미지정'}</Tag>
+          {r.file_type && <Tag color={FILE_TYPE_COLOR[r.file_type] ?? 'default'} style={{ margin: 0 }}>{r.file_type.toUpperCase()}</Tag>}
+          {r.score > 0 && (
+            <Tooltip title={`관련도 ${Math.round(r.score * 100)}%`}>
+              <Tag style={{ margin: 0 }}>{Math.round(r.score * 100)}%</Tag>
+            </Tooltip>
+          )}
+          {r.page_num > 0 && (
+            <Tooltip title={`${r.page_num}페이지에서 발견`}>
+              <Tag style={{ margin: 0, background: '#f5f5f5', border: '1px solid #d9d9d9', color: '#595959', fontSize: 11 }}>
+                p.{r.page_num}
+              </Tag>
+            </Tooltip>
+          )}
+        </Space>
+
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: 4, flexWrap: 'wrap', gap: 8, lineHeight: 1.4 }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>{r.pages}페이지</Text>
+          <div style={{ textAlign: 'right', lineHeight: 1.4 }}>
+            {r.uploaded_by && r.uploaded_by !== 'anonymous' && (
+              <div>
+                <Tooltip title={r.uploaded_by}>
+                  <Text type="secondary" style={{ fontSize: 12 }}><UserOutlined style={{ marginRight: 4 }} />{r.uploaded_by_name ?? r.uploaded_by}</Text>
+                </Tooltip>
+              </div>
+            )}
+            <Space size={12}>
+              <Text type="secondary" style={{ fontSize: 12 }}><EyeOutlined style={{ marginRight: 4 }} />{r.view_count ?? 0}</Text>
+              {r.uploaded_at && (
+                <Tooltip title={r.uploaded_at}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>{formatDate(r.uploaded_at)}</Text>
+                </Tooltip>
+              )}
+            </Space>
+          </div>
+        </div>
+
+        {r.memo && (
+          <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 6, padding: '5px 10px', marginBottom: 8, fontSize: 12, color: '#7c6000' }}>
+            <Text strong style={{ fontSize: 11, color: '#7c6000' }}>특이사항  </Text>{r.memo}
+          </div>
+        )}
+
+        <div style={{ background: '#fafafa', border: '1px solid #f0f0f0', borderRadius: 6, padding: '6px 10px' }}>
+          <Paragraph type="secondary" style={{ margin: 0, fontSize: 12.5, lineHeight: 1.6 }} ellipsis={{ rows: 2 }}>
+            {highlight(r.snippet, results?.query)}
+          </Paragraph>
+        </div>
+      </Card>
+    )
+  }
+
+  // 정확한 검색/유사 의미 검색 — 한 섹션(제목 + 카드 목록 + 페이지네이션)을 통째로 그린다
+  const renderResultsSection = (sectionResults, label, sectionPage, setSectionPage) => {
+    if (!sectionResults || sectionResults.length === 0) return null
+    const sliced = sortResults(sectionResults, sortBy).slice((sectionPage - 1) * PAGE_SIZE, sectionPage * PAGE_SIZE)
+    return (
+      <div style={{ marginBottom: 28 }}>
+        {label && (
+          <Text strong style={{ fontSize: 13.5 }}>
+            {label} <Text type="secondary" style={{ fontWeight: 400, fontSize: 12.5 }}>{sectionResults.length}건</Text>
+          </Text>
+        )}
+        <div style={{ marginTop: label ? 10 : 0 }}>
+          {viewMode === 'grid' ? (
+            <Row gutter={[16, 16]}>{sliced.map(renderGridCard)}</Row>
+          ) : (
+            <Space orientation="vertical" style={{ width: '100%' }} size={10}>{sliced.map(renderListCard)}</Space>
+          )}
+        </div>
+        {sectionResults.length > PAGE_SIZE && (
+          <div style={{ textAlign: 'center', marginTop: 16 }}>
+            <Pagination
+              size="small"
+              current={sectionPage} pageSize={PAGE_SIZE} total={sectionResults.length}
+              onChange={(p) => { setSectionPage(p); window.scrollTo(0, 0) }}
+              showSizeChanger={false}
+            />
+          </div>
+        )}
+      </div>
+    )
+  }
 
   return (
     <div style={{ maxWidth: 1400, margin: '0 auto', padding: '24px 24px 40px' }}>
@@ -401,7 +580,7 @@ export default function SearchPage({ onNavigate }) {
           title="검색 팁"
           description={
             <ul style={{ margin: '4px 0 0', paddingLeft: 20, lineHeight: 2 }}>
-              <li>파일명이 아닌 <strong>내용</strong>으로 검색합니다. 예) <Typography.Text code>모터 설계 사양</Typography.Text></li>
+              <li>기본은 <strong>파일명 검색</strong>입니다. 문서 <strong>내용</strong>에서 찾으려면 <strong>고급 검색</strong>에서 <strong>유사 검색</strong>으로 바꿔보세요. 예) <Typography.Text code>모터 설계 사양</Typography.Text></li>
               <li>결과가 마음에 안 들면 <strong>고급 검색</strong>에서 검색 모드·필터를 조절해 보세요.</li>
               <li><kbd style={{ padding: '1px 5px', background: '#f0f0f0', border: '1px solid #d9d9d9', borderRadius: 3, fontSize: 12 }}>/</kbd> 키를 누르면 어디서든 검색창으로 바로 이동합니다.</li>
             </ul>
@@ -412,7 +591,7 @@ export default function SearchPage({ onNavigate }) {
       {/* ── 검색창 + 최근 검색어 드롭다운 (스크롤해도 화면 상단에 고정) ── */}
       <div style={{
         position: 'sticky', top: 64, zIndex: 10,
-        background: '#fff', margin: '0 -32px', padding: '12px 32px 10px',
+        background: '#fff', marginTop: 16,
         borderBottom: '1px solid #f0f0f0',
       }}>
         <div style={{ position: 'relative' }}>
@@ -629,176 +808,7 @@ export default function SearchPage({ onNavigate }) {
             </div>
           ) : (
             <>
-              {viewMode === 'grid' ? (
-                <Row gutter={[16, 16]}>
-                  {sortResults(results.results, sortBy)
-                    .slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
-                    .map((r) => (
-                      <Col key={r.doc_id} xs={24} sm={12} md={8}>
-                        <Card
-                          size="small" hoverable
-                          style={{ borderRadius: 8 }}
-                          styles={{ body: { padding: 12 } }}
-                          onClick={() => openDetail(r)}
-                        >
-                          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, marginBottom: 10 }}>
-                            <Tooltip title={r.content_preview || '미리보기를 불러올 수 없습니다'} placement="topLeft" mouseEnterDelay={0.3}>
-                              <Text strong style={{ fontSize: 13.5, lineHeight: 1.4 }} ellipsis>
-                                {r.title || r.filename}
-                              </Text>
-                            </Tooltip>
-                            <Space size={4} style={{ flexShrink: 0 }}>
-                              {r.file_type && (
-                                <Tag color={FILE_TYPE_COLOR[r.file_type] ?? 'default'} style={{ margin: 0 }}>
-                                  {r.file_type.toUpperCase()}
-                                </Tag>
-                              )}
-                              <Tooltip title="북마크">
-                                <Button
-                                  size="small" type="text"
-                                  style={{ padding: 0, width: 20, height: 20 }}
-                                  icon={bookmarkedIds.has(r.doc_id)
-                                    ? <StarFilled style={{ color: '#faad14' }} />
-                                    : <StarOutlined style={{ color: '#bfbfbf' }} />}
-                                  onClick={(e) => { e.stopPropagation(); toggleBookmark(r.doc_id) }}
-                                />
-                              </Tooltip>
-                            </Space>
-                          </div>
-                          <Row justify="space-between" align="middle">
-                            <Col>
-                              <Space size={4}>
-                                <Tag color={r.category ? CATEGORY_COLOR[r.category] : undefined} style={{ marginRight: 0 }}>{r.category ? (CATEGORY_LABEL[r.category] ?? r.category) : '미지정'}</Tag>
-                                {r.score > 0 && (
-                                  <Tooltip title={`관련도 ${Math.round(r.score * 100)}%`}>
-                                    <Tag style={{ margin: 0 }}>{Math.round(r.score * 100)}%</Tag>
-                                  </Tooltip>
-                                )}
-                                {r.memo && (
-                                  <Tooltip title="클릭해서 특이사항 확인">
-                                    <Tag style={{ margin: 0, background: '#fffbe6', border: '1px solid #ffe58f', color: '#7c6000' }}>특이사항</Tag>
-                                  </Tooltip>
-                                )}
-                              </Space>
-                            </Col>
-                            <Col><Text type="secondary" style={{ fontSize: 11.5 }}>{formatDate(r.uploaded_at)}</Text></Col>
-                          </Row>
-                        </Card>
-                      </Col>
-                    ))}
-                </Row>
-              ) : (
-              <Space orientation="vertical" style={{ width: '100%' }} size={10}>
-                {sortResults(results.results, sortBy)
-                  .slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
-                  .map((r) => {
-                    const CAT_ACCENT = { spec: '#1677ff', research: '#722ed1', presentation: '#13c2c2', report: '#52c41a' }
-                    const accent = CAT_ACCENT[r.category] ?? '#8c8c8c'
-                    return (
-                      <Card
-                        key={r.doc_id}
-                        size="small"
-                        hoverable
-                        onClick={() => openDetail(r)}
-                        style={{ borderLeft: `4px solid ${accent}`, borderRadius: 8, boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}
-                        styles={{ body: { padding: '12px 16px' } }}
-                        title={
-                          <Tooltip title={r.content_preview || '미리보기를 불러올 수 없습니다'} placement="topLeft" mouseEnterDelay={0.3}>
-                            <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, minWidth: 0 }}>
-                              <span style={{ fontSize: 18, flexShrink: 0 }}>
-                                {FILE_TYPE_ICON[r.file_type] ?? <FileOutlined style={{ color: '#8c8c8c' }} />}
-                              </span>
-                              {r.title && r.title !== r.filename ? (
-                                <>
-                                  <Text strong ellipsis style={{ fontSize: 14, maxWidth: '55%' }}>{highlight(r.title, results.query)}</Text>
-                                  <Text type="secondary" ellipsis style={{ fontSize: 11 }}>{r.filename}</Text>
-                                </>
-                              ) : (
-                                <Text strong ellipsis style={{ fontSize: 14 }}>{highlight(r.filename, results.query)}</Text>
-                              )}
-                            </div>
-                          </Tooltip>
-                        }
-                        extra={
-                          <Space size={4}>
-                            <Tooltip title={'북마크'}>
-                              <Button
-                                size="small" type="text"
-                                icon={bookmarkedIds.has(r.doc_id)
-                                  ? <StarFilled style={{ color: '#faad14' }} />
-                                  : <StarOutlined />}
-                                onClick={(e) => { e.stopPropagation(); toggleBookmark(r.doc_id) }}
-                              />
-                            </Tooltip>
-                            <Button
-                              size="small" icon={<DownloadOutlined />} href={`${API}/files/${r.doc_id}`} download
-                              type="primary" ghost
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              다운로드
-                            </Button>
-                          </Space>
-                        }
-                      >
-                        <Space style={{ marginBottom: 12 }} size={6} wrap>
-                          <Tag color={r.category ? CATEGORY_COLOR[r.category] : undefined} style={{ margin: 0 }}>{r.category ? (CATEGORY_LABEL[r.category] ?? r.category) : '미지정'}</Tag>
-                          {r.file_type && <Tag color={FILE_TYPE_COLOR[r.file_type] ?? 'default'} style={{ margin: 0 }}>{r.file_type.toUpperCase()}</Tag>}
-                          {r.score > 0 && (
-                            <Tooltip title={`관련도 ${Math.round(r.score * 100)}%`}>
-                              <Tag style={{ margin: 0 }}>{Math.round(r.score * 100)}%</Tag>
-                            </Tooltip>
-                          )}
-                          {r.page_num > 0 && (
-                            <Tooltip title={`${r.page_num}페이지에서 발견`}>
-                              <Tag style={{ margin: 0, background: '#f5f5f5', border: '1px solid #d9d9d9', color: '#595959', fontSize: 11 }}>
-                                p.{r.page_num}
-                              </Tag>
-                            </Tooltip>
-                          )}
-                        </Space>
-
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: 4, flexWrap: 'wrap', gap: 8, lineHeight: 1.4 }}>
-                          <Text type="secondary" style={{ fontSize: 12 }}>{r.pages}페이지</Text>
-                          <div style={{ textAlign: 'right', lineHeight: 1.4 }}>
-                            {r.uploaded_by && r.uploaded_by !== 'anonymous' && (
-                              <div>
-                                <Tooltip title={r.uploaded_by}>
-                                  <Text type="secondary" style={{ fontSize: 12 }}><UserOutlined style={{ marginRight: 4 }} />{r.uploaded_by_name ?? r.uploaded_by}</Text>
-                                </Tooltip>
-                              </div>
-                            )}
-                            <Space size={12}>
-                              <Text type="secondary" style={{ fontSize: 12 }}><EyeOutlined style={{ marginRight: 4 }} />{r.view_count ?? 0}</Text>
-                              {r.uploaded_at && (
-                                <Tooltip title={r.uploaded_at}>
-                                  <Text type="secondary" style={{ fontSize: 12 }}>{formatDate(r.uploaded_at)}</Text>
-                                </Tooltip>
-                              )}
-                            </Space>
-                          </div>
-                        </div>
-
-                        {r.memo && (
-                          <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 6, padding: '5px 10px', marginBottom: 8, fontSize: 12, color: '#7c6000' }}>
-                            <Text strong style={{ fontSize: 11, color: '#7c6000' }}>특이사항  </Text>{r.memo}
-                          </div>
-                        )}
-
-                        <div style={{ background: '#fafafa', border: '1px solid #f0f0f0', borderRadius: 6, padding: '6px 10px' }}>
-                          <Paragraph type="secondary" style={{ margin: 0, fontSize: 12.5, lineHeight: 1.6 }} ellipsis={{ rows: 2 }}>
-                            {highlight(r.snippet, results.query)}
-                          </Paragraph>
-                        </div>
-                      </Card>
-                    )
-                  })}
-              </Space>
-              )}
-              {results.total > PAGE_SIZE && (
-                <div style={{ textAlign: 'center', marginTop: 20 }}>
-                  <Pagination current={page} pageSize={PAGE_SIZE} total={results.total} onChange={(p) => { setPage(p); window.scrollTo(0, 0) }} showSizeChanger={false} />
-                </div>
-              )}
+              {renderResultsSection(results.results, null, page, setPage)}
             </>
           )}
 
@@ -869,7 +879,7 @@ export default function SearchPage({ onNavigate }) {
                     <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, marginBottom: 10 }}>
                       <Tooltip title={doc.content_preview || '미리보기를 불러올 수 없습니다'} placement="topLeft" mouseEnterDelay={0.3}>
                         <Text strong style={{ fontSize: 13.5, lineHeight: 1.4 }} ellipsis>
-                          {doc.snippet}
+                          {doc.filename}
                         </Text>
                       </Tooltip>
                       <Space size={4} style={{ flexShrink: 0 }}>
@@ -926,14 +936,7 @@ export default function SearchPage({ onNavigate }) {
                           <span style={{ fontSize: 18, flexShrink: 0 }}>
                             {FILE_TYPE_ICON[doc.file_type] ?? <FileOutlined style={{ color: '#8c8c8c' }} />}
                           </span>
-                          {doc.title && doc.title !== doc.filename ? (
-                            <>
-                              <Text strong ellipsis style={{ fontSize: 14, maxWidth: '55%' }}>{doc.title}</Text>
-                              <Text type="secondary" ellipsis style={{ fontSize: 11 }}>{doc.filename}</Text>
-                            </>
-                          ) : (
-                            <Text strong ellipsis style={{ fontSize: 14 }}>{doc.filename}</Text>
-                          )}
+                          <Text strong ellipsis style={{ fontSize: 14 }}>{doc.filename}</Text>
                         </div>
                       </Tooltip>
                     }
@@ -1006,7 +1009,7 @@ export default function SearchPage({ onNavigate }) {
       )}
 
       <Modal
-        title={detailDoc?.snippet}
+        title={detailDoc?.filename}
         open={!!detailDoc}
         onCancel={() => setDetailDoc(null)}
         footer={null}

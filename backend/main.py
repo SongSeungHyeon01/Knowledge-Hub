@@ -43,8 +43,6 @@ load_dotenv()
 #    재사용하기 위함 — 값을 바꾸지 말 것)
 from search.search import (
     chunk_text as _sb_chunk_text,        # 섹션 헤더 우선 청킹 (PRD 기준)
-    _augment_ko_to_en, _augment_en_to_ko,  # 영↔한 기술용어 쿼리 보강
-    _RRF_K_BM25, _RRF_K_VEC,             # 비대칭 RRF k (BM25=30, 벡터=60)
 )
 
 # ── 경로 설정 — env var 우선, 없으면 코드 파일 기준 상대 경로 ─────────────────
@@ -1036,22 +1034,7 @@ def _extract_title(pages: list) -> str:
     return ""
 
 
-# 한국어 조사 제거 — 검색 토큰 확장에 사용 ("모터를" → "모터", "설계에서" → "설계")
-_JOSA = _re.compile(
-    r'(으로부터|로부터|에게서|한테서|이라도|이라고|이지만|이면서|라도|라고|지만|면서|에게|까지|부터|한테|에서|으로|을|를|은|는|의|에|로|과|와|도|만|이|가)$'
-)
-
-def _stem_ko(word: str) -> str:
-    """단순 규칙 기반 한국어 조사 제거 (최대 2회 반복, 복합 조사 처리)."""
-    for _ in range(2):
-        new = _JOSA.sub('', word)
-        if new == word:
-            break
-        word = new
-    return word
-
-
-# ── 임베딩 / BM25 설정 ────────────────────────────────────────────────────
+# ── 임베딩 설정 ────────────────────────────────────────────────────────────
 _embed_model  = None
 
 def _get_embed_model():
@@ -1068,9 +1051,13 @@ def _get_embed_model():
     return _embed_model
 
 
-# ── ③ 정본 BM25 토크나이저 (지연 로딩) ──────────────────────────────────────
-# BM25Indexer 인스턴스를 토크나이저로만 사용한다 (색인 저장 기능은 쓰지 않음 —
-# 저장은 DB CHUNKS가 담당). 언어 감지 + 영어 불용어 + 기술 토큰(1.8V, 0x60) 지원.
+# ── 유사 검색 재랭킹용 BM25 토크나이저 (지연 로딩) ──────────────────────────
+# 2026-07-23: 유사 검색(임베딩) 후보 안에서 랭킹 품질을 보강하기 위해서만 쓴다 —
+# 예전처럼 전체 문서를 대상으로 한 글로벌 BM25 인덱스/캐시가 아니라, 매 검색마다
+# "이미 의미상 후보로 뽑힌" 소규모 문서 집합에 대해서만 그때그때 새로 만든다
+# (후보가 원래도 최대 수십 건이라 캐싱 없이도 충분히 빠르다). 이 방식이면 BM25가
+# 후보를 "추가"하는 일은 없고 순위만 보강하므로, 예전에 겪었던 "형태소 축약으로
+# 무관한 문서가 정확검색으로 잘못 분류되는" 문제가 재발하지 않는다.
 _search_indexer = None
 
 def _get_search_indexer():
@@ -1080,7 +1067,7 @@ def _get_search_indexer():
             from search.search import BM25Indexer
             _search_indexer = BM25Indexer()   # 내부에서 Kiwi 로드 (첫 호출만 느림)
         except Exception as e:
-            print(f"[search] ③ 토크나이저 로드 실패: {e}")
+            print(f"[search] BM25 토크나이저 로드 실패: {e}")
     return _search_indexer
 
 
@@ -1097,45 +1084,7 @@ def _best_page_for_tokens(pages: list, tokens: list) -> int:
     return best_page
 
 
-def _tokenize_bm25(text: str, is_query: bool = False) -> list:
-    """BM25 토크나이저 — ③ 정본(BM25Indexer)에 위임. 실패 시 regex fallback.
-    is_query=True면 쿼리 전용 토크나이저(한/영 동시 추출)를 쓴다."""
-    indexer = _get_search_indexer()
-    if indexer is not None:
-        try:
-            if is_query:
-                return indexer._tokenize_query(text)
-            return indexer._tokenize(text)
-        except Exception:
-            pass
-    # regex fallback (③ 토크나이저 로드 실패 시에만)
-    import re
-    raw = [t.lower() for t in re.split(r'[\s,;:.!?()\[\]{}/"\'<>=]+', text) if len(t) >= 2]
-    result = []
-    for t in raw:
-        result.append(t)
-        s = _stem_ko(t)
-        if s != t and len(s) >= 2:
-            result.append(s)
-    return result
-
-# ── BM25 검색 캐시 ───────────────────────────────────────────────────────────
-# [수정] 예전엔 실제_검색_실행()이 검색할 때마다 매번 문서 본문을 디스크에서 다시 읽고
-# Kiwi로 처음부터 재토큰화해 BM25Okapi를 통째로 재구축했다 — 문서 20개 규모에서도
-# 검색 1회에 0.5~0.7초가 걸릴 정도로 느렸고, 문서 수에 비례해 계속 나빠지는 구조였다.
-# turbovec(의미검색) 인덱스처럼 전역에 캐싱해두고, 문서가 추가·삭제·수정될 때만
-# _invalidate_bm25_cache()로 무효화해 다음 검색 시 한 번만 다시 만든다.
-#
-# 카테고리 필터는 코퍼스 자체를 나누지 않고(캐시 하나만 유지), 점수 계산 후
-# "이 청크의 문서가 이번 요청의 카테고리 필터에 해당하는가"로 후필터링한다 —
-# 실제 검색엔진에서 흔한 방식이며, 카테고리마다 별도 인덱스를 만들 필요가 없다.
-_bm25_cache: dict = {"built": False, "bm25": None, "chunk_doc_ids": []}
 _doc_text_cache: dict = {}  # doc_id -> {"full_text": str, "pages": list}  (파싱 JSON 캐시)
-
-def _invalidate_bm25_cache():
-    _bm25_cache["built"] = False
-    _bm25_cache["bm25"] = None
-    _bm25_cache["chunk_doc_ids"] = []
 
 def _invalidate_doc_text(doc_id: int):
     _doc_text_cache.pop(doc_id, None)
@@ -1156,47 +1105,6 @@ def _get_doc_text(doc_id: int) -> dict:
     result = {"full_text": full_text, "pages": pages_list}
     _doc_text_cache[doc_id] = result
     return result
-
-async def _ensure_bm25_cache(db: AsyncSession):
-    """캐시가 비어있을 때만(문서 변경 후 첫 검색) 전체 문서 대상으로 다시 만든다."""
-    if _bm25_cache["built"]:
-        return
-    docs = (await db.execute(select(Document).where(Document.status == "success"))).scalars().all()
-
-    all_chunk_items: list = []  # (doc_id, text)
-    for doc in docs:
-        emb_path = os.path.join(PARSED_DIR, f"{doc.id}_emb.npz")
-        if os.path.exists(emb_path):
-            try:
-                nd = np.load(emb_path, allow_pickle=True)
-                for chunk in nd["chunks"]:
-                    all_chunk_items.append((doc.id, str(chunk)))
-            except Exception:
-                info = _get_doc_text(doc.id)
-                combined = " ".join(filter(None, [doc.filename, doc.title or "", doc.memo or "", info["full_text"]]))
-                all_chunk_items.append((doc.id, combined))
-        else:
-            info = _get_doc_text(doc.id)
-            combined = " ".join(filter(None, [doc.filename, doc.title or "", doc.memo or "", info["full_text"]]))
-            for i in range(0, len(combined), 350):
-                seg = combined[i:i + 400].strip()
-                if len(seg) >= 20:
-                    all_chunk_items.append((doc.id, seg))
-
-    bm25 = None
-    if all_chunk_items:
-        try:
-            from rank_bm25 import BM25Okapi
-            corpus = [_tokenize_bm25(t) for _, t in all_chunk_items]
-            bm25 = BM25Okapi(corpus)
-        except ImportError:
-            bm25 = None
-
-    _bm25_cache["bm25"] = bm25
-    _bm25_cache["chunk_doc_ids"] = [d for d, _ in all_chunk_items]
-    _bm25_cache["built"] = True
-    print(f"[search] BM25 캐시 재구축: 문서 {len(docs)}개, 청크 {len(all_chunk_items)}개")
-
 
 def _build_chunks(pages: list) -> tuple:
     """페이지 텍스트를 ③ 정본 청킹(섹션 헤더 우선, 400자/80자 오버랩)으로 분할.
@@ -1258,7 +1166,7 @@ async def _ingest_chunks_to_db(doc_id: int, pages: list):
     else:
         embs = None
 
-    # npz 저장 (BM25 fallback용 — 기존 호환성)
+    # npz 저장 (turbovec 인덱스 없을 때 유사 검색의 numpy fallback용)
     if embs is not None:
         npz_path = os.path.join(PARSED_DIR, f"{doc_id}_emb.npz")
         np.savez_compressed(npz_path,
@@ -1307,9 +1215,7 @@ async def _ingest_chunks_to_db(doc_id: int, pages: list):
                     except Exception as e:
                         print(f"[ingest] turbovec 색인 실패: {e}")
         print(f"[ingest] doc_id={doc_id}: {len(chunks)}청크 저장 완료")
-        # 새 문서가 색인됐으니 다음 검색부터 BM25 캐시를 다시 만들어야 이 문서가 잡힌다
         _invalidate_doc_text(doc_id)
-        _invalidate_bm25_cache()
     except Exception as e:
         print(f"[ingest] doc_id={doc_id} 청킹/색인 실패(검색 누락 가능): {e}")
 
@@ -1714,7 +1620,6 @@ async def _문서_완전삭제(doc: Document, db: AsyncSession):
         os.remove(npz_path)
 
     _invalidate_doc_text(doc_id)
-    _invalidate_bm25_cache()
 
     await db.delete(doc)
 
@@ -1979,13 +1884,19 @@ def _extract_snippet_multi(text: str, tokens: list, max_len: int = 200) -> str:
     return snippet
 
 
-async def 실제_검색_실행(q: str, alpha: float, category, db: AsyncSession, uploaded_by=None, date_from=None, date_to=None) -> list:
-    """BM25 + MiniLM 시맨틱 + RRF 하이브리드 검색.
-    alpha=0.0 → BM25 전용 / alpha=1.0 → 시맨틱 전용 / alpha=0.5 → 균등 혼합
+async def 실제_검색_실행(q: str, mode: str, category, db: AsyncSession, uploaded_by=None, date_from=None, date_to=None) -> dict:
+    """두 모드로 나뉜 검색.
+    - mode="filename": 파일명에 검색어가 그대로 포함된 문서만 찾는다(문서 내용은 보지 않음).
+    - mode="semantic": MiniLM 임베딩 코사인 유사도로 문서 "내용"을 찾는다. 모호한 문구를
+      넣어도 폭넓게 잡아내도록 임계값 없이(0보다 크면 전부) 후보로 삼는다. 후보가 정해진
+      뒤에는 그 안에서만 BM25로 순위를 보강해 랭킹 품질을 높인다(후보 자체를 늘리거나
+      줄이지는 않음 — 그래서 무관한 문서가 BM25 하나만으로 끼어드는 일은 없다).
+    검색어가 비어 있으면(카테고리 등 필터만으로 "둘러보기") 모드와 무관하게 최신순으로
+    나열한다.
     """
     import re
 
-    # ── 1. 문서 목록 로드 ────────────────────────────────────────────────────
+    # -- 1. 문서 목록 로드 --------------------------------------------------
     stmt = select(Document).where(Document.status == "success")
     if category:
         stmt = stmt.where(Document.category == category)
@@ -2002,22 +1913,15 @@ async def 실제_검색_실행(q: str, alpha: float, category, db: AsyncSession,
             pass
     docs = (await db.execute(stmt)).scalars().all()
     if not docs:
-        return []
+        return {"results": []}
 
-    # ── 2. 쿼리 토큰화 (조사 제거 확장) ─────────────────────────────────────
-    raw_tok = [t.lower() for t in re.split(r"[\s\W]+", q) if len(t) >= 2]
-    tokens  = list(raw_tok)
-    for t in raw_tok:
-        s = _stem_ko(t)
-        if s != t and len(s) >= 2 and s not in tokens:
-            tokens.append(s)
-    if not tokens:
-        # 키워드 없이 카테고리/파일형식 필터만으로 "둘러보기" — 관련도 순위가 없으므로
+    q_stripped = q.strip()
+    if not q_stripped:
+        # 키워드 없이 카테고리/파일형식 필터만으로 "둘러보기" -- 관련도 순위가 없으므로
         # 최신 업로드순으로 나열하고 score=0으로 반환(프론트가 관련도 배지를 숨기는 신호로 씀)
         browsed = sorted(docs, key=lambda d: d.uploaded_at, reverse=True)
         results = []
         for d in browsed[:200]:
-            # 마우스 오버 미리보기용 — 파싱된 본문 앞부분만 잘라서 보여준다(캐시됨, AI 호출 없음)
             info = _get_doc_text(d.id)
             preview = info["full_text"][:150].strip()
             results.append({
@@ -2034,172 +1938,161 @@ async def 실제_검색_실행(q: str, alpha: float, category, db: AsyncSession,
                 "uploaded_by": d.uploaded_by,
                 "uploaded_at": str(d.uploaded_at),
             })
-        return results
+        return {"results": results}
 
-    # ── 3. BM25 (alpha < 1.0) — 캐시된 전역 인덱스 사용(문서 변경 시에만 재구축) ──
-    # [수정] 예전엔 여기서 매번 문서 본문을 다시 읽고 Kiwi로 재토큰화해 BM25Okapi를
-    # 통째로 재구축했다(검색 1회에 0.5~0.7초, 문서 수에 비례해 악화). 이제
-    # _ensure_bm25_cache()가 캐시가 비어있을 때(문서 추가·삭제·수정 직후)만 다시 만들고,
-    # 캐시는 카테고리 구분 없이 전체 문서 대상이라 이 요청의 category 필터는
-    # "이 청크의 문서가 이번 docs(카테고리 필터 적용됨)에 있는가"로 후필터링한다.
-    bm25_scores: dict = {}
-    if alpha < 1.0:
-        await _ensure_bm25_cache(db)
-        bm25 = _bm25_cache["bm25"]
-        if bm25 is not None:
-            # ③ 정본: 영↔한 기술용어 동의어 보강 (한국어 쿼리→영어 문서,
-            # 영어 쿼리→한국어 문서 BM25 매칭 지원) + 쿼리 전용 토크나이저
-            if any('가' <= c <= '힣' for c in q):
-                bm25_q = _augment_ko_to_en(q)
-            else:
-                bm25_q = _augment_en_to_ko(q)
-            q_tokens   = _tokenize_bm25(bm25_q, is_query=True)
-            raw_scores = bm25.get_scores(q_tokens)
-            doc_ids_in_scope = {d.id for d in docs}
-            for i, did in enumerate(_bm25_cache["chunk_doc_ids"]):
-                if did not in doc_ids_in_scope:
-                    continue
-                s = float(raw_scores[i])
-                if s > 0 and s > bm25_scores.get(did, 0):
-                    bm25_scores[did] = s
-        else:
-            # rank-bm25 자체를 못 불러온 극히 드문 경우의 TF 폴백
+    if mode == "filename":
+        # -- 파일명 검색 -- 문서 "내용"은 전혀 보지 않고 파일명 문자열만 본다 --------
+        q_lower = q_stripped.lower()
+        matched = [d for d in docs if q_lower in d.filename.lower()]
+        matched.sort(key=lambda d: d.uploaded_at, reverse=True)
+        results = []
+        for d in matched[:50]:
+            info = _get_doc_text(d.id)
+            preview = info["full_text"][:150].strip()
+            results.append({
+                "doc_id":      d.id,
+                "filename":    d.filename,
+                "category":    d.category,
+                "pages":       d.page_count,
+                "snippet":     d.title or d.filename,
+                "content_preview": preview,
+                "page_num":    0,
+                "score":       0,   # 파일명 포함 여부는 이분법이라 관련도 배지를 붙이지 않는다
+                "view_count":  d.view_count,
+                "uploaded_by": d.uploaded_by,
+                "uploaded_at": str(d.uploaded_at),
+            })
+        return {"results": results}
+
+    # -- 유사 검색 -- MiniLM 임베딩 코사인 유사도로 문서 "내용"을 찾는다 --------------
+    # 한국어 쿼리 <-> 영어 문서 교차 검색 지원. "모호한 문구를 넣어도 내용과 일치하는
+    # 목록을 전부 보여주게 해달라"는 요구에 맞춰, 별도 임계값으로 걸러내지 않고
+    # 0보다 큰(즉 방향이 조금이라도 맞는) 유사도는 전부 후보로 삼는다.
+    tokens = [t.lower() for t in re.split(r"[\s\W]+", q_stripped) if len(t) >= 2]  # 스니펫 위치 찾기용
+    sem_scores: dict = {}
+    sem_chunks: dict = {}   # doc_id -> 가장 유사한 청크 텍스트 (스니펫용)
+    sem_pages:  dict = {}   # doc_id -> 가장 유사한 청크의 페이지 번호
+    async def _npz_fallback():
+        """turbovec 인덱스가 없거나, 오류가 났거나, (색인 유실 등으로) 결과가 0건일 때
+        문서별로 저장해 둔 .npz 임베딩을 직접 코사인 유사도 계산해 찾는다."""
+        if model is None:
+            return
+        try:
+            q_emb_np = (await asyncio.to_thread(
+                model.encode, [q_stripped],
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            ))[0]
             for doc in docs:
-                info = _get_doc_text(doc.id)
-                combined = " ".join(filter(None, [doc.filename, doc.title or "", doc.memo or "", info["full_text"]]))
-                hits = sum(combined.lower().count(t) for t in tokens)
-                if hits > 0:
-                    bm25_scores[doc.id] = float(hits)
+                emb_path = os.path.join(PARSED_DIR, f"{doc.id}_emb.npz")
+                if not os.path.exists(emb_path):
+                    continue
+                data     = np.load(emb_path, allow_pickle=True)
+                embs     = data["embeddings"]
+                sims     = embs @ q_emb_np
+                best_idx = int(np.argmax(sims))
+                sem_scores[doc.id] = float(sims[best_idx])
+                if "chunks" in data:
+                    sem_chunks[doc.id] = str(data["chunks"][best_idx])
+                if "pnums" in data:
+                    sem_pages[doc.id]  = int(data["pnums"][best_idx])
+        except Exception as e:
+            print(f"[search] 시맨틱 오류: {e}")
 
-    # ── 5. 시맨틱 검색 (alpha > 0.0) ────────────────────────────────────────
-    # MiniLM 다국어 모델: 한국어 쿼리 → 영어 기술문서 교차 검색 지원
-    sem_scores: dict   = {}
-    sem_chunks: dict   = {}   # doc_id → 가장 유사한 청크 텍스트 (스니펫용)
-    sem_pages:  dict   = {}   # doc_id → 가장 유사한 청크의 페이지 번호
-    if alpha > 0.0:
-        idx = _get_vec_index()
-        model = _get_embed_model()
-        if idx is not None and model is not None:
-            q_emb = (await asyncio.to_thread(
-                model.encode, [q], normalize_embeddings=True, show_progress_bar=False
-            ))[0].astype(np.float32)
-            try:
-                # [수정 2026-07-04] turbovec search는 2차원 쿼리 배열을 받고
-                # (scores, ids) "순서"로 반환한다 — 기존 코드는 (ids, scores)로
-                # 거꾸로 받고 1차원을 넘겨서 시맨틱 경로가 항상 예외→fallback으로 빠졌음.
-                scores_2d, ids_2d = idx.search(q_emb.reshape(1, -1), 50)
-                vec_scores, vec_ids = scores_2d[0], ids_2d[0]
-                # chunk_ids → doc_id 매핑
-                if vec_ids is not None and len(vec_ids) > 0:
-                    chunk_rows = (await db.execute(
-                        select(Chunk.id, Chunk.doc_id, Chunk.text, Chunk.page_num)
-                        .where(Chunk.id.in_([int(i) for i in vec_ids]))
-                    )).all()
-                    id_to_row = {row.id: row for row in chunk_rows}
-                    for cid, score in zip(vec_ids, vec_scores):
-                        row = id_to_row.get(int(cid))
-                        if row is None:
-                            continue
-                        did = row.doc_id
-                        if float(score) > sem_scores.get(did, -1):
-                            sem_scores[did] = float(score)
-                            sem_chunks[did] = row.text
-                            sem_pages[did]  = row.page_num
-            except Exception as e:
-                print(f"[search] turbovec 오류, numpy fallback: {e}")
-                # numpy .npz fallback
-                if model is not None:
-                    try:
-                        q_emb_np = (await asyncio.to_thread(
-                            model.encode, [q],
-                            normalize_embeddings=True,
-                            show_progress_bar=False,
-                        ))[0]
-                        for doc in docs:
-                            emb_path = os.path.join(PARSED_DIR, f"{doc.id}_emb.npz")
-                            if not os.path.exists(emb_path):
-                                continue
-                            data     = np.load(emb_path, allow_pickle=True)
-                            embs     = data["embeddings"]
-                            sims     = embs @ q_emb_np
-                            best_idx = int(np.argmax(sims))
-                            sem_scores[doc.id] = float(sims[best_idx])
-                            if "chunks" in data:
-                                sem_chunks[doc.id] = str(data["chunks"][best_idx])
-                            if "pnums" in data:
-                                sem_pages[doc.id]  = int(data["pnums"][best_idx])
-                    except Exception as e2:
-                        print(f"[search] 시맨틱 오류: {e2}")
+    idx = _get_vec_index()
+    model = _get_embed_model()
+    if idx is not None and model is not None:
+        q_emb = (await asyncio.to_thread(
+            model.encode, [q_stripped], normalize_embeddings=True, show_progress_bar=False
+        ))[0].astype(np.float32)
+        try:
+            # [수정 2026-07-04] turbovec search는 2차원 쿼리 배열을 받고
+            # (scores, ids) "순서"로 반환한다 -- 기존 코드는 (ids, scores)로
+            # 거꾸로 받고 1차원을 넘겨서 시맨틱 경로가 항상 예외->fallback으로 빠졌음.
+            scores_2d, ids_2d = idx.search(q_emb.reshape(1, -1), 50)
+            vec_scores, vec_ids = scores_2d[0], ids_2d[0]
+            if vec_ids is not None and len(vec_ids) > 0:
+                chunk_rows = (await db.execute(
+                    select(Chunk.id, Chunk.doc_id, Chunk.text, Chunk.page_num)
+                    .where(Chunk.id.in_([int(i) for i in vec_ids]))
+                )).all()
+                id_to_row = {row.id: row for row in chunk_rows}
+                for cid, score in zip(vec_ids, vec_scores):
+                    row = id_to_row.get(int(cid))
+                    if row is None:
+                        continue
+                    did = row.doc_id
+                    if float(score) > sem_scores.get(did, -1):
+                        sem_scores[did] = float(score)
+                        sem_chunks[did] = row.text
+                        sem_pages[did]  = row.page_num
+        except Exception as e:
+            print(f"[search] turbovec 오류, numpy fallback: {e}")
+            await _npz_fallback()
+        # turbovec 색인이 DB Chunk와 어긋나 있으면(예: 색인 유실) 오류 없이 그냥 0건이
+        # 나올 수 있다 — 이 경우도 조용히 넘어가지 않고 npz로 한 번 더 찾아본다.
+        if not sem_scores:
+            await _npz_fallback()
+    else:
+        # turbovec 없으면 기존 npz 방식 fallback
+        await _npz_fallback()
+
+    docs_by_id = {d.id: d for d in docs}
+    candidate_ids = [did for did, s in sem_scores.items() if s > 0 and did in docs_by_id]
+    if not candidate_ids:
+        return {"results": []}
+
+    # ── 의미 검색 후보 안에서 BM25로 랭킹 품질 보강 ────────────────────────────
+    # 후보(candidate_ids)는 이미 의미 유사도만으로 확정됐다 — BM25는 여기서 새
+    # 문서를 추가하지 않고, 이미 뽑힌 후보들의 "순서"만 문맥에 맞게 재조정한다.
+    # (전체 문서 대상 글로벌 BM25 인덱스가 아니라 이 소규모 후보 집합만 매번
+    # 새로 만들므로 캐시가 필요 없고, 예전에 있었던 "형태소 축약으로 무관한
+    # 문서가 후보에 잘못 끼어드는" 문제도 구조적으로 재발하지 않는다.)
+    bm25_scores: dict = {}
+    try:
+        indexer = _get_search_indexer()
+        corpus_docs = [docs_by_id[did] for did in candidate_ids]
+        corpus_texts = []
+        for doc in corpus_docs:
+            info = _get_doc_text(doc.id)
+            corpus_texts.append(" ".join(filter(None, [doc.filename, doc.title or "", doc.memo or "", info["full_text"]])))
+        if indexer is not None:
+            corpus   = [indexer._tokenize(t) for t in corpus_texts]
+            q_tokens = indexer._tokenize_query(q_stripped)
         else:
-            # turbovec 없으면 기존 npz 방식 fallback
-            try:
-                if model is not None:
-                    q_emb = (await asyncio.to_thread(
-                        model.encode, [q],
-                        normalize_embeddings=True,
-                        show_progress_bar=False,
-                    ))[0]
-                    for doc in docs:
-                        emb_path = os.path.join(PARSED_DIR, f"{doc.id}_emb.npz")
-                        if not os.path.exists(emb_path):
-                            continue
-                        data     = np.load(emb_path, allow_pickle=True)
-                        embs     = data["embeddings"]
-                        sims     = embs @ q_emb
-                        best_idx = int(np.argmax(sims))
-                        sem_scores[doc.id] = float(sims[best_idx])
-                        if "chunks" in data:
-                            sem_chunks[doc.id] = str(data["chunks"][best_idx])
-                        if "pnums" in data:
-                            sem_pages[doc.id]  = int(data["pnums"][best_idx])
-            except Exception as e:
-                print(f"[search] 시맨틱 오류: {e}")
+            corpus   = [[t.lower() for t in re.split(r"[\s\W]+", t) if len(t) >= 2] for t in corpus_texts]
+            q_tokens = [t.lower() for t in re.split(r"[\s\W]+", q_stripped) if len(t) >= 2]
+        from rank_bm25 import BM25Okapi
+        bm25_index = BM25Okapi(corpus)
+        raw_scores = bm25_index.get_scores(q_tokens)
+        for doc, s in zip(corpus_docs, raw_scores):
+            bm25_scores[doc.id] = float(s)
+    except Exception as e:
+        print(f"[search] 유사 검색 BM25 재랭킹 실패(의미검색 점수만 사용): {e}")
 
-    # ── 6. 후보 선정 ─────────────────────────────────────────────────────────
-    SEM_THR = 0.25   # 코사인 유사도 임계값
-    candidates: set = set()
-    for did, s in bm25_scores.items():
-        if s > 0:
-            candidates.add(did)
-    for did, s in sem_scores.items():
-        if s >= SEM_THR:
-            candidates.add(did)
-
-    if not candidates:
-        return []
-
-    # ── 7. RRF 융합 (Reciprocal Rank Fusion) ────────────────────────────────
-    # ③ 정본의 비대칭 k 채택: BM25 k=30(정확 매칭 rank 1 이점 강화), 벡터 k=60(표준).
-    # alpha 가중은 프론트 슬라이더(의미↔키워드 비중) 지원을 위해 유지 — ③ 정본에는
-    # 없는 백엔드 확장이며, alpha=0.5일 때 ③의 균등 합산과 같은 취지가 되도록 절반씩 배분.
-    n = len(docs)
-
+    # RRF로 의미검색 순위(주 신호)와 BM25 순위(보강 신호)를 합친다 — 의미검색에
+    # 더 작은 k를 줘서 주 신호로 삼고, BM25는 동점 상황을 갈라주는 보조 역할만 한다.
+    K_SEM, K_BM25 = 30, 60
+    n = len(candidate_ids)
+    sem_rank = {did: i + 1 for i, did in enumerate(sorted(candidate_ids, key=lambda d: sem_scores[d], reverse=True))}
     bm25_rank = {}
     if bm25_scores:
         for i, did in enumerate(sorted(bm25_scores, key=bm25_scores.get, reverse=True)):
             bm25_rank[did] = i + 1
+    final_scores = {}
+    for did in candidate_ids:
+        sr = sem_rank.get(did, n + 1)
+        br = bm25_rank.get(did, n + 1)
+        final_scores[did] = 1 / (K_SEM + sr) + 1 / (K_BM25 + br)
 
-    sem_rank = {}
-    if sem_scores:
-        for i, did in enumerate(sorted(sem_scores, key=sem_scores.get, reverse=True)):
-            sem_rank[did] = i + 1
-
-    scored = []
-    for doc in docs:
-        if doc.id not in candidates:
-            continue
-        br  = bm25_rank.get(doc.id, n + 1)
-        sr  = sem_rank.get(doc.id, n + 1)
-        rrf = (1 - alpha) / (_RRF_K_BM25 + br) + alpha / (_RRF_K_VEC + sr)
-
-        # 시맨틱 매칭 청크를 우선 스니펫으로 사용 (한국어 쿼리 → 영어 문서 대응)
-        if doc.id in sem_chunks and sem_scores.get(doc.id, 0) >= SEM_THR:
-            snippet  = _extract_snippet_multi(sem_chunks[doc.id], tokens)
-            page_num = sem_pages.get(doc.id, 0)
+    results = []
+    for did in candidate_ids:
+        doc = docs_by_id[did]
+        if did in sem_chunks:
+            snippet  = _extract_snippet_multi(sem_chunks[did], tokens)
+            page_num = sem_pages.get(did, 0)
         else:
-            # 본문은 최종 후보(≤50개)에 대해서만 필요할 때 lazy 로드 — 카테고리에
-            # 맞는 문서 전부를 미리 읽던 예전 방식보다 훨씬 적은 파일만 연다.
-            info = _get_doc_text(doc.id)
+            info = _get_doc_text(did)
             full_text = info["full_text"]
             snippet  = (
                 _extract_snippet_multi(full_text, tokens) if full_text.strip()
@@ -2207,7 +2100,7 @@ async def 실제_검색_실행(q: str, alpha: float, category, db: AsyncSession,
             )
             page_num = _best_page_for_tokens(info["pages"], tokens)
 
-        scored.append({
+        results.append({
             "doc_id":      doc.id,
             "filename":    doc.filename,
             "category":    doc.category,
@@ -2215,34 +2108,33 @@ async def 실제_검색_실행(q: str, alpha: float, category, db: AsyncSession,
             "snippet":     snippet,
             "content_preview": snippet,
             "page_num":    page_num,
-            "score":       rrf,
+            "score":       final_scores[did],
             "view_count":  doc.view_count,
             "uploaded_by": doc.uploaded_by,
             "uploaded_at": str(doc.uploaded_at),
         })
 
-    scored.sort(key=lambda r: r["score"], reverse=True)
+    results.sort(key=lambda r: r["score"], reverse=True)
+    if results and results[0]["score"] > 0:
+        top = results[0]["score"]
+        for r in results:
+            r["score"] = round(r["score"] / top, 4)
 
-    # 최고 점수 기준으로 0~1 정규화
-    if scored:
-        max_s = scored[0]["score"]
-        if max_s > 0:
-            for r in scored:
-                r["score"] = round(r["score"] / max_s, 4)
-
-    return scored[:50]
+    return {"results": results[:50]}
 
 
 # GET /search — 문서 검색 엔드포인트
 # 파라미터:
 #   q        : 검색어 (예: "모터 설계 사양")
-#   alpha    : 키워드 검색 ↔ 의미 검색 비중 (0.0 = 키워드만, 1.0 = 의미만, 0.5 = 반반)
+#   alpha    : (레거시 호환용 — 더 이상 결과에 영향 없음. 정확검색·의미검색을 항상 함께 반환한다)
 #   category : 카테고리 필터 (없으면 전체, 있으면 해당 카테고리만)
+# 응답의 "exact"는 쿼리 원문이 그대로 포함된 문서, "semantic"은 임베딩 유사도로 찾은
+# 문서(exact와 중복 제외)다 — 화면에 "정확한 검색"/"유사 의미 검색" 두 섹션으로 나눠 보여준다.
 @app.get("/search")
 async def 검색(
     request: Request,
     q: str = Query(..., description="검색어"),
-    alpha: float = Query(0.5, ge=0.0, le=1.0, description="의미검색 비중 (0~1)"),
+    mode: str = Query("filename", description="검색 모드: filename(파일명 검색, 기본값) | semantic(유사 검색)"),
     category: str = Query(None, description="카테고리 필터 (spec/research/presentation/report/other)"),
     file_type: str = Query(None, description="파일 형식 필터 (pdf/docx/pptx/xlsx/hwp 등)"),
     uploaded_by: str = Query(None, description="작성자(업로더) 이메일 필터"),
@@ -2250,7 +2142,11 @@ async def 검색(
     date_to: str = Query(None, description="업로드 날짜 범위 끝 (YYYY-MM-DD, 해당일 포함)"),
     db: AsyncSession = Depends(get_db),
 ):
-    results = await 실제_검색_실행(q, alpha, category, db, uploaded_by=uploaded_by, date_from=date_from, date_to=date_to)
+    if mode not in ("filename", "semantic"):
+        mode = "filename"
+
+    bucket  = await 실제_검색_실행(q, mode, category, db, uploaded_by=uploaded_by, date_from=date_from, date_to=date_to)
+    results = bucket["results"]
 
     # 문서별 읽기 권한 필터 — 권한이 걸린 문서는 허가된 사람(+관리자)에게만 노출
     if results:
@@ -2281,11 +2177,12 @@ async def 검색(
         results = [r for r in results if r.get("file_type") == file_type]
 
     # 검색 기록 저장 — 계정에 귀속된 서버측 기록(로그인 꺼져 있으면 "anonymous" 공용)
-    log = SearchLog(query=q, alpha=alpha, result_count=len(results), user_email=_current_user_email(request))
+    # alpha 컬럼은 이제 의미 없는 값(고정 0.5)이다 — mode 도입 전 스키마라 남겨둠, 마이그레이션은 별도 논의 필요
+    log = SearchLog(query=q, alpha=0.5, result_count=len(results), user_email=_current_user_email(request))
     db.add(log)
     await db.commit()
 
-    return {"query": q, "alpha": alpha, "category": category, "file_type": file_type,
+    return {"query": q, "mode": mode, "category": category, "file_type": file_type,
             "uploaded_by": uploaded_by, "date_from": date_from, "date_to": date_to,
             "total": len(results), "results": results}
 
@@ -2355,7 +2252,6 @@ async def 메모_수정(
         raise HTTPException(status_code=404, detail="해당 문서를 찾을 수 없습니다")
     doc.memo = memo or None
     await db.commit()
-    _invalidate_bm25_cache()  # memo는 BM25 코퍼스(combined 텍스트)에 들어가는 내용이라 무효화 필요
     return {"id": doc_id, "memo": doc.memo}
 
 
@@ -2495,7 +2391,6 @@ async def 제목_수정(
         raise HTTPException(status_code=404, detail="해당 문서를 찾을 수 없습니다")
     doc.title = title.strip() or None
     await db.commit()
-    _invalidate_bm25_cache()  # title도 BM25 코퍼스(combined 텍스트)에 들어감
     return {"id": doc_id, "title": doc.title}
 
 
@@ -2558,8 +2453,6 @@ async def 내_문서_수정(
         doc.memo = memo.strip()[:1000] or None
 
     await db.commit()
-    if title is not None or memo is not None:
-        _invalidate_bm25_cache()  # title/memo가 BM25 코퍼스에 들어가므로 바뀌면 무효화
     return {"id": doc.id, "title": doc.title, "category": doc.category, "memo": doc.memo}
 
 

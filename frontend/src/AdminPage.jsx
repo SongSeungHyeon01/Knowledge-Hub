@@ -412,11 +412,6 @@ export default function AdminPage({ onNavigate }) {
             </Tooltip>
             {record.file_type && <Tag color={FILE_TYPE_COLOR[record.file_type] ?? 'default'} style={{ fontSize: 11, margin: 0 }}>{record.file_type.toUpperCase()}</Tag>}
           </div>
-          {record.title && record.title !== name && (
-            <Tooltip title="파싱에서 자동 추출된 문서 제목">
-              <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 2, fontStyle: 'italic' }} ellipsis>{record.title}</Text>
-            </Tooltip>
-          )}
           {record.original_path && (
             <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 1 }} title={record.original_path}>{record.original_path}</Text>
           )}
@@ -724,7 +719,7 @@ export default function AdminPage({ onNavigate }) {
                     {(() => {
                       const filtered = documents.filter(d =>
                         (!filterCategory || d.category === filterCategory) &&
-                        (!catSearch || (d.title || d.filename || '').toLowerCase().includes(catSearch.toLowerCase()))
+                        (!catSearch || (d.filename || '').toLowerCase().includes(catSearch.toLowerCase()))
                       )
                       if (filtered.length === 0) {
                         return <Empty description="조건에 맞는 문서가 없습니다" style={{ margin: '32px 0' }} />
@@ -743,8 +738,8 @@ export default function AdminPage({ onNavigate }) {
                           {filtered.map(doc => (
                             <Col key={doc.id} xs={24} sm={12} md={8} lg={6}>
                               <ACard size="small" hoverable onClick={() => openDetail(doc)} styles={{ body: { padding: 12 } }}>
-                                <Text strong style={{ fontSize: 13, display: 'block', marginBottom: 8 }} ellipsis={{ tooltip: doc.title || doc.filename }}>
-                                  {doc.title || doc.filename}
+                                <Text strong style={{ fontSize: 13, display: 'block', marginBottom: 8 }} ellipsis={{ tooltip: doc.filename }}>
+                                  {doc.filename}
                                 </Text>
                                 <Row justify="space-between" align="middle" style={{ marginBottom: 6 }}>
                                   <Col><Tag color={doc.category ? CAT_COLOR[doc.category] : undefined} style={{ marginRight: 0 }}>{doc.category ? (CAT_LABEL[doc.category] ?? doc.category) : '미지정'}</Tag></Col>

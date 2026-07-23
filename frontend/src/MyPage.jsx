@@ -79,13 +79,8 @@ export default function MyPage({ me }) {
 
   const columns = [
     {
-      title: '문서', dataIndex: 'title',
-      render: (title, d) => (
-        <div>
-          <Text strong style={{ display: 'block' }}>{title || d.filename}</Text>
-          {title && <Text type="secondary" style={{ fontSize: 11.5 }}>{d.filename}</Text>}
-        </div>
-      ),
+      title: '문서', dataIndex: 'filename',
+      render: (filename) => <Text strong>{filename}</Text>,
     },
     { title: '카테고리', dataIndex: 'category', width: 110, render: (c) => <Tag color={c ? CATEGORY_COLOR[c] : undefined}>{c ? (CATEGORY_LABEL[c] ?? c) : '미지정'}</Tag> },
     { title: '형식', dataIndex: 'file_type', width: 80, render: (t) => t ? <Tag>{t.toUpperCase()}</Tag> : '—' },

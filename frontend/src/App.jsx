@@ -17,6 +17,7 @@ import {
   IdcardOutlined,
   BellOutlined,
   CloseOutlined,
+  FileTextOutlined,
 } from '@ant-design/icons'
 import { useState, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -245,14 +246,22 @@ export default function App() {
                         >
                           <div style={{ display: 'flex', alignItems: 'flex-start', width: '100%', gap: 4 }}>
                             <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{ fontSize: 12.5, marginBottom: 3 }}>
-                                <Typography.Text strong>{n.commenter_name}</Typography.Text>님이{' '}
-                                <Tag color="blue" style={{ margin: '0 2px' }}>{n.doc_label}</Tag>
-                                에 댓글
+                              <div style={{ fontSize: 12.5 }}>
+                                <Typography.Text strong>{n.commenter_name}</Typography.Text>
+                                <Typography.Text style={{ marginLeft: 4 }}>님이 댓글을 남겼습니다</Typography.Text>
                               </div>
+                              {/* 문서명은 길면 한 줄로 잘라 보여준다 — 문장 안에 태그로 끼워넣으면 줄바꿈으로 깨져서 별도 줄로 분리 */}
+                              <Tooltip title={n.doc_label} placement="bottomLeft">
+                                <div style={{
+                                  fontSize: 11.5, color: '#1677ff', marginTop: 3,
+                                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                                }}>
+                                  <FileTextOutlined style={{ marginRight: 4 }} />{n.doc_label}
+                                </div>
+                              </Tooltip>
                               {/* 목록에선 한 줄로 잘라 보여주고, 잘린 전체 내용은 마우스를 올리면 툴팁으로 바로 확인 */}
                               <Tooltip title={n.comment_content ?? n.message} placement="bottomLeft">
-                                <div style={{ fontSize: 12, color: '#595959', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                <div style={{ fontSize: 12, color: '#595959', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                   {n.comment_content ?? n.message}
                                 </div>
                               </Tooltip>
