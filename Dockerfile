@@ -38,12 +38,14 @@ FROM python:3.11-slim
 #                          설치되면 libGL.so.1 없이는 import 시점에 죽는다
 #                          (실제 배포 오류 원인: `ImportError: libGL.so.1: cannot open
 #                          shared object file` — core/parser.py의 `import camelot`에서 발생)
+#   postgresql-client   → pg_dump 바이너리 (2026-07-23 자동 DB 백업 기능이 사용)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libreoffice-writer \
         libreoffice-impress \
         fonts-nanum \
         libgl1 \
         libglib2.0-0 \
+        postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

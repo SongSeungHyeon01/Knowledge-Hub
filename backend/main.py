@@ -7,9 +7,13 @@ import os
 import json
 import hashlib
 import secrets
+import shutil
+import subprocess
+import tarfile
+import time
 import numpy as np
 from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, Query, Body, BackgroundTasks, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware  # CORS 설정용
 import itsdangerous
 from google.oauth2 import id_token as google_id_token
@@ -48,8 +52,28 @@ _BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR   = os.environ.get("DATA_DIR", os.path.join(_BASE_DIR, "data"))
 UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
 PARSED_DIR = os.path.join(DATA_DIR, "parsed")
+BACKUP_DIR = os.path.join(DATA_DIR, "backups")   # DB 백업 파일 저장 위치 — Railway Volume에 위치해 DB 자체와 물리적으로 분리됨
+# 실시간 파일 백업 미러 (2026-07-23) — 업로드 즉시 복사, 삭제 시 함께 제거된다.
+# 매일 도는 _run_backup()의 전체 스냅샷(최근 14회 보관)과 달리, 이 미러는 항상
+# "현재 살아있는 문서 상태"만 반영해서 용량이 무한정 쌓이지 않는다. 다만 이 미러는
+# 실수로 문서를 삭제한 경우까지는 복구해주지 못한다 — 그 안전망은 여전히 매일 스냅샷
+# (14회 보관)이 담당한다.
+MIRROR_DIR        = os.path.join(DATA_DIR, "backup_mirror")
+MIRROR_UPLOAD_DIR = os.path.join(MIRROR_DIR, "uploads")
+MIRROR_PARSED_DIR = os.path.join(MIRROR_DIR, "parsed")
+# 문서를 삭제해도 미러 사본을 바로 지우지 않고 여기(trash)로 옮겨 며칠간 보관한다
+# (2026-07-23) — 실수로 지운 문서를 이 보관기간 안에는 그대로 복구할 수 있게 하기 위함.
+# 보관기간이 지난 뒤에는 _sweep_mirror_trash()가 주기적으로 영구 삭제한다.
+MIRROR_TRASH_DIR        = os.path.join(MIRROR_DIR, "trash")
+MIRROR_TRASH_UPLOAD_DIR = os.path.join(MIRROR_TRASH_DIR, "uploads")
+MIRROR_TRASH_PARSED_DIR = os.path.join(MIRROR_TRASH_DIR, "parsed")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(PARSED_DIR, exist_ok=True)
+os.makedirs(BACKUP_DIR, exist_ok=True)
+os.makedirs(MIRROR_UPLOAD_DIR, exist_ok=True)
+os.makedirs(MIRROR_PARSED_DIR, exist_ok=True)
+os.makedirs(MIRROR_TRASH_UPLOAD_DIR, exist_ok=True)
+os.makedirs(MIRROR_TRASH_PARSED_DIR, exist_ok=True)
 
 # 지원 파일 형식 목록
 # (png/jpg 단독 이미지는 미지원으로 정리 — 2026-07-04 결정. 문서 속 이미지는
@@ -121,6 +145,168 @@ async def _sweep_stale_parsing():
             raise  # 앱 종료 시 태스크 취소는 그대로 전파시켜 정상 종료되게 한다
         except Exception as e:
             print(f"[sweep] 정체 문서 정리 중 오류: {e}")
+
+
+# ── 실시간 파일 백업 미러 (2026-07-23) ────────────────────────────────────
+# 하루 한 번 도는 전체 스냅샷(_run_backup)만으로는 업로드 직후 ~24시간 동안은
+# 그 파일이 백업본에 전혀 없는 공백이 생긴다. 업로드되는 "그 순간" 바로
+# 미러 디렉터리로 복사해 공백을 없앤다. 문서를 삭제하면 미러에서도 같이
+# 지워서, 이미 지운 문서의 사본이 미러에 계속 쌓이는 일이 없게 한다
+# (하루 스냅샷은 최근 14회만 보관하므로 그쪽도 무한정 쌓이지 않는다 — 두 메커니즘 모두 용량이 유계).
+def _mirror_upload(save_path: str):
+    """업로드 원본 파일을 실시간 미러로 복사한다. UPLOAD_DIR 기준 상대 경로를 그대로 유지한다."""
+    rel = os.path.relpath(save_path, UPLOAD_DIR)
+    dest = os.path.join(MIRROR_UPLOAD_DIR, rel)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    shutil.copy2(save_path, dest)
+
+
+def _mirror_parsed(doc_id: int):
+    """파싱 결과(JSON)와 임베딩(npz)을 실시간 미러로 복사한다. 존재하는 파일만 복사한다."""
+    for fname in (f"{doc_id}.json", f"{doc_id}_emb.npz"):
+        src = os.path.join(PARSED_DIR, fname)
+        if os.path.exists(src):
+            shutil.copy2(src, os.path.join(MIRROR_PARSED_DIR, fname))
+
+
+_MIRROR_TRASH_RETENTION_DAYS      = int(os.environ.get("MIRROR_TRASH_RETENTION_DAYS", "3"))       # trash 보관 일수
+_MIRROR_TRASH_SWEEP_INTERVAL_SEC  = int(os.environ.get("MIRROR_TRASH_SWEEP_INTERVAL_SEC", str(6 * 3600)))  # 정리 주기(기본 6시간)
+
+def _move_to_trash(src: str, dest: str):
+    """dest에 같은 이름의 예전 trash 항목이 있으면 지우고 옮긴다. mtime을 지금 시각으로 찍어
+    보관기간 계산 기준(삭제된 시점)으로 삼는다."""
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    if os.path.exists(dest):
+        os.remove(dest)
+    shutil.move(src, dest)
+    os.utime(dest, None)
+
+
+def _mirror_remove(doc_id: int, saved_path: str):
+    """문서 삭제 시 미러 사본을 바로 지우지 않고 trash로 옮긴다 — 보관기간 동안은
+    실수로 지운 문서를 복구할 수 있고, 기간이 지나면 _sweep_mirror_trash()가 영구 삭제한다."""
+    rel = os.path.relpath(saved_path, UPLOAD_DIR)
+    mirror_upload_path = os.path.join(MIRROR_UPLOAD_DIR, rel)
+    if os.path.exists(mirror_upload_path):
+        _move_to_trash(mirror_upload_path, os.path.join(MIRROR_TRASH_UPLOAD_DIR, rel))
+
+    for fname in (f"{doc_id}.json", f"{doc_id}_emb.npz"):
+        src = os.path.join(MIRROR_PARSED_DIR, fname)
+        if os.path.exists(src):
+            _move_to_trash(src, os.path.join(MIRROR_TRASH_PARSED_DIR, fname))
+
+
+def _sweep_mirror_trash() -> int:
+    """trash에서 보관기간(_MIRROR_TRASH_RETENTION_DAYS)이 지난 파일만 영구 삭제한다.
+    반환값은 삭제한 파일 개수."""
+    cutoff = time.time() - _MIRROR_TRASH_RETENTION_DAYS * 86400
+    removed = 0
+    for root in (MIRROR_TRASH_UPLOAD_DIR, MIRROR_TRASH_PARSED_DIR):
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for fname in filenames:
+                fpath = os.path.join(dirpath, fname)
+                try:
+                    if os.path.getmtime(fpath) < cutoff:
+                        os.remove(fpath)
+                        removed += 1
+                except OSError:
+                    pass
+        # original_path로 인한 하위 폴더 구조가 trash에도 그대로 생기므로, 빈 폴더는 정리한다
+        for dirpath, _dirnames, _filenames in os.walk(root, topdown=False):
+            if dirpath != root and not os.listdir(dirpath):
+                try:
+                    os.rmdir(dirpath)
+                except OSError:
+                    pass
+    return removed
+
+
+async def _scheduled_mirror_trash_sweep_task():
+    while True:
+        try:
+            await asyncio.sleep(_MIRROR_TRASH_SWEEP_INTERVAL_SEC)
+            removed = await asyncio.to_thread(_sweep_mirror_trash)
+            if removed:
+                print(f"[mirror] trash 정리: {removed}개 파일 영구 삭제 (보관기간 {_MIRROR_TRASH_RETENTION_DAYS}일 경과)")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[mirror] trash 정리 실패: {e}")
+
+
+# ── DB 백업 (2026-07-23) ──────────────────────────────────────────────────
+# 지금까지 백업 수단이 전혀 없었다 — 로컬 SQLite 파일이 지워지거나 프로덕션
+# PostgreSQL이 손상되면 복구할 방법이 없는 상태였다. Railway Volume(DATA_DIR)에
+# 주기적으로 덤프를 남겨, DB 자체와는 물리적으로 분리된 곳에 최근 상태를 보관한다.
+_BACKUP_INTERVAL_SEC = int(os.environ.get("BACKUP_INTERVAL_SEC", str(24 * 3600)))  # 기본 24시간
+_BACKUP_RETENTION     = int(os.environ.get("BACKUP_RETENTION_COUNT", "14"))         # 최근 14개만 보관
+_RAW_DATABASE_URL     = os.environ.get("DATABASE_URL", "")  # database.py가 asyncpg용으로 바꾸기 전 원본(pg_dump는 이 형식을 그대로 이해함)
+
+
+def _run_backup() -> dict:
+    """DB + 원본 파일(uploads·parsed)을 둘 다 백업하고, 오래된 백업은 정리한다.
+    DB만 복원해봐야 문서 row가 가리키는 실제 파일이 없으면 무용지물이라 반드시 같이 뜬다.
+    반환값: {"db": DB 백업 파일명, "files": 파일 백업 파일명}."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # 1) DB 백업
+    if _RAW_DATABASE_URL:
+        # PostgreSQL — pg_dump로 SQL 덤프 생성 (시스템에 postgresql-client 설치 필요, Dockerfile 참고)
+        db_filename = f"km_backup_{timestamp}.sql"
+        db_filepath = os.path.join(BACKUP_DIR, db_filename)
+        result = subprocess.run(
+            ["pg_dump", _RAW_DATABASE_URL, "-f", db_filepath],
+            capture_output=True, text=True, timeout=600,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"pg_dump 실패: {result.stderr}")
+    else:
+        # SQLite — 파일 자체를 그대로 복사 (database.py와 동일한 경로 규칙)
+        db_filename = f"km_backup_{timestamp}.db"
+        db_filepath = os.path.join(BACKUP_DIR, db_filename)
+        sqlite_path = os.path.join(_BASE_DIR, "km.db")
+        if not os.path.exists(sqlite_path):
+            raise RuntimeError(f"SQLite 파일을 찾을 수 없습니다: {sqlite_path}")
+        shutil.copy2(sqlite_path, db_filepath)
+
+    # 2) 파일 백업 — 원본 업로드 파일(uploads) + 파싱 결과·임베딩(parsed)을 tar.gz 하나로 묶는다.
+    # parsed도 같이 담는 이유: 복원 후 OCR·임베딩을 처음부터 다시 돌리려면 시간이 오래 걸려서,
+    # 이미 계산해둔 결과까지 같이 보관해두는 편이 실제 복구 상황에서 훨씬 빠르다.
+    files_filename = f"km_files_{timestamp}.tar.gz"
+    files_filepath = os.path.join(BACKUP_DIR, files_filename)
+    with tarfile.open(files_filepath, "w:gz") as tar:
+        if os.path.isdir(UPLOAD_DIR):
+            tar.add(UPLOAD_DIR, arcname="uploads")
+        if os.path.isdir(PARSED_DIR):
+            tar.add(PARSED_DIR, arcname="parsed")
+
+    # 보관 개수(_BACKUP_RETENTION)를 넘는 오래된 백업은 종류별로 각각 정리
+    for prefix in ("km_backup_", "km_files_"):
+        old_files = sorted(
+            (f for f in os.listdir(BACKUP_DIR) if f.startswith(prefix)),
+            reverse=True,
+        )
+        for old in old_files[_BACKUP_RETENTION:]:
+            try:
+                os.remove(os.path.join(BACKUP_DIR, old))
+            except OSError:
+                pass
+
+    return {"db": db_filename, "files": files_filename}
+
+
+async def _scheduled_backup_task():
+    """주기적으로 자동 백업을 실행하는 백그라운드 태스크. 스윕 태스크와 같은 방식으로
+    예외가 나도 태스크 자체는 죽지 않게 방어한다."""
+    while True:
+        try:
+            await asyncio.sleep(_BACKUP_INTERVAL_SEC)
+            result = await asyncio.to_thread(_run_backup)
+            print(f"[backup] 자동 백업 완료: DB={result['db']}, 파일={result['files']}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[backup] 자동 백업 실패: {e}")
 
 
 @asynccontextmanager
@@ -216,14 +402,23 @@ async def lifespan(_):
     sweep_task = asyncio.create_task(_sweep_stale_parsing())
     print(f"[startup] 정체 문서 스윕 태스크 시작 (주기 {_SWEEP_INTERVAL_SEC}s, 기준 {_SWEEP_STALE_MINUTES}분)")
 
+    backup_task = asyncio.create_task(_scheduled_backup_task())
+    print(f"[startup] DB 자동 백업 태스크 시작 (주기 {_BACKUP_INTERVAL_SEC}s, 보관 {_BACKUP_RETENTION}개)")
+
+    mirror_trash_task = asyncio.create_task(_scheduled_mirror_trash_sweep_task())
+    print(f"[startup] 미러 trash 정리 태스크 시작 (주기 {_MIRROR_TRASH_SWEEP_INTERVAL_SEC}s, 보관 {_MIRROR_TRASH_RETENTION_DAYS}일)")
+
     yield
 
     sweep_task.cancel()
-    try:
-        await sweep_task
-    except asyncio.CancelledError:
-        pass
-    print("[shutdown] 정체 문서 스윕 태스크 종료")
+    backup_task.cancel()
+    mirror_trash_task.cancel()
+    for t in (sweep_task, backup_task, mirror_trash_task):
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
+    print("[shutdown] 정체 문서 스윕·백업·미러 trash 정리 태스크 종료")
 
 
 # FastAPI 앱 객체를 만듭니다
@@ -763,15 +958,50 @@ async def 사용자_내보내기(email: str, db: AsyncSession = Depends(get_db))
 
 # 로그인 기능이 켜져 있으면(AUTH_ENABLED) 아래 목록을 제외한 모든 API가 유효한
 # 세션 쿠키를 요구한다. 꺼져 있으면 기존 무인증 동작 그대로 통과시킨다.
-_AUTH_PUBLIC_PATHS = {"/", "/auth/config", "/auth/google", "/auth/me", "/auth/logout", "/docs", "/openapi.json", "/redoc", "/favicon.svg"}
+# [2026-07-23] /docs·/openapi.json·/redoc은 여기서 뺐다 — API 전체 구조(엔드포인트·
+# 파라미터)를 로그인 없이 누구나 볼 수 있었던 건 크롤러·스캐너에게 정찰 정보를
+# 그대로 내주는 셈이라 로그인 필요 목록으로 옮김(로그인한 사람은 그대로 볼 수 있음).
+_AUTH_PUBLIC_PATHS = {"/", "/auth/config", "/auth/google", "/auth/me", "/auth/logout", "/favicon.svg", "/robots.txt"}
 # 프론트 빌드 정적 파일(/assets/index-XXXX.js·css 등)은 로그인 화면 자체를 띄우는 데
 # 필요하므로 항상 통과시킨다 — 안 그러면 "로그인 화면을 보려면 로그인이 필요"한
 # 모순이 생겨(그 파일들이 401로 막혀 화면이 통째로 빈 채로 남음, 실제로 겪은 버그).
 _AUTH_PUBLIC_PREFIXES = ("/assets/",)
 
+# ── 요청 속도 제한 (크롤링·스크래핑 방어, 2026-07-23) ─────────────────────────
+# 로그인된 사용자는 이메일 단위로, 로그인 전이거나 인증이 꺼진 환경에서는 클라이언트
+# IP 단위로 최근 _RATE_LIMIT_WINDOW_SEC 안의 요청 수를 센다. 정상적인 사용(클릭
+# 몇 번, 검색 몇 번)은 절대 안 걸리는 넉넉한 값이고, 스크립트로 API를 빠르게
+# 반복 호출하는 패턴만 막는다. 프로세스 메모리에만 저장 — Railway 인스턴스가
+# 1개인 지금 구조에 맞는 가장 단순한 방식(인스턴스를 여러 개로 늘리면 Redis 등
+# 공유 저장소로 바꿔야 한다).
+_RATE_LIMIT_WINDOW_SEC = int(os.environ.get("RATE_LIMIT_WINDOW_SEC", "60"))
+_RATE_LIMIT_MAX_REQ    = int(os.environ.get("RATE_LIMIT_MAX_REQ", "180"))
+_rate_limit_buckets: dict = {}
+
+def _check_rate_limit(key: str) -> bool:
+    """True면 허용, False면 이 요청은 제한 초과로 막아야 함."""
+    now = time.monotonic()
+    bucket = _rate_limit_buckets.setdefault(key, [])
+    cutoff = now - _RATE_LIMIT_WINDOW_SEC
+    while bucket and bucket[0] < cutoff:
+        bucket.pop(0)
+    if len(bucket) >= _RATE_LIMIT_MAX_REQ:
+        return False
+    bucket.append(now)
+    return True
+
+
 @app.middleware("http")
 async def _require_login(request: Request, call_next):
     path = request.url.path
+
+    # 정적 자원(/assets/*)은 페이지 하나 열 때도 수십 개씩 요청되므로 속도 제한 대상에서 제외
+    if not path.startswith(_AUTH_PUBLIC_PREFIXES):
+        _rl_session = _verify_session_token(request.cookies.get(SESSION_COOKIE))
+        _rl_key = _rl_session["email"] if _rl_session else (request.client.host if request.client else "unknown")
+        if not _check_rate_limit(_rl_key):
+            return JSONResponse(status_code=429, content={"detail": "요청이 너무 잦습니다. 잠시 후 다시 시도해 주세요."})
+
     if (not AUTH_ENABLED or request.method == "OPTIONS"
             or path in _AUTH_PUBLIC_PATHS or path.startswith(_AUTH_PUBLIC_PREFIXES)):
         return await call_next(request)
@@ -1096,6 +1326,14 @@ def 서버_확인():
         return FileResponse(index_html, media_type="text/html")
     return {"message": "서버 켜졌어요"}
 
+
+# GET /robots.txt — 사내 전용 도구라 검색엔진 등 정상적인 크롤러의 색인을 차단한다.
+# (악의적인 스크래퍼는 애초에 robots.txt를 지키지 않으므로 실제 방어는 로그인 요구가
+# 담당하고, 이건 우리 사이트가 실수로 외부에 공유됐을 때의 최소한의 안전장치다.)
+@app.get("/robots.txt")
+def 로봇_배제():
+    return PlainTextResponse("User-agent: *\nDisallow: /\n")
+
 # GET /upload/check?filename=... — 같은 파일명이 이미 있는지 확인합니다
 @app.get("/upload/check")
 async def 중복_확인(filename: str = Query(...), db: AsyncSession = Depends(get_db)):
@@ -1192,6 +1430,12 @@ async def _parse_and_ingest(doc_id: int, save_path: str, source_file: str, ext: 
     # 성공 시 임베딩 + Chunk 색인 (이 함수 자체가 이미 백그라운드라 직접 await)
     if result.get("status") == "success":
         await _ingest_chunks_to_db(doc_id, result.get("pages", []))
+
+    # 파싱 결과(JSON·임베딩 npz)도 실시간 백업 미러로 복사
+    try:
+        await asyncio.to_thread(_mirror_parsed, doc_id)
+    except Exception as e:
+        print(f"[mirror] doc_id={doc_id}: 파싱 결과 미러 복사 실패 — {e}")
 
 
 # POST /upload — 파일을 받아 파싱하고 DB에 기록합니다
@@ -1326,6 +1570,12 @@ async def 파일_업로드(
         return {"source_file": file.filename, "status": "failed",
                 "error": "파일 저장 중 오류가 발생했습니다", "pages": []}
 
+    # 업로드된 원본을 실시간 백업 미러로 즉시 복사 (파싱 성공/실패와 무관하게 원본은 바로 보호)
+    try:
+        await asyncio.to_thread(_mirror_upload, save_path)
+    except Exception as e:
+        print(f"[mirror] {file.filename}: 실시간 백업 미러 복사 실패 — {e}")
+
     # ── 문서 레코드를 'parsing' 상태로 즉시 생성 후 응답 ─────────────────
     # [비동기화 2026-07-05] 파싱은 여기서 하지 않고 백그라운드(_parse_and_ingest)로 넘긴다.
     # 대용량 PDF도 업로드 요청이 즉시 끝나 타임아웃·이벤트루프 블로킹을 피한다.
@@ -1429,6 +1679,12 @@ async def 파일_다운로드(doc_id: int, request: Request, db: AsyncSession = 
 async def _문서_완전삭제(doc: Document, db: AsyncSession):
     doc_id = doc.id
 
+    # 실시간 백업 미러에서도 함께 제거 — 안 그러면 지운 문서의 사본이 미러에 계속 남아 쌓인다
+    try:
+        await asyncio.to_thread(_mirror_remove, doc_id, doc.saved_path)
+    except Exception as e:
+        print(f"[mirror] doc_id={doc_id}: 미러 제거 실패 — {e}")
+
     # 디스크에 저장된 실제 파일도 삭제합니다
     if os.path.exists(doc.saved_path):
         os.remove(doc.saved_path)
@@ -1522,6 +1778,49 @@ async def 저신뢰_문서_목록(db: AsyncSession = Depends(get_db)):
         }
         for doc in docs
     ]
+
+
+# ── DB 백업 관리 (관리자 전용) ────────────────────────────────────────────────
+@app.post("/admin/backup")
+async def 백업_실행():
+    try:
+        result = await asyncio.to_thread(_run_backup)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"백업 실패: {e}")
+    return result
+
+
+@app.get("/admin/backups")
+async def 백업_목록():
+    files = sorted(
+        (f for f in os.listdir(BACKUP_DIR) if f.startswith(("km_backup_", "km_files_"))),
+        reverse=True,
+    )
+    return [
+        {
+            "filename": f,
+            "size_bytes": os.path.getsize(os.path.join(BACKUP_DIR, f)),
+            "created_at": datetime.fromtimestamp(os.path.getmtime(os.path.join(BACKUP_DIR, f))).isoformat(),
+        }
+        for f in files
+    ]
+
+
+@app.get("/admin/backups/{filename}")
+async def 백업_다운로드(filename: str):
+    # 실제로 BACKUP_DIR에 있는 파일명인지 확인 후에만 서빙 — 경로 조작(path traversal) 방지
+    if filename not in os.listdir(BACKUP_DIR):
+        raise HTTPException(status_code=404, detail="백업 파일을 찾을 수 없습니다")
+    return FileResponse(os.path.join(BACKUP_DIR, filename), filename=filename)
+
+
+@app.delete("/admin/backups/{filename}")
+async def 백업_삭제(filename: str):
+    filepath = os.path.join(BACKUP_DIR, filename)
+    if filename not in os.listdir(BACKUP_DIR):
+        raise HTTPException(status_code=404, detail="백업 파일을 찾을 수 없습니다")
+    os.remove(filepath)
+    return {"filename": filename, "deleted": True}
 
 
 # GET /admin/documents — 업로드된 문서 전체 목록을 돌려줍니다
