@@ -73,6 +73,14 @@ def convert(src_path: str, target_fmt: str) -> str:
         candidates = list(Path(out_dir).glob(f"*.{target_fmt}"))
         if len(candidates) == 1:
             return str(candidates[0])
-        raise RuntimeError(f"변환 결과 파일을 찾을 수 없습니다: {out_path}")
+        # 진단용: exit 0인데도 결과 파일이 하나도 없는 "조용한 실패" 원인을
+        # 알아내기 위해 stdout/stderr와 out_dir 실제 내용물을 그대로 남긴다.
+        stdout = result.stdout.decode(errors="replace").strip()
+        stderr = result.stderr.decode(errors="replace").strip()
+        listing = [p.name for p in Path(out_dir).iterdir()]
+        raise RuntimeError(
+            f"변환 결과 파일을 찾을 수 없습니다: {out_path} | "
+            f"out_dir 내용물: {listing} | stdout: {stdout[:300]} | stderr: {stderr[:300]}"
+        )
 
     return str(out_path)
