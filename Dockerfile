@@ -45,8 +45,13 @@ FROM python:3.11-slim
 #                          보고하면서도 실제로는 예상한 이름의 결과 파일을 안 만드는 경우가
 #                          있다(실제 배포 오류: '이력서 양식 한글 원본.hwp' 업로드 시
 #                          "변환 결과 파일을 찾을 수 없습니다" 실패 — 2026-07-24 확인).
-#   curl                → H2Orestart 확장 파일(.oxt) 다운로드용 (바로 아래)
-#   default-jre-headless → unopkg(확장 설치)·일부 LibreOffice 필터가 Java에 의존
+#   curl                  → H2Orestart 확장 파일(.oxt) 다운로드용 (바로 아래)
+#   default-jre-headless  → LibreOffice의 Java 연동이 쓸 JVM 본체
+#   libreoffice-java-common → LO ↔ JVM을 실제로 이어주는 브릿지 패키지. JRE만 있고
+#                          이 패키지가 없으면 unopkg가 확장을 설치하려 할 때
+#                          "[JavaVirtualMachine]: An unexpected error occurred while
+#                          searching for a Java"로 실패한다(실제 배포 빌드 실패로 확인,
+#                          2026-07-24 — Railway 빌드 로그에서 unopkg 단계가 이 에러로 죽음).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libreoffice-writer \
         libreoffice-impress \
@@ -57,6 +62,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         locales \
         curl \
         default-jre-headless \
+        libreoffice-java-common \
     && sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen \
     && locale-gen \
     && rm -rf /var/lib/apt/lists/*
