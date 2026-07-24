@@ -22,7 +22,7 @@ import {
   FileImageOutlined, FileMarkdownOutlined, FileOutlined, DownloadOutlined,
   StarOutlined, StarFilled, EyeOutlined, UserOutlined,
   UnorderedListOutlined, AppstoreOutlined,
-  FileSearchOutlined, BulbOutlined,
+  FileSearchOutlined, BulbOutlined, ReloadOutlined,
 } from '@ant-design/icons'
 import axios from 'axios'
 import useIsNarrow from './useIsNarrow'
@@ -245,25 +245,23 @@ export default function SearchPage({ onNavigate }) {
   }, [])
 
   // 카테고리 칩을 고르면 그 카테고리만, "전체"면 전부 다시 불러온다 (검색어 없이 둘러보기 모드)
-  // 업로드한 문서가 파싱을 마치고 "완료"로 바뀌는 시점은 사용자가 이 화면에 이미 머무르고
-  // 있는 동안일 수 있어서, 8초마다 조용히 다시 불러와 새로고침 없이도 반영되게 한다
-  // (loading 스피너는 최초 1회만 보여주고, 이후 자동 갱신은 화면 깜빡임 없이 조용히 처리).
+  // [2026-07-24] 예전엔 8초마다 자동으로 다시 불러왔는데, 검색 결과 화면을 보고 있을 때도
+  // 이 둘러보기용 API가 백그라운드에서 계속 호출돼(화면엔 안 쓰이는데도) 낭비였다 —
+  // 실제 네트워크 탭에서 확인된 문제. 자동 폴링을 없애고 수동 새로고침 버튼으로 바꿨다.
+  const fetchBrowse = (showSpinner) => {
+    if (showSpinner) setBrowseLoading(true)
+    axios.get(`${API}/search`, {
+      params: { q: '', ...(browseCategory ? { category: browseCategory } : {}) },
+    })
+      .then(res => setBrowseDocs(res.data.results ?? []))
+      .catch(() => setBrowseDocs([]))
+      .finally(() => { if (showSpinner) setBrowseLoading(false) })
+  }
+
   useEffect(() => {
-    let cancelled = false
     setBrowsePage(1)
-    const fetchBrowse = (showSpinner) => {
-      if (showSpinner) setBrowseLoading(true)
-      axios.get(`${API}/search`, {
-        params: { q: '', ...(browseCategory ? { category: browseCategory } : {}) },
-      })
-        .then(res => { if (!cancelled) setBrowseDocs(res.data.results ?? []) })
-        .catch(() => { if (!cancelled) setBrowseDocs([]) })
-        .finally(() => { if (!cancelled && showSpinner) setBrowseLoading(false) })
-    }
     fetchBrowse(true)
-    const timer = setInterval(() => fetchBrowse(false), 8000)
-    return () => { cancelled = true; clearInterval(timer) }
-  }, [browseCategory])
+  }, [browseCategory]) // eslint-disable-line
 
   // 관리자 검색 기록에서 넘어온 경우 자동 검색
   useEffect(() => {
@@ -824,6 +822,12 @@ export default function SearchPage({ onNavigate }) {
                 <> · <a onClick={() => setBrowseCategory(null)}>전체 카테고리</a></>
               )}
             </Text>
+            <Tooltip title="새로고침">
+              <Button
+                size="small" icon={<ReloadOutlined />} loading={browseLoading}
+                onClick={() => fetchBrowse(true)}
+              />
+            </Tooltip>
             <Radio.Group
               size="small" value={viewMode}
               onChange={(e) => setViewMode(e.target.value)}
