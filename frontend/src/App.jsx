@@ -59,14 +59,16 @@ export default function App() {
 
   const isAdmin = !authEnabled || !!me?.is_admin
 
-  // 알림 — 내 문서에 댓글이 달렸을 때. 안 읽은 개수는 가볍게 주기적으로 폴링하고,
+  // 알림 — 내 문서에 댓글이 달렸을 때. 안 읽은 개수는 타이머로 계속 폴링하지 않는다 —
+  // 클라이언트 수만큼 요청이 비례해서 늘어나는 구조라(2026-07-24 피드백), 대신 React
+  // Query 기본 동작인 refetchOnWindowFocus(다른 탭/창 갔다가 돌아오면 자동 재요청)에
+  // 맡긴다. 이러면 사용자 수와 무관하게 "실제로 이 화면을 다시 보러 왔을 때"만 확인한다.
   // 실제 목록(제목·내용 포함)은 벨을 열었을 때만 가져온다.
   const [notifOpen, setNotifOpen] = useState(false)
   const { data: unreadCount } = useQuery({
     queryKey: ['notif-unread'],
     queryFn: () => axios.get(`${API}/notifications/unread-count`).then(r => r.data.count),
     enabled: authEnabled && !!me,
-    refetchInterval: 120000,
   })
   const { data: notifications = [] } = useQuery({
     queryKey: ['notifications'],
