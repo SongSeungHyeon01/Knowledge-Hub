@@ -1978,12 +1978,18 @@ async def 실제_검색_실행(q: str, mode: str, category, db: AsyncSession, up
         stmt = stmt.where(Document.category == category)
     if uploaded_by:
         stmt = stmt.where(Document.uploaded_by == uploaded_by)
+    # [수정 2026-07-24] uploaded_at(TIMESTAMP 컬럼)에 날짜 "문자열"을 그대로 비교하면
+    # SQLite는 느슨하게 봐줘서 로컬에선 잘 되지만, PostgreSQL(프로덕션)은 타입을 엄격히
+    # 따져 text vs timestamp 비교에서 오류를 낸다 — datetime 객체로 변환해서 비교해야 한다.
     if date_from:
-        stmt = stmt.where(Document.uploaded_at >= date_from)
+        try:
+            stmt = stmt.where(Document.uploaded_at >= datetime.strptime(date_from, "%Y-%m-%d"))
+        except ValueError:
+            pass
     if date_to:
         # date_to는 "YYYY-MM-DD" 하루 단위로 받아 해당 날짜 끝까지 포함시킨다(다음날 0시 미만)
         try:
-            date_to_exclusive = (datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+            date_to_exclusive = datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1)
             stmt = stmt.where(Document.uploaded_at < date_to_exclusive)
         except ValueError:
             pass
