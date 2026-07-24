@@ -1077,16 +1077,16 @@ export default function AdminPage({ onNavigate }) {
         okButtonProps={{ danger: true, disabled: !deleteReason.trim(), loading: deleteMutation.isPending || bulkDeleteMutation.isPending }}
         destroyOnClose
       >
-        <p>삭제 사유를 입력해야 삭제할 수 있습니다 — 나중에 관리자 전용 "삭제 보고서" 화면에서 확인할 수 있습니다.</p>
+        <p style={{ marginBottom: 8 }}>삭제 사유를 입력해야 삭제할 수 있습니다 — 나중에 관리자 전용 "삭제 보고서" 화면에서 확인할 수 있습니다.</p>
         <Input.TextArea
           autoFocus
           rows={3}
           maxLength={300}
-          showCount
           placeholder="삭제 사유 (필수)"
           value={deleteReason}
           onChange={(e) => setDeleteReason(e.target.value)}
         />
+        <div style={{ textAlign: 'right', fontSize: 12, color: 'rgba(0,0,0,0.45)', marginTop: 4 }}>{deleteReason.length}/300</div>
       </Modal>
 
       {/* ── OCR 수동 수정 모달 ──────────────────────────────────────── */}
