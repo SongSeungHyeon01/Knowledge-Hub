@@ -1,7 +1,5 @@
 """HWPX 파서 — zipfile + lxml, section*.xml 직접 파싱"""
-import io
 import zipfile
-from pathlib import Path
 
 from lxml import etree
 

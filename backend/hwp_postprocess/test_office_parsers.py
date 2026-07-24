@@ -137,7 +137,6 @@ def make_hwp_dummy(path: str):
 
 def make_pptx(path: str):
     from pptx import Presentation
-    from pptx.util import Inches, Pt
     prs = Presentation()
     slide = prs.slides.add_slide(prs.slide_layouts[1])
     slide.shapes.title.text = "KM 플랫폼 발표"
@@ -150,7 +149,6 @@ def make_pptx(path: str):
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def check(label: str, condition: bool, detail: str = ""):
-    status = PASS if condition else FAIL
     detail_str = f"  â†’ {detail}" if detail else ""
     print(f"    {'âœ“' if condition else 'âœ—'} {label}{detail_str}")
     return condition
@@ -316,7 +314,6 @@ def test_hwp_libreoffice(tmp: str):
         return None
 
     from hwp_postprocess import hwp_parser
-    from hwp_postprocess.models import ParseStatus
 
     path = os.path.join(tmp, "test.hwp")
     make_hwp_dummy(path)

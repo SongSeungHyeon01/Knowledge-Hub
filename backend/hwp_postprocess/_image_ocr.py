@@ -1,7 +1,6 @@
 """EasyOCR + img2table 이미지 텍스트·표 추출 헬퍼 (DOCX embedded 이미지용)"""
 import os
 import threading
-from typing import Optional
 
 _easyocr_reader = None
 _easyocr_lock = threading.Lock()
