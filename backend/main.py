@@ -16,7 +16,6 @@ from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, Que
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware  # CORS 설정용
 import itsdangerous
-import clamd
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_requests
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -106,17 +105,44 @@ CLAMD_SOCKET = os.environ.get("CLAMD_SOCKET", "/var/run/clamav/clamd.ctl")
 def _scan_for_malware(data: bytes) -> tuple[bool, str | None]:
     """반환: (안전하면 True, 감염됐으면 False)와 바이러스명(또는 스캐너 사용 불가 사유).
     스캐너에 연결할 수 없으면 (True, None)을 돌려줘 업로드를 막지 않는다 — 아래
-    호출부에서 그 경우엔 경고를 로그로만 남긴다."""
+    호출부에서 그 경우엔 경고를 로그로만 남긴다.
+
+    [수정 2026-07-25] clamd 패키지의 기본 instream()은 한 청크에 1024바이트씩만
+    보낸다(라이브러리 내부에 하드코딩) — 100MB 문서면 소켓으로 10만 번 넘게 나눠
+    보내야 해서, 파일이 클수록 업로드 응답이 눈에 띄게 느려졌다(실제 사용자 보고로
+    확인). INSTREAM 프로토콜 자체는 청크 크기 제한이 없으므로, 이 앱이 이미 파일
+    스트리밍에 쓰는 것과 같은 1MB 단위로 직접 소켓 프로토콜을 구현해 속도를 올린다."""
+    import socket as _socket
+    import struct
+
     try:
-        cd = clamd.ClamdUnixSocket(path=CLAMD_SOCKET)
-        result = cd.instream(io.BytesIO(data))
-        status, virus_name = result.get("stream", ("ERROR", "알 수 없는 응답"))
-        if status == "FOUND":
-            return False, virus_name
-        return True, None
+        sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        try:
+            sock.settimeout(120)
+            sock.connect(CLAMD_SOCKET)
+            sock.sendall(b"nINSTREAM\n")
+
+            chunk_size = 1024 * 1024  # 1MB — 이 파일의 나머지 업로드 스트리밍과 동일한 단위
+            for offset in range(0, len(data), chunk_size):
+                chunk = data[offset:offset + chunk_size]
+                sock.sendall(struct.pack("!L", len(chunk)) + chunk)
+            sock.sendall(struct.pack("!L", 0))  # 종료 신호(길이 0)
+
+            response = sock.makefile("rb").readline().decode("utf-8", errors="replace").strip()
+        finally:
+            sock.close()
     except Exception as e:
         print(f"[antivirus] ClamAV 연결 실패, 이번 업로드는 검사를 건너뜁니다: {e}")
         return True, None
+
+    # 응답 형식: "stream: OK" | "stream: Eicar-Test-Signature FOUND" | "stream: ... ERROR"
+    if response.endswith(" FOUND"):
+        virus_name = response.split(":", 1)[1].rsplit(" FOUND", 1)[0].strip()
+        return False, virus_name
+    if response.endswith(" OK") or response.endswith(": OK"):
+        return True, None
+    print(f"[antivirus] ClamAV 응답을 해석할 수 없어 검사를 건너뜁니다: {response!r}")
+    return True, None
 
 
 # ── turbovec 인덱스 (전역, 지연 초기화) ──────────────────────────────────────
@@ -1483,32 +1509,41 @@ async def 파일_업로드(
     sha256_hex = hasher.hexdigest()
     contents = b"".join(chunks_data)
 
-    # ── 검사 4: 악성코드 검사 (ClamAV) ────────────────────────────────────
-    # 디스크에 쓰거나 파싱을 시작하기 전에 먼저 검사한다 — 감염된 파일은 저장도,
-    # PDF 페이지 수 확인(파일을 여는 동작)도 하지 않고 즉시 거부한다.
-    is_clean, virus_name = await asyncio.to_thread(_scan_for_malware, contents)
+    # ── 검사 4~5: 악성코드 검사(ClamAV) + PDF 페이지 수 상한 ──────────────
+    # 두 검사는 서로 결과에 의존하지 않고 둘 다 메모리 속 contents만 필요로 하므로,
+    # 순서대로(직렬로) 기다리지 않고 asyncio.gather로 동시에 돌려 응답 시간을 줄인다
+    # (2026-07-25 — 업로드가 느려졌다는 지적을 받고 개선). 감염된 파일은 저장·파싱
+    # 전에 거부한다. /admin/documents/{id}/retry 처럼 이 핸들러를 거치지 않는 경로를
+    # 위한 페이지 수 안전망은 core/parser.py의 parse_pdf() 진입부에 별도로 있다.
+    if ext == '.pdf':
+        scan_result, page_count_result = await asyncio.gather(
+            asyncio.to_thread(_scan_for_malware, contents),
+            asyncio.to_thread(count_pdf_pages, io.BytesIO(contents)),
+            return_exceptions=True,
+        )
+    else:
+        scan_result = await asyncio.to_thread(_scan_for_malware, contents)
+        page_count_result = None
+
+    if isinstance(scan_result, BaseException):
+        print(f"[antivirus] {file.filename}: 스캔 중 예외 — {scan_result}")
+        is_clean, virus_name = True, None  # 다른 스캐너 오류와 동일하게 소프트-패스
+    else:
+        is_clean, virus_name = scan_result
     if not is_clean:
         print(f"[antivirus] {file.filename}: 악성코드 탐지({virus_name}) — 업로드 거부")
         return {"source_file": file.filename, "status": "failed",
                 "error": f"악성코드가 탐지되어 업로드가 거부되었습니다 ({virus_name})", "pages": []}
 
-    # ── 검사 5: PDF 페이지 수 상한 (STEP 3, 2026-07-22) ──────────────────
-    # 디스크 저장·Document 행 생성 전, 메모리에 있는 바이트로 바로 카운트한다
-    # (classify_pdf의 전체 페이지 텍스트 추출 루프보다 훨씬 가볍고, "parsing" 상태를
-    #  거치지도 않은 채 업로드 응답 자체에서 즉시 거부된다). /admin/documents/{id}/retry
-    # 처럼 이 업로드 핸들러를 거치지 않는 경로를 위한 안전망은 core/parser.py의
-    # parse_pdf() 진입부에 별도로 있다(재시도 시에도 반드시 거른다).
     if ext == '.pdf':
-        try:
-            page_count = await asyncio.to_thread(count_pdf_pages, io.BytesIO(contents))
-        except Exception as e:
-            print(f"[upload] {file.filename}: PDF 페이지 수 확인 실패 — {e}")
+        if isinstance(page_count_result, BaseException):
+            print(f"[upload] {file.filename}: PDF 페이지 수 확인 실패 — {page_count_result}")
             return {"source_file": file.filename, "status": "failed",
                     "error": "PDF를 열 수 없습니다 (파일이 손상되었거나 형식이 올바르지 않습니다)", "pages": []}
-        if page_count > HARD_PAGE_LIMIT:
-            print(f"[upload] {file.filename}: 페이지 수 {page_count}쪽 — 상한({HARD_PAGE_LIMIT}쪽) 초과로 업로드 거부")
+        if page_count_result > HARD_PAGE_LIMIT:
+            print(f"[upload] {file.filename}: 페이지 수 {page_count_result}쪽 — 상한({HARD_PAGE_LIMIT}쪽) 초과로 업로드 거부")
             return {"source_file": file.filename, "status": "failed",
-                    "error": f"페이지 수 초과 ({page_count}쪽). 최대 {HARD_PAGE_LIMIT}쪽까지 지원합니다 — 문서를 분할해 나눠 업로드해 주세요.",
+                    "error": f"페이지 수 초과 ({page_count_result}쪽). 최대 {HARD_PAGE_LIMIT}쪽까지 지원합니다 — 문서를 분할해 나눠 업로드해 주세요.",
                     "pages": []}
 
     # ── 중복 파일 처리 (2026-07-24 변경) — 사내 문서라 "덮어쓰기"로 예전 문서를
