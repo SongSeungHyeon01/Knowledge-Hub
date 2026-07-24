@@ -1356,7 +1356,6 @@ async def 파일_업로드(
     category: str | None = Form(None),
     original_path: str = Form(None),   # 폴더 업로드 시 상대 경로 (없으면 None)
     memo: str = Form(None),            # 업로드 시점에 바로 남기는 특이사항 — 검색 결과에 그대로 노출됨
-    overwrite: bool = Form(False),     # 덮어쓰기 확인창에서 "덮어쓰기" 선택 시 true (STEP 4)
     db: AsyncSession = Depends(get_db),
 ):
     # 카테고리는 고정 5종(spec/research/presentation/report/other) 외에도 클라이언트가
@@ -1419,39 +1418,13 @@ async def 파일_업로드(
                     "error": f"페이지 수 초과 ({page_count}쪽). 최대 {HARD_PAGE_LIMIT}쪽까지 지원합니다 — 문서를 분할해 나눠 업로드해 주세요.",
                     "pages": []}
 
-    # ── 덮어쓰기 (STEP 4, 2026-07-22) — SHA-256 중복 체크보다 반드시 먼저 처리한다 ──
-    # /upload/check(파일명 기준)에서 "이미 있는 파일" 확인창을 띄운 뒤 사용자가
-    # "덮어쓰기"를 선택하면 프론트가 overwrite=true로 다시 보낸다. 순서가 중요하다:
-    # 아래 SHA-256 체크보다 늦게 하면, 내용이 동일한 일반적인 재업로드 시 "아직 안 지운
-    # 예전 문서 자신"과 충돌해 409가 먼저 떨어져 덮어쓰기가 사실상 항상 실패한다
-    # (STEP 4-A에서 실제로 확인된 원인 — 재발 방지를 위해 순서를 여기 고정한다).
-    #
-    # 삭제 대상은 SHA-256이 아니라 "파일명"으로 찾는다 — /upload/check가 애초에
-    # 사용자에게 경고한 기준과 동일해야, 내용을 수정해 같은 파일명으로 재업로드하는
-    # 경우(SHA-256은 달라짐)에도 덮어쓰기가 의도대로 예전 버전을 지운다.
-    #
-    # 삭제는 기존 문서 삭제 3곳(관리자 단건/일괄, 본인 문서 삭제)이 쓰는 공용 헬퍼
-    # _문서_완전삭제()를 그대로 재사용한다 — Chunk DB 행 삭제 + 그 PK로 turbovec
-    # idx.remove()까지 이미 검증된 방식으로 처리되어 유령 벡터가 남지 않는다.
-    #
-    # 여기서 바로 commit하지 않는다 — 이 함수 끝의 새 Document 행 commit과 하나의
-    # 트랜잭션으로 묶어, 이후 단계(파일 저장 등)가 실패해도 롤백으로 예전 문서가
-    # 그대로 복원되게 한다(삭제만 되고 새 문서는 못 만들어지는 데이터 유실 창구 방지).
-    if overwrite:
-        old_doc = (await db.execute(
-            select(Document).where(Document.filename == file.filename)
-        )).scalar_one_or_none()
-        if old_doc is not None:
-            print(f"[upload] {file.filename}: 덮어쓰기 — 기존 문서(id={old_doc.id}) 삭제 후 재업로드 진행")
-            await _문서_완전삭제(old_doc, db)
-        else:
-            print(f"[upload] {file.filename}: overwrite=true인데 동일 파일명 문서가 없음"
-                  f"(이미 삭제됐거나 경쟁 상황) — 신규 업로드로 진행")
-
-    # ── SHA-256 중복 체크 — 이미 같은 내용의 파일이 있으면 409 ──────────
+    # ── 중복 파일 처리 (2026-07-24 변경) — 사내 문서라 "덮어쓰기"로 예전 문서를
+    # 지우면 안 된다는 요청에 따라, 같은 파일명이든 내용(SHA-256)이 완전히 같든
+    # 예전 문서를 삭제하지 않고 항상 새 문서로 별도 등록한다("버전 추가"). 다만
+    # 내용까지 완전히 같은 파일이 이미 있으면 그 사실만 응답에 담아 프론트가
+    # 안내 팝업을 띄우게 한다(업로드 자체는 막지 않음).
     dup = (await db.execute(select(Document).where(Document.sha256 == sha256_hex))).scalar_one_or_none()
-    if dup is not None:
-        raise HTTPException(status_code=409, detail=f"동일한 파일이 이미 존재합니다 (id={dup.id}, '{dup.filename}')")
+    duplicate_of = {"id": dup.id, "filename": dup.filename} if dup is not None else None
 
     # ── 저장 경로 결정 — original_path 있으면 디렉토리 구조 보존 ─────────
     # 경로 순회 공격 방지: '..' './' 절대경로 등 제거
@@ -1468,6 +1441,17 @@ async def 파일_업로드(
     save_path = os.path.join(UPLOAD_DIR, safe_relative)
     save_dir  = os.path.dirname(save_path)
     os.makedirs(save_dir, exist_ok=True)
+
+    # 예전 문서를 안 지우게 되면서(바로 위 "버전 추가" 변경) 같은 파일명의 문서가
+    # 이미 디스크에 있을 수 있다 — 그대로 저장하면 그 예전 파일의 실제 내용을
+    # 새 파일로 조용히 덮어써버려서, DB엔 예전 문서 행이 남아있는데 디스크 내용은
+    # 새 파일이 되는 데이터 불일치가 생긴다. 충돌하면 " (2)", " (3)"... 을 붙여 피한다.
+    if os.path.exists(save_path):
+        stem, save_ext = os.path.splitext(save_path)
+        counter = 2
+        while os.path.exists(f"{stem} ({counter}){save_ext}"):
+            counter += 1
+        save_path = f"{stem} ({counter}){save_ext}"
 
     try:
         with open(save_path, "wb") as f:
@@ -1522,6 +1506,7 @@ async def 파일_업로드(
         "status":   "parsing",
         "error":    None,
         "message":  "업로드 접수됨 — 파싱이 백그라운드에서 진행됩니다.",
+        "duplicate_of": duplicate_of,  # 내용(SHA-256)까지 완전히 같은 기존 문서가 있으면 그 정보, 없으면 null
     }
 
 

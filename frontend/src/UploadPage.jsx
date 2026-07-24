@@ -266,7 +266,7 @@ export default function UploadPage({ onNavigate }) {
   const ACCEPT_ATTR   = SUPPORTED_EXT.join(',')
   const MAX_SIZE_MB   = 500  // 2026-07-11: 백엔드 MAX_UPLOAD_SIZE(500MB)와 통일 — 이전엔 200MB로 따로 남아있었음
 
-  const doUpload = async (file, { overwrite = false } = {}) => {
+  const doUpload = async (file) => {
     if (file.size > MAX_SIZE_MB * 1024 * 1024) {
       const mb = (file.size / (1024 * 1024)).toFixed(1)
       setFiles(prev => [{
@@ -290,7 +290,6 @@ export default function UploadPage({ onNavigate }) {
     // 카테고리는 여기서 아무 기본값도 보내지 않는다 — 파싱이 끝난 뒤 "카테고리·특이사항
     // 설정" 팝업에서 사용자가 직접 고르기 전까지는 미지정 상태로 남아 있어야 한다.
     form.append('category', '')
-    if (overwrite) form.append('overwrite', 'true')
     if (file.webkitRelativePath) {
       form.append('original_path', file.webkitRelativePath)
     }
@@ -309,6 +308,12 @@ export default function UploadPage({ onNavigate }) {
         // 카테고리·특이사항 확인 팝업은 여기서 바로 띄우지 않는다 — 파싱이 끝나야
         // 문서가 확정되므로, runBatchPoll이 파싱 완료(성공/실패)를 확인한 뒤 띄운다.
         addToPolling(id, data.id, file.name)
+        // 내용(SHA-256)까지 완전히 같은 문서가 이미 있어도 업로드는 막지 않는다 —
+        // 대신 그 사실만 알려준다(사내 문서라 "버전 추가"를 위해 의도적으로 올린
+        // 경우도 있을 수 있어서, 막지 않고 안내만 함).
+        if (data.duplicate_of) {
+          message.info(`내용이 동일한 문서가 이미 있습니다 — "${data.duplicate_of.filename}"(#${data.duplicate_of.id}). 그래도 새 문서로 업로드됐습니다.`)
+        }
       } else {
         // 검사 단계 즉시 실패(지원 안 함·크기 초과 등) 또는 그 외 응답
         updateFile(id, {
@@ -320,28 +325,24 @@ export default function UploadPage({ onNavigate }) {
       }
     } catch (err) {
       // [STEP 4] 상태코드별로 원인을 구분한다 — 예전엔 이 catch가 파라미터도 없이
-      // 무조건 '서버 연결 오류'만 띄워서, 409(중복)·5xx(서버 오류)·순수 네트워크
-      // 단절이 전부 똑같이 보였다.
+      // 무조건 '서버 연결 오류'만 띄워서, 5xx(서버 오류)·순수 네트워크 단절이
+      // 전부 똑같이 보였다. (콘텐츠 중복은 이제 /upload가 막지 않고 업로드를
+      // 그대로 진행시키므로 409는 더 이상 여기서 나오지 않는다.)
       const status = err.response?.status
-      let message
-      if (status === 409) {
-        // overwrite 흐름(위 /upload/check + 덮어쓰기 확인창)을 이미 거쳤는데도
-        // 여기서 409가 나면, 파일명은 다르지만 "내용"이 같은 문서가 이미 있다는 뜻
-        // (덮어쓰기 대상 탐색은 파일명 기준이라 이 케이스는 자동으로 못 잡는다).
-        message = err.response?.data?.detail || '동일한 내용의 파일이 이미 존재합니다'
-      } else if (status === 504 || err.code === 'ECONNABORTED') {
+      let errorMessage
+      if (status === 504 || err.code === 'ECONNABORTED') {
         // 서버 처리 자체는 즉시 응답하도록 되어 있어(파싱은 백그라운드), 이 요청이
         // 오래 걸린다면 대부분 "파일 전송 자체"가 느린 것이다(대용량 파일+느린 회선).
-        message = '파일이 커서 업로드/처리에 시간이 걸립니다 — 잠시 후 목록에서 확인해 주세요'
+        errorMessage = '파일이 커서 업로드/처리에 시간이 걸립니다 — 잠시 후 목록에서 확인해 주세요'
       } else if (status >= 500) {
-        message = '서버 오류가 발생했습니다'
+        errorMessage = '서버 오류가 발생했습니다'
       } else if (!err.response) {
         // 응답 자체가 없음 = 순수 네트워크 단절(DNS·연결거부·오프라인 등)
-        message = '서버 연결 오류'
+        errorMessage = '서버 연결 오류'
       } else {
-        message = `업로드 실패 (${status})`
+        errorMessage = `업로드 실패 (${status})`
       }
-      updateFile(id, { percent: 100, status: 'failed', error: message })
+      updateFile(id, { percent: 100, status: 'failed', error: errorMessage })
     }
 
     return false
@@ -361,12 +362,12 @@ export default function UploadPage({ onNavigate }) {
                 이전 업로드: {res.data.uploaded_at}<br />
                 상태: {res.data.status === 'success' ? '성공' : '실패'}
               </p>
-              <p>그래도 덮어쓰기 하시겠습니까?</p>
+              <p>기존 문서는 그대로 두고, 새 버전으로 추가하시겠습니까?</p>
             </div>
           ),
-          okText: '덮어쓰기',
+          okText: '버전 추가',
           cancelText: '취소',
-          onOk: () => doUpload(file, { overwrite: true }),
+          onOk: () => doUpload(file),
         })
         return false
       }
