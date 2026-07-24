@@ -158,6 +158,17 @@ def _mirror_upload(save_path: str):
     shutil.copy2(save_path, dest)
 
 
+def _mirror_upload_safe(save_path: str, filename: str):
+    """[수정 2026-07-25] 업로드 응답 이후(BackgroundTasks)로 미룬 미러 복사 — 실패해도
+    업로드 자체는 이미 성공 응답이 나간 뒤라 로그만 남긴다. 큰 파일일수록 디스크에
+    사실상 두 번(원본 저장 + 미러 복사) 쓰는 시간을 응답 전에 전부 기다리게 했던
+    문제를 없애 업로드 응답 속도를 개선한다."""
+    try:
+        _mirror_upload(save_path)
+    except Exception as e:
+        print(f"[mirror] {filename}: 실시간 백업 미러 복사 실패 — {e}")
+
+
 def _mirror_parsed(doc_id: int):
     """파싱 결과(JSON)와 임베딩(npz)을 실시간 미러로 복사한다. 존재하는 파일만 복사한다."""
     for fname in (f"{doc_id}.json", f"{doc_id}_emb.npz"):
@@ -1531,11 +1542,9 @@ async def 파일_업로드(
         return {"source_file": file.filename, "status": "failed",
                 "error": "파일 저장 중 오류가 발생했습니다", "pages": []}
 
-    # 업로드된 원본을 실시간 백업 미러로 즉시 복사 (파싱 성공/실패와 무관하게 원본은 바로 보호)
-    try:
-        await asyncio.to_thread(_mirror_upload, save_path)
-    except Exception as e:
-        print(f"[mirror] {file.filename}: 실시간 백업 미러 복사 실패 — {e}")
+    # 업로드된 원본을 실시간 백업 미러로 복사 (파싱 성공/실패와 무관하게 원본은 보호) —
+    # 응답을 막지 않도록 BackgroundTasks로 미룬다(2026-07-25, 업로드 속도 개선).
+    background_tasks.add_task(_mirror_upload_safe, save_path, file.filename)
 
     # ── 문서 레코드를 'parsing' 상태로 즉시 생성 후 응답 ─────────────────
     # [비동기화 2026-07-05] 파싱은 여기서 하지 않고 백그라운드(_parse_and_ingest)로 넘긴다.
