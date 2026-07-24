@@ -1301,7 +1301,13 @@ def 로봇_배제():
 # GET /upload/check?filename=... — 같은 파일명이 이미 있는지 확인합니다
 @app.get("/upload/check")
 async def 중복_확인(filename: str = Query(...), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Document).where(Document.filename == filename))
+    # [수정 2026-07-25] "버전 추가" 때문에 같은 파일명 문서가 2개 이상 있을 수 있어
+    # scalar_one_or_none()이 MultipleResultsFound로 죽을 수 있다(main.py의 sha256 중복
+    # 확인 쿼리와 동일한 버그) — 가장 최근 문서 하나만 가져오도록 limit(1) 적용.
+    result = await db.execute(
+        select(Document).where(Document.filename == filename)
+        .order_by(Document.uploaded_at.desc()).limit(1)
+    )
     existing = result.scalar_one_or_none()
     if existing:
         return {
@@ -1481,7 +1487,14 @@ async def 파일_업로드(
     # 예전 문서를 삭제하지 않고 항상 새 문서로 별도 등록한다("버전 추가"). 다만
     # 내용까지 완전히 같은 파일이 이미 있으면 그 사실만 응답에 담아 프론트가
     # 안내 팝업을 띄우게 한다(업로드 자체는 막지 않음).
-    dup = (await db.execute(select(Document).where(Document.sha256 == sha256_hex))).scalar_one_or_none()
+    # [수정 2026-07-25] "버전 추가" 때문에 같은 sha256을 가진 문서가 2개 이상 쌓일 수
+    # 있는데, scalar_one_or_none()은 결과가 최대 1개라고 가정해 2개 이상이면
+    # MultipleResultsFound로 죽는다(실제 배포에서 같은 파일을 반복 업로드하다 재현
+    # 확인) — 가장 최근 문서 하나만 가져오도록 limit(1)로 명시한다.
+    dup = (await db.execute(
+        select(Document).where(Document.sha256 == sha256_hex)
+        .order_by(Document.uploaded_at.desc()).limit(1)
+    )).scalar_one_or_none()
     duplicate_of = {"id": dup.id, "filename": dup.filename} if dup is not None else None
 
     # ── 저장 경로 결정 — original_path 있으면 디렉토리 구조 보존 ─────────
