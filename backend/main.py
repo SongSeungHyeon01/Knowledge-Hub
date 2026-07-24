@@ -1559,6 +1559,32 @@ async def 문서_상태_배치(ids: str, db: AsyncSession = Depends(get_db)):
     ]
 
 
+# GET /documents/recent — 업로드 화면 "최근 업로드" 탭용 공개(관리자 아니어도 되는) 문서 목록
+# [2026-07-24] 원래 업로드 화면이 관리자 전용 /admin/documents를 그대로 갖다 쓰고 있었다
+# (로그인·권한 기능이 생기기 전 MVP 시절 코드가 안 고쳐진 채 남아있었음) — 그래서 관리자가
+# 아닌 계정은 이 요청이 항상 403으로 실패했다(업로드 화면에서 8초마다 폴링하니 더 나빴음).
+# /admin/documents와 달리 부서별 열람 권한 필터(_filter_readable_ids)를 반드시 거친다 —
+# 안 그러면 관리자 전용 API가 하던 "전체 문서 다 보여주기"를 일반 사용자에게도 그대로
+# 노출해 다른 부서 문서까지 보이는 권한 우회가 생긴다.
+@app.get("/documents/recent")
+async def 최근_문서_목록(request: Request, limit: int = Query(50, ge=1, le=200), db: AsyncSession = Depends(get_db)):
+    docs = (await db.execute(
+        select(Document).order_by(Document.uploaded_at.desc()).limit(limit * 2)
+    )).scalars().all()
+    readable = await _filter_readable_ids(db, [d.id for d in docs], _current_user_email(request))
+    filtered = [d for d in docs if d.id in readable][:limit]
+    return [
+        {
+            "id":          d.id,
+            "filename":    d.filename,
+            "category":    d.category,
+            "status":      d.status,
+            "uploaded_at": str(d.uploaded_at),
+        }
+        for d in filtered
+    ]
+
+
 # GET /files/{doc_id} — 원본 파일을 다운로드합니다
 @app.get("/files/{doc_id}")
 async def 파일_다운로드(doc_id: int, request: Request, db: AsyncSession = Depends(get_db)):
@@ -2296,6 +2322,35 @@ async def 업로드_트렌드(period: int = Query(7, ge=7, le=30), db: AsyncSess
             "count": count,
         })
     return result
+
+
+# GET /stats — 검색·업로드 화면용 공개(관리자 아니어도 되는) 통계 서브셋
+# [2026-07-24] 위와 같은 이유로 검색·업로드 화면이 /admin/stats를 그대로 갖다 쓰고
+# 있었다 — 카테고리 칩 개수·인기 검색어 표시에만 쓰는데 관리자 아니면 403이 났다.
+# 실패/OCR검토 건수처럼 운영진 전용 지표는 빼고, 일반 사용자 화면이 실제로 쓰는
+# 필드만 돌려준다.
+@app.get("/stats")
+async def 공개_통계(db: AsyncSession = Depends(get_db)):
+    total = (await db.execute(select(func.count()).select_from(Document))).scalar()
+
+    cat_rows = (await db.execute(
+        select(Document.category, func.count().label("cnt"))
+        .group_by(Document.category)
+    )).all()
+    by_category = {row.category: row.cnt for row in cat_rows if row.category}
+
+    top_queries = (await db.execute(
+        select(SearchLog.query, func.count().label("cnt"))
+        .group_by(SearchLog.query)
+        .order_by(func.count().desc())
+        .limit(5)
+    )).all()
+
+    return {
+        "total_documents": total,
+        "by_category":    by_category,
+        "top_queries":    [{"query": r.query, "count": r.cnt} for r in top_queries],
+    }
 
 
 # GET /admin/stats — 관리자 대시보드 통계

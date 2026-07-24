@@ -232,7 +232,7 @@ export default function SearchPage({ onNavigate }) {
   useEffect(() => {
     inputRef.current?.focus()
     refreshBookmarks()
-    axios.get(`${API}/admin/stats`)
+    axios.get(`${API}/stats`)
       .then(res => {
         setStats(res.data)
         const observed = Object.keys(res.data.by_category ?? {})
@@ -343,7 +343,7 @@ export default function SearchPage({ onNavigate }) {
       }
 
       if (res.data.total === 0) {
-        axios.get(`${API}/admin/stats`)
+        axios.get(`${API}/stats`)
           .then(s => setTopQueries(s.data.top_queries ?? []))
           .catch(() => {})
       } else {

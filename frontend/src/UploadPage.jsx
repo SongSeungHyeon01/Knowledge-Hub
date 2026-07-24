@@ -116,16 +116,19 @@ export default function UploadPage({ onNavigate }) {
   const updateFile = (id, patch) =>
     setFiles(prev => prev.map(f => f.id === id ? { ...f, ...patch } : f))
 
-  // ── 우측 패널·"최근 업로드" 탭용 실제 데이터 — GET /admin/documents, GET /admin/stats ──
-  // (관리자 전용 엔드포인트지만 현재 MVP엔 로그인·권한 구분이 없어 업로드 화면에서도 그대로 사용)
+  // ── 우측 패널·"최근 업로드" 탭용 실제 데이터 — GET /documents/recent, GET /stats ──
+  // [2026-07-24] 예전엔 관리자 전용 /admin/documents·/admin/stats를 그대로 썼다(로그인·
+  // 권한 기능이 생기기 전 MVP 코드가 안 고쳐진 채 남아있었음) — 관리자가 아닌 계정은
+  // 이 요청이 8초마다 계속 403으로 실패하고 있었다. 부서 열람 권한 필터를 거치는
+  // 공개 엔드포인트로 교체.
   const { data: allDocs = [] } = useQuery({
     queryKey: ['upload-page-documents'],
-    queryFn: () => axios.get(`${API}/admin/documents`).then(r => r.data),
+    queryFn: () => axios.get(`${API}/documents/recent`).then(r => r.data),
     refetchInterval: 8000,
   })
   const { data: stats } = useQuery({
     queryKey: ['upload-page-stats'],
-    queryFn: () => axios.get(`${API}/admin/stats`).then(r => r.data),
+    queryFn: () => axios.get(`${API}/stats`).then(r => r.data),
     refetchInterval: 8000,
   })
 
