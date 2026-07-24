@@ -66,7 +66,7 @@ export default function App() {
     queryKey: ['notif-unread'],
     queryFn: () => axios.get(`${API}/notifications/unread-count`).then(r => r.data.count),
     enabled: authEnabled && !!me,
-    refetchInterval: 20000,
+    refetchInterval: 120000,
   })
   const { data: notifications = [] } = useQuery({
     queryKey: ['notifications'],
