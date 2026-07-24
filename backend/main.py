@@ -26,7 +26,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import text
 
 from database import engine, get_db, Base, AsyncSessionLocal
-from models import Document, SearchLog, Chunk, Bookmark, DocumentPermission, User, Comment, AdminEmail, RevokedSession, Notification
+from models import Document, SearchLog, Chunk, Bookmark, DocumentPermission, User, Comment, AdminEmail, RevokedSession, Notification, DeletionLog
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from core.parser import parse_pdf, count_pdf_pages, HARD_PAGE_LIMIT   # 백엔드 배포 정본 파서 — 최신 parser 브랜치(parser/parser.py) 기준, import only
@@ -232,6 +232,34 @@ async def _scheduled_mirror_trash_sweep_task():
             print(f"[mirror] trash 정리 실패: {e}")
 
 
+# ── 삭제 보고서(DeletionLog) 보관 정리 (2026-07-24) ──────────────────────────
+# 관리자가 문서를 삭제할 때마다 감사 로그가 쌓이는데, 무한정 누적되면 안 되므로
+# 일정 기간(기본 3개월)이 지난 행은 주기적으로 영구 삭제한다.
+_DELETION_LOG_RETENTION_DAYS   = int(os.environ.get("DELETION_LOG_RETENTION_DAYS", "90"))          # 보관 기간(기본 90일 ≈ 3개월)
+_DELETION_LOG_SWEEP_INTERVAL_SEC = int(os.environ.get("DELETION_LOG_SWEEP_INTERVAL_SEC", str(24 * 3600)))  # 정리 주기(기본 24시간)
+
+
+async def _sweep_deletion_logs():
+    cutoff = datetime.now() - timedelta(days=_DELETION_LOG_RETENTION_DAYS)
+    async with AsyncSessionLocal() as sess:
+        result = await sess.execute(sa_delete(DeletionLog).where(DeletionLog.deleted_at < cutoff))
+        await sess.commit()
+        return result.rowcount
+
+
+async def _scheduled_deletion_log_sweep_task():
+    while True:
+        try:
+            await asyncio.sleep(_DELETION_LOG_SWEEP_INTERVAL_SEC)
+            removed = await _sweep_deletion_logs()
+            if removed:
+                print(f"[deletion-log] 삭제 보고서 {removed}건 정리 (보관기간 {_DELETION_LOG_RETENTION_DAYS}일 경과)")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[deletion-log] 정리 실패: {e}")
+
+
 # ── DB 백업 (2026-07-23) ──────────────────────────────────────────────────
 # 지금까지 백업 수단이 전혀 없었다 — 로컬 SQLite 파일이 지워지거나 프로덕션
 # PostgreSQL이 손상되면 복구할 방법이 없는 상태였다. Railway Volume(DATA_DIR)에
@@ -406,17 +434,21 @@ async def lifespan(_):
     mirror_trash_task = asyncio.create_task(_scheduled_mirror_trash_sweep_task())
     print(f"[startup] 미러 trash 정리 태스크 시작 (주기 {_MIRROR_TRASH_SWEEP_INTERVAL_SEC}s, 보관 {_MIRROR_TRASH_RETENTION_DAYS}일)")
 
+    deletion_log_sweep_task = asyncio.create_task(_scheduled_deletion_log_sweep_task())
+    print(f"[startup] 삭제 보고서 정리 태스크 시작 (주기 {_DELETION_LOG_SWEEP_INTERVAL_SEC}s, 보관 {_DELETION_LOG_RETENTION_DAYS}일)")
+
     yield
 
     sweep_task.cancel()
     backup_task.cancel()
     mirror_trash_task.cancel()
-    for t in (sweep_task, backup_task, mirror_trash_task):
+    deletion_log_sweep_task.cancel()
+    for t in (sweep_task, backup_task, mirror_trash_task, deletion_log_sweep_task):
         try:
             await t
         except asyncio.CancelledError:
             pass
-    print("[shutdown] 정체 문서 스윕·백업·미러 trash 정리 태스크 종료")
+    print("[shutdown] 정체 문서 스윕·백업·미러 trash·삭제 보고서 정리 태스크 종료")
 
 
 # FastAPI 앱 객체를 만듭니다
@@ -1640,12 +1672,23 @@ async def _문서_완전삭제(doc: Document, db: AsyncSession):
 # "bulk"라는 문자열이 {doc_id}(int)로 파싱 시도되어 422로 실패하고, 이 라우트는
 # 영원히 호출되지 않는 죽은 코드가 된다(2026-07-21 실제로 이 상태였음).
 @app.delete("/admin/documents/bulk")
-async def 문서_일괄_삭제(ids: list[int] = Body(...), db: AsyncSession = Depends(get_db)):
+async def 문서_일괄_삭제(
+    request: Request,
+    ids: list[int] = Body(...),
+    reason: str = Body(..., embed=True),
+    db: AsyncSession = Depends(get_db),
+):
+    reason = reason.strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="삭제 사유를 입력해야 합니다")
+
+    deleted_by = _current_user_email(request)
     deleted = []
     for doc_id in ids:
         result = await db.execute(select(Document).where(Document.id == doc_id))
         doc = result.scalar_one_or_none()
         if doc:
+            db.add(DeletionLog(doc_id=doc.id, filename=doc.filename, category=doc.category, deleted_by=deleted_by, reason=reason))
             await _문서_완전삭제(doc, db)
             deleted.append(doc_id)
     await db.commit()
@@ -1655,7 +1698,16 @@ async def 문서_일괄_삭제(ids: list[int] = Body(...), db: AsyncSession = De
 # DELETE /admin/documents/{id} — 문서를 DB와 디스크에서 삭제합니다
 # {id} 는 삭제할 문서의 고유 번호입니다 (문서 목록에서 확인 가능)
 @app.delete("/admin/documents/{doc_id}")
-async def 문서_삭제(doc_id: int, db: AsyncSession = Depends(get_db)):
+async def 문서_삭제(
+    doc_id: int,
+    request: Request,
+    reason: str = Body(..., embed=True),
+    db: AsyncSession = Depends(get_db),
+):
+    reason = reason.strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="삭제 사유를 입력해야 합니다")
+
     # DB에서 해당 ID의 문서를 찾습니다
     result = await db.execute(select(Document).where(Document.id == doc_id))
     doc = result.scalar_one_or_none()
@@ -1665,10 +1717,31 @@ async def 문서_삭제(doc_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="해당 문서를 찾을 수 없습니다")
 
     filename = doc.filename
+    db.add(DeletionLog(doc_id=doc.id, filename=doc.filename, category=doc.category, deleted_by=_current_user_email(request), reason=reason))
     await _문서_완전삭제(doc, db)
     await db.commit()
 
     return {"message": f"'{filename}' 문서가 삭제됐습니다", "id": doc_id}
+
+
+# GET /admin/deletion-logs — 삭제 보고서 목록 (관리자 전용, 최신순)
+@app.get("/admin/deletion-logs")
+async def 삭제_보고서_목록(limit: int = Query(200, ge=1, le=1000), db: AsyncSession = Depends(get_db)):
+    rows = (await db.execute(
+        select(DeletionLog).order_by(DeletionLog.deleted_at.desc()).limit(limit)
+    )).scalars().all()
+    return [
+        {
+            "id": r.id,
+            "doc_id": r.doc_id,
+            "filename": r.filename,
+            "category": r.category,
+            "deleted_by": r.deleted_by,
+            "reason": r.reason,
+            "deleted_at": str(r.deleted_at),
+        }
+        for r in rows
+    ]
 
 
 # ── DB 백업 관리 (관리자 전용) ────────────────────────────────────────────────

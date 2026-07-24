@@ -159,3 +159,19 @@ class DocumentPermission(Base):
     doc_id     = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
     user_email = Column(String, nullable=False, index=True)
     created_at = Column(DateTime, server_default=func.now())
+
+
+# DeletionLog 테이블: 관리자가 문서를 삭제할 때 누가/언제/무엇을/왜 지웠는지 남기는 감사 로그.
+# documents 행 자체는 삭제되고 나면 사라지므로 doc_id를 FK로 걸지 않고, 삭제 시점의
+# 파일명·카테고리를 그대로 스냅샷해 둔다(나중에 documents를 조인해도 찾을 수 없기 때문).
+# 3개월이 지난 행은 _scheduled_deletion_log_sweep_task가 주기적으로 청소한다(무한 누적 방지).
+class DeletionLog(Base):
+    __tablename__ = "deletion_logs"
+
+    id         = Column(Integer, primary_key=True, index=True)
+    doc_id     = Column(Integer, nullable=False, index=True)
+    filename   = Column(String, nullable=False)
+    category   = Column(String, nullable=True)
+    deleted_by = Column(String, nullable=False, index=True)   # 삭제한 관리자 이메일
+    reason     = Column(Text, nullable=False)                 # 삭제 사유 (필수 입력)
+    deleted_at = Column(DateTime, server_default=func.now(), index=True)

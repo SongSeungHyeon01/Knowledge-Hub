@@ -17,7 +17,7 @@ import {
   DeleteOutlined, WarningOutlined, FileTextOutlined,
   SearchOutlined, ReloadOutlined, SyncOutlined, EditOutlined,
   DownloadOutlined, FolderOutlined, UnorderedListOutlined, AppstoreOutlined,
-  EyeOutlined, UserOutlined, TeamOutlined, CloseCircleOutlined,
+  EyeOutlined, UserOutlined, TeamOutlined, SwapOutlined,
 } from '@ant-design/icons'
 import axios from 'axios'
 import useIsNarrow from './useIsNarrow'
@@ -30,7 +30,8 @@ const API = import.meta.env.VITE_API_URL
 const fetchDocuments = () => axios.get(`${API}/admin/documents`).then(r => r.data)
 const fetchStats     = () => axios.get(`${API}/admin/stats`).then(r => r.data)
 const fetchTrend     = (period = 7) => axios.get(`${API}/admin/stats/trend`, { params: { period } }).then(r => r.data)
-const deleteDocument = (id) => axios.delete(`${API}/admin/documents/${id}`)
+const deleteDocument     = ({ id, reason }) => axios.delete(`${API}/admin/documents/${id}`, { data: { reason } })
+const fetchDeletionLogs  = () => axios.get(`${API}/admin/deletion-logs`).then(r => r.data)
 
 const CAT_LABEL = { spec: '사양서', research: '연구자료', presentation: '발표자료', report: '보고서' }
 const CAT_COLOR = { spec: 'blue', research: 'purple', presentation: 'cyan', report: 'green' }
@@ -309,6 +310,18 @@ export default function AdminPage({ onNavigate }) {
     setRenamingCategory(null)
   }
 
+  // 카테고리 삭제 전 문서 이동 — [2026-07-24] 예전엔 카테고리를 삭제하면 그 안의 문서를
+  // 전부 자동으로 "보고서"로 재분류해버렸다(관리자가 고를 수 없었음). 이제는 삭제 자체를
+  // 문서가 0개인 카테고리에서만 허용하고, 그 전에 관리자가 원하는 카테고리로 직접
+  // 옮길 수 있게 이 "이동" 기능을 추가했다.
+  const [movingCategory, setMovingCategory] = useState(null)  // 이동 대상으로 고른 원본 카테고리
+  const [moveTarget,     setMoveTarget]     = useState(null)  // 옮겨갈 카테고리
+  const moveCategory = () => {
+    const ids = documents.filter(d => d.category === movingCategory).map(d => d.id)
+    if (ids.length > 0 && moveTarget) bulkCategoryMutation.mutate({ ids, category: moveTarget })
+    setMovingCategory(null); setMoveTarget(null)
+  }
+
   // 고정 5종 + 실제로 문서에 쓰인(업로드 화면에서 클라이언트가 만든 것 포함) 카테고리 전부
   const allCategoryOptions = useMemo(() => {
     const fixed = Object.keys(CAT_LABEL)
@@ -337,25 +350,42 @@ export default function AdminPage({ onNavigate }) {
     onError: () => message.error('카테고리 변경 중 오류가 발생했습니다'),
   })
 
-  // 커스텀 카테고리 삭제 — 카테고리 자체가 별도 테이블이 아니라 문서의 category 문자열이므로,
-  // "삭제"는 그 카테고리를 쓰는 문서 전부를 "보고서"로 재분류하는 것으로 구현한다.
-  // 고정 4종(CAT_LABEL)은 지울 수 없고, 실제로 문서가 있는 커스텀 카테고리만 대상이다.
+  // 커스텀 카테고리 삭제 — [2026-07-24] 예전엔 문서가 남아있어도 전부 "보고서"로
+  // 자동 재분류하며 지웠다. 이제는 문서가 0개인 카테고리만 삭제 대상이다(버튼도 그 경우에만
+  // 활성화됨 — 아래는 방어적으로 한 번 더 확인). 카테고리 자체가 별도 테이블이 아니라
+  // 문서의 category 문자열로만 존재하므로, 문서가 0개면 서버에 지울 대상이 없다 —
+  // 목록에도 다음 새로고침 때 자동으로 안 보이게 된다.
   const deleteCategory = (cat) => {
     const ids = documents.filter(d => d.category === cat).map(d => d.id)
-    if (ids.length === 0) return
-    bulkCategoryMutation.mutate({ ids, category: 'report' })
+    if (ids.length > 0) return
+    queryClient.invalidateQueries({ queryKey: ['documents'] })
+    queryClient.invalidateQueries({ queryKey: ['stats'] })
+    message.success(`"${CAT_LABEL[cat] ?? cat}" 카테고리가 삭제됐습니다`)
   }
 
   const bulkDeleteMutation = useMutation({
-    mutationFn: (ids) => axios.delete(`${API}/admin/documents/bulk`, { data: ids }),
-    onSuccess: (_, ids) => {
+    mutationFn: ({ ids, reason }) => axios.delete(`${API}/admin/documents/bulk`, { data: { ids, reason } }),
+    onSuccess: (_, { ids }) => {
       queryClient.invalidateQueries({ queryKey: ['documents'] })
       queryClient.invalidateQueries({ queryKey: ['stats'] })
+      queryClient.invalidateQueries({ queryKey: ['deletion-logs'] })
       setSelectedRowKeys([])
       message.success(`${ids.length}개 문서가 삭제됐습니다`)
     },
     onError: () => message.error('일괄 삭제 중 오류가 발생했습니다'),
   })
+
+  // 삭제 사유 입력 모달 — [2026-07-24] 관리자가 문서를 삭제할 때 누가/왜 지웠는지 감사 로그를
+  // 남기기 위해 사유 입력을 필수로 만들었다. 단건/일괄 삭제 모두 이 하나의 모달을 공유한다.
+  const [deleteTarget, setDeleteTarget] = useState(null)  // { type: 'single', id } | { type: 'bulk', ids }
+  const [deleteReason, setDeleteReason] = useState('')
+  const confirmDelete = () => {
+    const reason = deleteReason.trim()
+    if (!reason || !deleteTarget) return
+    if (deleteTarget.type === 'single') deleteMutation.mutate({ id: deleteTarget.id, reason })
+    else bulkDeleteMutation.mutate({ ids: deleteTarget.ids, reason })
+    setDeleteTarget(null); setDeleteReason('')
+  }
 
   const categoryMutation = useMutation({
     mutationFn: ({ id, category }) => axios.patch(`${API}/admin/documents/${id}/category`, { category }),
@@ -382,6 +412,7 @@ export default function AdminPage({ onNavigate }) {
     mutationFn: deleteDocument,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['documents'] })
+      queryClient.invalidateQueries({ queryKey: ['deletion-logs'] })
       message.success('문서가 삭제됐습니다')
     },
     onError: () => message.error('삭제 중 오류가 발생했습니다'),
@@ -468,20 +499,17 @@ export default function AdminPage({ onNavigate }) {
             <Button icon={<EyeOutlined />} size="small" onClick={() => openDetail(record)} />
           </Tooltip>
           <Tooltip title="삭제">
-            <Popconfirm title="정말 삭제할까요?" okText="삭제" cancelText="취소" onConfirm={() => deleteMutation.mutate(record.id)}>
-              <Button danger icon={<DeleteOutlined />} size="small" />
-            </Popconfirm>
+            <Button danger icon={<DeleteOutlined />} size="small" onClick={() => { setDeleteTarget({ type: 'single', id: record.id }); setDeleteReason('') }} />
           </Tooltip>
         </Space>
       ),
     },
   ]
 
-  // 실패 문서 탭: 파싱 자체가 실패(status === 'failed')한 문서만 모아 보여준다. 같은
-  // docColumns를 재사용해 문서 목록 탭과 동일한 조작(재시도·상세보기·삭제)을 그대로 쓴다.
-  // OCR 저신뢰 페이지 검토(has_flagged)는 별개 개념 — 문서 목록 탭의 "OCR" 열에서 태그를
-  // 클릭하면 그 문서의 저신뢰 페이지를 바로 수정할 수 있다(openOcrEdit).
-  const failedDocuments = documents.filter(doc => doc.status === 'failed')
+  // 확인 필요 문서 탭: 파싱 자체가 실패(status === 'failed')한 문서 + OCR 저신뢰 페이지가
+  // 있어 검토가 필요한 문서(has_flagged)를 함께 모아 보여준다. 같은 docColumns를 재사용해
+  // 문서 목록 탭과 동일한 조작(재시도·상세보기·삭제, OCR 열 클릭으로 저신뢰 페이지 수정)을 그대로 쓴다.
+  const needsReviewDocuments = documents.filter(doc => doc.status === 'failed' || doc.has_flagged)
 
   const filteredDocuments = documents.filter(doc => {
     if (filterText     && !doc.filename.toLowerCase().includes(filterText.toLowerCase())) return false
@@ -493,16 +521,33 @@ export default function AdminPage({ onNavigate }) {
 
   const leftMenuItems = [
     { key: 'docs',           icon: <UnorderedListOutlined />, label: '문서 목록' },
-    { key: 'failed',         icon: <CloseCircleOutlined />,   label: `실패 문서 (${failedDocuments.length})` },
+    { key: 'failed',         icon: <WarningOutlined />,        label: `확인 필요 문서 (${needsReviewDocuments.length})` },
     { key: 'category',       icon: <FolderOutlined />,        label: '카테고리' },
     { key: 'departments',    icon: <TeamOutlined />,          label: '부서 관리' },
     { key: 'admins',         icon: <UserOutlined />,          label: '관리자 계정' },
+    { key: 'deletion-log',   icon: <DeleteOutlined />,        label: '삭제 보고서' },
   ]
 
   const NAV_TITLE = {
-    docs: '문서 목록', failed: '실패 문서',
+    docs: '문서 목록', failed: '확인 필요 문서',
     category: '카테고리', departments: '부서 관리', admins: '관리자 계정',
+    'deletion-log': '삭제 보고서',
   }
+
+  // 삭제 보고서 — 관리자가 문서를 삭제할 때 남긴 사유·삭제자·시각 기록. 탭을 열 때만 조회한다.
+  const { data: deletionLogs = [], isLoading: loadingDeletionLogs } = useQuery({
+    queryKey: ['deletion-logs'],
+    queryFn: fetchDeletionLogs,
+    enabled: navKey === 'deletion-log',
+  })
+
+  const deletionLogColumns = [
+    { title: '파일명',   dataIndex: 'filename',   key: 'filename', ellipsis: true },
+    { title: '카테고리', dataIndex: 'category',   key: 'category', width: 110, render: (c) => c ? (CAT_LABEL[c] ?? c) : '-' },
+    { title: '삭제한 관리자', dataIndex: 'deleted_by', key: 'deleted_by', width: 200 },
+    { title: '사유', dataIndex: 'reason', key: 'reason' },
+    { title: '삭제 시각', dataIndex: 'deleted_at', key: 'deleted_at', width: 170, render: (t) => (t || '').slice(0, 16) },
+  ]
 
   return (
     <div style={{ maxWidth: 1400, margin: '0 auto', padding: '24px 24px 40px' }}>
@@ -578,9 +623,7 @@ export default function AdminPage({ onNavigate }) {
                     <Button disabled={!bulkCategory} loading={bulkCategoryMutation.isPending}>카테고리 일괄 변경</Button>
                   </Popconfirm>
                   <div style={{ width: 1, height: 20, background: '#d0e8ff', margin: '0 4px' }} />
-                  <Popconfirm title={`선택한 ${selectedRowKeys.length}개 문서를 모두 삭제할까요?`} okText="삭제" cancelText="취소" onConfirm={() => bulkDeleteMutation.mutate(selectedRowKeys)}>
-                    <Button danger icon={<DeleteOutlined />} loading={bulkDeleteMutation.isPending}>선택 삭제</Button>
-                  </Popconfirm>
+                  <Button danger icon={<DeleteOutlined />} loading={bulkDeleteMutation.isPending} onClick={() => { setDeleteTarget({ type: 'bulk', ids: selectedRowKeys }); setDeleteReason('') }}>선택 삭제</Button>
                   <Button onClick={() => { setSelectedRowKeys([]); setBulkCategory(null) }}>선택 해제</Button>
                 </div>
               )}
@@ -597,13 +640,26 @@ export default function AdminPage({ onNavigate }) {
           {navKey === 'failed' && (
             <>
               <Alert
-                type="error"
+                type="warning"
                 showIcon
                 style={{ marginBottom: 16 }}
-                title="파싱에 실패한 문서만 모아둔 목록입니다"
-                description="상태(빨간 태그)에 마우스를 올리면 실패 사유가 보입니다. '재시도' 버튼으로 다시 파싱을 시도하거나, 필요 없는 문서는 삭제할 수 있습니다."
+                message="확인이 필요한 문서만 모아둔 목록입니다"
+                description="파싱에 실패했거나(상태에 마우스를 올리면 실패 사유가 보입니다), OCR 저신뢰 페이지가 있어 검토가 필요한 문서(OCR 열의 '검토' 태그)가 표시됩니다. 실패 문서는 '재시도' 버튼으로 다시 파싱하거나, 필요 없으면 삭제할 수 있습니다."
               />
-              <Table columns={docColumns} dataSource={failedDocuments} rowKey="id" loading={loadingDocs} pagination={{ pageSize: 10 }} />
+              <Table columns={docColumns} dataSource={needsReviewDocuments} rowKey="id" loading={loadingDocs} pagination={{ pageSize: 10 }} />
+            </>
+          )}
+
+          {navKey === 'deletion-log' && (
+            <>
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 16 }}
+                message="관리자가 삭제한 문서의 감사 기록입니다"
+                description="누가/언제/무엇을/왜 삭제했는지 확인할 수 있습니다. 이 기록은 3개월이 지나면 자동으로 삭제됩니다."
+              />
+              <Table columns={deletionLogColumns} dataSource={deletionLogs} rowKey="id" loading={loadingDeletionLogs} pagination={{ pageSize: 20 }} />
             </>
           )}
 
@@ -673,29 +729,49 @@ export default function AdminPage({ onNavigate }) {
                                 {label} {stats.by_category?.[cat] ?? 0}
                               </Tag.CheckableTag>
                               {/* 고정 5종(사양서·연구자료·발표자료·보고서·기타)은 수정·삭제 불가 — 커스텀 카테고리만 버튼 노출 */}
-                              {!(cat in CAT_LABEL) && (
-                                <>
-                                  <Button
-                                    type="text" size="small"
-                                    icon={<EditOutlined style={{ fontSize: 11 }} />}
-                                    style={{ padding: '0 4px', height: 20 }}
-                                    onClick={() => { setRenamingCategory(cat); setRenameValue(label) }}
-                                  />
-                                  <Popconfirm
-                                    title={`"${label}" 카테고리를 삭제할까요?`}
-                                    description="이 카테고리의 문서는 전부 '보고서'로 재분류됩니다."
-                                    okText="삭제" cancelText="취소"
-                                    onConfirm={() => deleteCategory(cat)}
-                                  >
+                              {!(cat in CAT_LABEL) && (() => {
+                                const docCount = stats.by_category?.[cat] ?? 0
+                                return (
+                                  <>
                                     <Button
-                                      type="text" size="small" danger
-                                      icon={<DeleteOutlined style={{ fontSize: 11 }} />}
+                                      type="text" size="small"
+                                      icon={<EditOutlined style={{ fontSize: 11 }} />}
                                       style={{ padding: '0 4px', height: 20 }}
-                                      loading={bulkCategoryMutation.isPending}
+                                      onClick={() => { setRenamingCategory(cat); setRenameValue(label) }}
                                     />
-                                  </Popconfirm>
-                                </>
-                              )}
+                                    <Button
+                                      type="text" size="small"
+                                      icon={<SwapOutlined style={{ fontSize: 11 }} />}
+                                      style={{ padding: '0 4px', height: 20 }}
+                                      disabled={docCount === 0}
+                                      onClick={() => { setMovingCategory(cat); setMoveTarget(null) }}
+                                    />
+                                    {docCount > 0 ? (
+                                      <Tooltip title="문서가 남아있는 카테고리는 삭제할 수 없습니다 — 먼저 다른 카테고리로 이동해주세요">
+                                        <Button
+                                          type="text" size="small" danger disabled
+                                          icon={<DeleteOutlined style={{ fontSize: 11 }} />}
+                                          style={{ padding: '0 4px', height: 20 }}
+                                        />
+                                      </Tooltip>
+                                    ) : (
+                                      <Popconfirm
+                                        title={`"${label}" 카테고리를 삭제할까요?`}
+                                        description="문서가 없는 빈 카테고리입니다."
+                                        okText="삭제" cancelText="취소"
+                                        onConfirm={() => deleteCategory(cat)}
+                                      >
+                                        <Button
+                                          type="text" size="small" danger
+                                          icon={<DeleteOutlined style={{ fontSize: 11 }} />}
+                                          style={{ padding: '0 4px', height: 20 }}
+                                          loading={bulkCategoryMutation.isPending}
+                                        />
+                                      </Popconfirm>
+                                    )}
+                                  </>
+                                )
+                              })()}
                             </>
                           )}
                         </span>
@@ -967,6 +1043,51 @@ export default function AdminPage({ onNavigate }) {
         </Col>
 
       </Row>
+
+      {/* ── 카테고리 문서 이동 모달 ──────────────────────────────────────── */}
+      <Modal
+        title={movingCategory ? `"${CAT_LABEL[movingCategory] ?? movingCategory}" 카테고리의 문서 이동` : '문서 이동'}
+        open={!!movingCategory}
+        onCancel={() => { setMovingCategory(null); setMoveTarget(null) }}
+        onOk={moveCategory}
+        okText="이동" cancelText="취소"
+        okButtonProps={{ disabled: !moveTarget, loading: bulkCategoryMutation.isPending }}
+        destroyOnClose
+      >
+        <p>
+          이 카테고리의 문서 {stats?.by_category?.[movingCategory] ?? 0}개를 옮겨갈 카테고리를 선택하세요.
+          이동 후 빈 카테고리가 되면 삭제할 수 있습니다.
+        </p>
+        <Select
+          placeholder="이동할 카테고리 선택"
+          value={moveTarget}
+          onChange={setMoveTarget}
+          style={{ width: '100%' }}
+          options={allCategoryOptions.filter(o => o.value !== movingCategory)}
+        />
+      </Modal>
+
+      {/* ── 삭제 사유 입력 모달 (단건/일괄 공용) ──────────────────────────────── */}
+      <Modal
+        title={deleteTarget?.type === 'bulk' ? `선택한 ${deleteTarget.ids.length}개 문서 삭제` : '문서 삭제'}
+        open={!!deleteTarget}
+        onCancel={() => { setDeleteTarget(null); setDeleteReason('') }}
+        onOk={confirmDelete}
+        okText="삭제" cancelText="취소"
+        okButtonProps={{ danger: true, disabled: !deleteReason.trim(), loading: deleteMutation.isPending || bulkDeleteMutation.isPending }}
+        destroyOnClose
+      >
+        <p>삭제 사유를 입력해야 삭제할 수 있습니다 — 나중에 관리자 전용 "삭제 보고서" 화면에서 확인할 수 있습니다.</p>
+        <Input.TextArea
+          autoFocus
+          rows={3}
+          maxLength={300}
+          showCount
+          placeholder="삭제 사유 (필수)"
+          value={deleteReason}
+          onChange={(e) => setDeleteReason(e.target.value)}
+        />
+      </Modal>
 
       {/* ── OCR 수동 수정 모달 ──────────────────────────────────────── */}
       <Modal title={ocrDoc ? `OCR 수동 수정 — ${ocrDoc.filename}` : 'OCR 수동 수정'} open={ocrModal} onCancel={() => setOcrModal(false)} footer={null} width={680} destroyOnClose>
