@@ -348,7 +348,15 @@ export default function UploadPage({ onNavigate }) {
     return false
   }
 
+  // 같은 파일명에 대해 확인 팝업이 두 번 뜨는 걸 막는 잠금 — antd Upload/Dragger가
+  // (원인 불명확) 같은 파일 선택에 대해 beforeUpload를 두 번 호출하는 경우가 있어서,
+  // 이미 확인 중/팝업이 떠 있는 파일명은 재진입 호출을 그냥 무시한다.
+  const pendingCheckRef = useRef(new Set())
+
   const handleUpload = async (file) => {
+    if (pendingCheckRef.current.has(file.name)) return false
+    pendingCheckRef.current.add(file.name)
+
     try {
       const res = await axios.get(`${API}/upload/check`, { params: { filename: file.name } })
       if (res.data.exists) {
@@ -368,12 +376,14 @@ export default function UploadPage({ onNavigate }) {
           okText: '버전 추가',
           cancelText: '취소',
           onOk: () => doUpload(file),
+          afterClose: () => pendingCheckRef.current.delete(file.name),
         })
         return false
       }
     } catch {
       // 네트워크 오류 시 중복 체크 없이 그냥 업로드 진행
     }
+    pendingCheckRef.current.delete(file.name)
     doUpload(file)
     return false
   }
@@ -634,18 +644,25 @@ export default function UploadPage({ onNavigate }) {
               <Modal
                 title="카테고리·특이사항 설정"
                 open={!!promptFile}
-                onCancel={() => setPromptFile(null)}
-                onOk={savePrompt}
-                okText="저장"
-                confirmLoading={promptSaving}
+                closable={false}
+                maskClosable={false}
+                keyboard={false}
+                footer={[
+                  <Button key="ok" type="primary" loading={promptSaving} disabled={!promptCategory} onClick={savePrompt}>
+                    저장
+                  </Button>,
+                ]}
               >
                 <Text type="secondary" style={{ fontSize: 12.5, display: 'block', marginBottom: 14 }}>
                   {promptFile?.filename}
                 </Text>
 
                 <div style={{ marginBottom: 14 }}>
-                  <Text strong style={{ fontSize: 12.5 }}>카테고리</Text>
-                  <div style={{ marginTop: 8 }}>
+                  <Text strong style={{ fontSize: 12.5 }}>카테고리 <Text type="danger">*</Text></Text>
+                  <div style={{ marginTop: 2, marginBottom: 8 }}>
+                    <Text type="secondary" style={{ fontSize: 11.5 }}>카테고리를 선택해야 저장하고 닫을 수 있습니다 — 미지정 상태로 남지 않도록 하기 위함입니다.</Text>
+                  </div>
+                  <div>
                     <Space wrap size={[8, 8]}>
                       {allCategories.map(c => (
                         <Button
