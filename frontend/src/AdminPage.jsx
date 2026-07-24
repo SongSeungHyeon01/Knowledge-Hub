@@ -522,10 +522,10 @@ export default function AdminPage({ onNavigate }) {
   const leftMenuItems = [
     { key: 'docs',           icon: <UnorderedListOutlined />, label: '문서 목록' },
     { key: 'failed',         icon: <WarningOutlined />,        label: `확인 필요 문서 (${needsReviewDocuments.length})` },
+    { key: 'deletion-log',   icon: <DeleteOutlined />,        label: '삭제 보고서' },
     { key: 'category',       icon: <FolderOutlined />,        label: '카테고리' },
     { key: 'departments',    icon: <TeamOutlined />,          label: '부서 관리' },
     { key: 'admins',         icon: <UserOutlined />,          label: '관리자 계정' },
-    { key: 'deletion-log',   icon: <DeleteOutlined />,        label: '삭제 보고서' },
   ]
 
   const NAV_TITLE = {
