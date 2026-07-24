@@ -42,11 +42,18 @@ def convert(src_path: str, target_fmt: str) -> str:
     out_dir = tempfile.mkdtemp(prefix="km_lo_")
     lo_profile = Path(out_dir) / "lo_profile"
 
+    # [수정 2026-07-25] f"file://{lo_profile}"는 POSIX 경로("/tmp/...")에서는 우연히
+    # 올바른 URI가 되지만(file:// + 절대경로의 선행 "/" = file:///tmp/...), Windows
+    # 경로(예: "C:\Users\...")에서는 슬래시 방향도 다르고 앞의 "/"도 없어 잘못된 URI가
+    # 되어 LibreOffice가 내부적으로 "libpng error: Write Error"를 내며 변환에 실패한다
+    # (로컬 Windows 개발 환경에서 HWP/PPTX 변환 시 실제로 재현 확인, 배포 환경은 Linux라
+    # 지금까지 드러나지 않았음). Path.as_uri()는 두 플랫폼 모두에서 올바른 file:// URI를
+    # 만들어준다.
     try:
         result = subprocess.run(
             [
                 soffice,
-                f"-env:UserInstallation=file://{lo_profile}",
+                f"-env:UserInstallation={lo_profile.as_uri()}",
                 "--headless",
                 "--convert-to", target_fmt,
                 "--outdir", out_dir,

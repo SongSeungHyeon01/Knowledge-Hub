@@ -1,29 +1,27 @@
 """
-search.py — 청킹 + 임베딩 + BM25 + 하이브리드 검색 통합 모듈
+search.py — 청킹 + BM25 토크나이저 모듈
 ==============================================================
-담당 : 김태훈 ③  (임베딩 + 하이브리드 검색엔진 + 청킹)
-연결 : 윤준서① parse_pdf() 출력 → ingest(parse_result, searcher)
-       HybridSearcher.search(query) → 김기빈④ Backend API
+main.py가 실제로 쓰는 건 이 파일의 두 가지뿐이다:
+  - chunk_text()   : 섹션 헤더 우선 청킹 (문서 인덱싱 시 사용)
+  - BM25Indexer     : 언어감지 토크나이저(_tokenize/_tokenize_query) — 유사 검색
+                       후보 안에서 매 쿼리마다 즉석으로 BM25 재랭킹할 때 사용
 
-공개 API
---------
-searcher = HybridSearcher()
-ingest(parse_result, searcher)          # 문서 인덱싱
-results = searcher.search(query, top_k) # 하이브리드 검색
-searcher.delete_document(doc_id)        # 문서 삭제
+[정리 2026-07-25] 이 파일은 원래 임베딩·벡터저장소·하이브리드 검색엔진까지 포함한
+독립 모듈(HybridSearcher 등)로 작성됐었다. 하지만 main.py는 자체 turbovec
+인덱스·임베딩 로더·검색/RRF 로직을 따로 구현해 쓰고 있어(환경 독립 아키텍처·
+PostgreSQL 저장 등 요구사항이 달랐음), 이 파일의 Embedder/VectorStore/
+HybridSearcher/ingest()와 한↔영 동의어 보강 로직은 한 번도 호출되지 않는 죽은
+코드였다 — 실제 사용처(chunk_text, BM25Indexer)만 남기고 정리했다.
 """
 
 import json
 import os
 import pickle
 import re
-import numpy as np
 from pathlib import Path
 
-from sentence_transformers import SentenceTransformer
 from kiwipiepy import Kiwi
 from rank_bm25 import BM25Okapi
-import turbovec
 
 
 # ── 경로 / 전역 상수 ─────────────────────────────────────────────────────────
@@ -36,18 +34,8 @@ import turbovec
 # main.py가 보는 uploads/parsed와 이 검색 인덱스가 서로 다른 위치를 보는 일이 없어야 한다.
 _BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # backend/search/ → backend/
 _DATA_DIR   = Path(os.environ.get("DATA_DIR", os.path.join(_BACKEND_DIR, "data")))
-_INDEX_PATH = _DATA_DIR / "index.tvim"
-_VEC_META   = _DATA_DIR / "vec_meta.json"
 _BM25_PATH  = _DATA_DIR / "bm25.pkl"
 _BM25_META  = _DATA_DIR / "bm25_meta.json"
-
-_MODEL_NAME  = "paraphrase-multilingual-MiniLM-L12-v2"
-_LOCAL_MODEL = Path(__file__).parent / "models" / _MODEL_NAME  # 폐쇄망 로컬 경로
-
-# RRF k값: BM25는 낮게(rank 1 가중치 강화), 벡터는 표준값 유지
-# BM25 k=30 → 단일 정확 매칭 쿼리(tDQSCK 등)에서 rank 1 이점 강화
-_RRF_K_BM25 = 30
-_RRF_K_VEC  = 60
 
 # 청킹 상수 (PRD 4차 수정 기준: 512토큰 / 50토큰 오버랩)
 _MAX_CHUNK_CHARS = 400  # ≈ 270 tokens (한/영 평균 약 1.5자/토큰, 512토큰 이내 안전 마진)
@@ -157,117 +145,7 @@ def _make_chunk(doc_id: str, idx: int, text: str, char_start: int, char_end: int
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# 2. 임베딩 (Embedder)
-# ════════════════════════════════════════════════════════════════════════════
-
-class Embedder:
-    """
-    paraphrase-multilingual-MiniLM-L12-v2 기반 384차원 다국어 임베딩.
-    로컬 models/ 폴더가 있으면 오프라인 로딩 (폐쇄망 대응).
-    """
-
-    def __init__(self):
-        src = str(_LOCAL_MODEL) if _LOCAL_MODEL.exists() else _MODEL_NAME
-        print(f"[임베딩] 모델 로딩: {src}")
-        self.model = SentenceTransformer(src)
-        print("[임베딩] 로딩 완료")
-
-    def embed(self, texts: list[str], batch_size: int = 64) -> np.ndarray:
-        """텍스트 리스트 → (N, 384) float32 배열 (L2 정규화)."""
-        if not texts:
-            return np.zeros((0, 384), dtype=np.float32)
-        cleaned = [t if t and t.strip() else " " for t in texts]
-        vectors = self.model.encode(
-            cleaned,
-            batch_size=batch_size,
-            show_progress_bar=False,
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-        )
-        return vectors.astype(np.float32)
-
-    def embed_one(self, text: str) -> np.ndarray:
-        """텍스트 1개 → (384,) 벡터 (검색 쿼리용)."""
-        if not text or not text.strip():
-            raise ValueError("검색 쿼리가 비어 있습니다.")
-        return self.embed([text])[0]
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# 3. 벡터 저장소 (VectorStore)
-# ════════════════════════════════════════════════════════════════════════════
-
-class VectorStore:
-    """
-    turbovec IdMapIndex 기반 벡터 저장·검색.
-    data/index.tvim + data/vec_meta.json 으로 영속화.
-    """
-
-    def __init__(self):
-        if _INDEX_PATH.exists() and _VEC_META.exists():
-            self._load()
-        else:
-            self.index      = turbovec.IdMapIndex(dim=384, bit_width=4)
-            self.metadata   = {}   # {str(uint_id): {chunk_id, doc_id, text}}
-            self.id_counter = 0
-
-    def add_batch(self, chunks: list[dict], vectors: np.ndarray):
-        """청크 + 벡터 배치 추가."""
-        if not chunks:
-            return
-        n   = len(chunks)
-        ids = np.arange(self.id_counter, self.id_counter + n, dtype=np.uint64)
-        self.index.add_with_ids(vectors.astype(np.float32), ids)
-        for i, c in enumerate(chunks):
-            self.metadata[str(self.id_counter + i)] = {
-                "chunk_id": c["chunk_id"],
-                "doc_id":   c["doc_id"],
-                "text":     c["text"],
-            }
-        self.id_counter += n
-        self._save()
-
-    def search(self, query_vector: np.ndarray, top_k: int = 10) -> list[dict]:
-        """유사 벡터 검색. score 내림차순 반환."""
-        if not self.metadata:
-            return []
-        actual_k    = min(top_k, len(self.metadata))
-        queries     = query_vector.reshape(1, -1).astype(np.float32)
-        scores, ids = self.index.search(queries, actual_k)
-        return [
-            {**self.metadata[str(uid)], "score": float(s)}
-            for s, uid in zip(scores[0], ids[0])
-            if str(uid) in self.metadata
-        ]
-
-    def delete_document(self, doc_id: str):
-        """doc_id에 해당하는 청크 전체 삭제."""
-        targets = [uid for uid, m in self.metadata.items() if m["doc_id"] == doc_id]
-        for uid in targets:
-            self.index.remove(int(uid))
-            del self.metadata[uid]
-        self._save()
-        print(f"[VectorStore] doc_id='{doc_id}' 청크 {len(targets)}개 삭제")
-
-    def _save(self):
-        _DATA_DIR.mkdir(parents=True, exist_ok=True)
-        self.index.write(str(_INDEX_PATH))
-        _VEC_META.write_text(
-            json.dumps({"metadata": self.metadata, "id_counter": self.id_counter},
-                       ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-
-    def _load(self):
-        self.index      = turbovec.IdMapIndex.load(str(_INDEX_PATH))
-        data            = json.loads(_VEC_META.read_text(encoding="utf-8"))
-        self.metadata   = data["metadata"]
-        self.id_counter = data["id_counter"]
-        print(f"[VectorStore] 기존 인덱스 복원: {len(self.metadata)}개 청크")
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# 4. BM25 색인 (BM25Indexer)
+# 2. BM25 색인 (BM25Indexer)
 # ════════════════════════════════════════════════════════════════════════════
 
 # 한국어 형태소 분석에서 보존할 품사
@@ -410,234 +288,3 @@ class BM25Indexer:
         self.metadata = json.loads(_BM25_META.read_text(encoding="utf-8"))
         self._rebuild()
         print(f"[BM25] 기존 인덱스 복원: {len(self.metadata)}개 청크")
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# 5. 하이브리드 검색 / RRF (HybridSearcher)
-# ════════════════════════════════════════════════════════════════════════════
-
-# 반도체/FPGA 도메인 영어→한국어 기술 용어 매핑
-# 포함 기준: 도메인 특정 용어 (코퍼스 내 IDF 높음)
-# 제외 기준: interface/signal/clock처럼 모든 문서에 등장하는 범용 단어
-#            → 추가 시 한국어 문서 전체를 무차별 부스팅해 역효과
-_EN_TO_KO_TECH: dict[str, str] = {
-    "oscilloscope":     "오실로스코프",
-    "timing margin":    "타이밍 마진",
-    "margin":           "마진",
-    "measurement":      "측정",
-    "erase":            "소거",
-    "bad block":        "배드 블록",
-    "endurance":        "내구성",
-    "temperature":      "온도",
-    "high temperature": "고온",
-    "low temperature":  "저온",
-    "synthesis":        "합성",
-    "utilization":      "사용률",
-    "simulation":       "시뮬레이션",
-}
-
-
-def _augment_en_to_ko(query: str) -> str:
-    """영어 쿼리에 한국어 기술 동의어를 추가해 한국어 문서 BM25 매칭 지원.
-    이미 한국어 문자가 있거나 매핑되는 용어가 없으면 원본 반환.
-    """
-    if any('가' <= c <= '힣' for c in query):
-        return query
-    q_lower = query.lower()
-    extras: list[str] = []
-    for en_term in sorted(_EN_TO_KO_TECH, key=len, reverse=True):
-        if en_term in q_lower:
-            ko = _EN_TO_KO_TECH[en_term]
-            if ko not in extras:
-                extras.append(ko)
-    return (query + " " + " ".join(extras)) if extras else query
-
-
-# 한국어→영어 기술 용어 매핑 (KO→EN 교차 언어 BM25 지원)
-# 포함 기준: 복합 도메인 특정 용어만 — 단일 일반 명사(제어, 상태 등) 제외
-_KO_TO_EN_TECH: dict[str, str] = {
-    "타이밍 제약":  "timing constraint set_false_path set_multicycle",
-    "클럭 경로":   "clock path set_false_path",
-    "예외 처리":   "exception set_false_path multicycle set_multicycle_path",
-    "산포 수집":   "scatter gather",
-    "전송 엔진":   "DMA",
-    "레지스터 맵":  "NFC_CTRL NFC_STATUS register map offset",
-    "음수 슬랙":   "negative slack",
-    "체크포인트":  "checkpoint",
-}
-
-
-def _augment_ko_to_en(query: str) -> str:
-    """한국어 쿼리에 영어 기술 동의어를 추가해 영어 문서 BM25 매칭 지원.
-    한국어 문자가 없거나 매핑 용어가 없으면 원본 반환.
-    """
-    if not any('가' <= c <= '힣' for c in query):
-        return query
-    extras: list[str] = []
-    for ko_term in sorted(_KO_TO_EN_TECH, key=len, reverse=True):
-        if ko_term in query:
-            en = _KO_TO_EN_TECH[ko_term]
-            if en not in extras:
-                extras.append(en)
-    return (query + " " + " ".join(extras)) if extras else query
-
-
-class HybridSearcher:
-    """
-    BM25 + 벡터 검색을 RRF로 합산하는 하이브리드 검색 엔진.
-
-    score = 1/(60 + bm25_rank) + 1/(60 + vec_rank)
-
-    주요 메서드
-    -----------
-    index_document(doc_id, chunks)  문서 인덱싱 (중복 시 자동 upsert)
-    search(query, top_k)            하이브리드 검색
-    delete_document(doc_id)         문서 삭제
-    """
-
-    def __init__(self):
-        self.embedder  = Embedder()
-        self.vec_store = VectorStore()
-        self.bm25      = BM25Indexer()
-
-    def index_document(self, doc_id: str, chunks: list[dict]) -> list[list[str]]:
-        """인덱싱 후 각 청크의 tokenized_text 반환 (김기빈④ PostgreSQL 저장용)."""
-        if not chunks:
-            print(f"[HybridSearcher] '{doc_id}' 청크 없음 — 인덱싱 건너뜀")
-            return []
-        if self._exists(doc_id):
-            print(f"[HybridSearcher] '{doc_id}' 이미 존재 — 기존 데이터 삭제 후 재인덱싱")
-            self.delete_document(doc_id)
-        texts     = [c["text"] for c in chunks]
-        vectors   = self.embedder.embed(texts)
-        self.vec_store.add_batch(chunks, vectors)
-        tokenized = self.bm25.add_batch(chunks)
-        print(f"[HybridSearcher] '{doc_id}' 청크 {len(chunks)}개 인덱싱 완료")
-        return tokenized
-
-    def search(self, query: str, top_k: int = 10) -> list[dict]:
-        """
-        하이브리드 검색 결과 반환.
-        반환 형식: [{"chunk_id", "doc_id", "text", "score", "bm25_rank", "vec_rank"}, ...]
-        """
-        if not query or not query.strip():
-            raise ValueError("검색 쿼리가 비어 있습니다.")
-
-        total   = len(self.vec_store.metadata)
-        fetch_k = min(max(top_k * 3, 30), total) if total > 0 else top_k
-
-        # 교차 언어 BM25 보강: 한국어 쿼리→영어 동의어 / 영어 쿼리→한국어 동의어
-        if any('가' <= c <= '힣' for c in query):
-            bm25_query = _augment_ko_to_en(query)
-        else:
-            bm25_query = _augment_en_to_ko(query)
-        bm25_results = self.bm25.search(bm25_query, top_k=fetch_k)
-        query_vec    = self.embedder.embed_one(query)
-        vec_results  = self.vec_store.search(query_vec, top_k=fetch_k)
-
-        rrf_scores: dict[str, dict] = {}
-
-        for rank, r in enumerate(bm25_results):
-            cid = r["chunk_id"]
-            if cid not in rrf_scores:
-                rrf_scores[cid] = {"chunk_id": cid, "doc_id": r["doc_id"],
-                                   "text": r["text"], "score": 0.0,
-                                   "bm25_rank": None, "vec_rank": None}
-            rrf_scores[cid]["score"]    += 1 / (_RRF_K_BM25 + rank + 1)
-            rrf_scores[cid]["bm25_rank"] = rank + 1
-
-        for rank, r in enumerate(vec_results):
-            cid = r["chunk_id"]
-            if cid not in rrf_scores:
-                rrf_scores[cid] = {"chunk_id": cid, "doc_id": r["doc_id"],
-                                   "text": r["text"], "score": 0.0,
-                                   "bm25_rank": None, "vec_rank": None}
-            rrf_scores[cid]["score"]   += 1 / (_RRF_K_VEC + rank + 1)
-            rrf_scores[cid]["vec_rank"] = rank + 1
-
-        return sorted(rrf_scores.values(), key=lambda x: x["score"], reverse=True)[:top_k]
-
-    def delete_document(self, doc_id: str):
-        """벡터 DB + BM25 양쪽에서 문서 삭제."""
-        self.vec_store.delete_document(doc_id)
-        self.bm25.delete_document(doc_id)
-
-    def _exists(self, doc_id: str) -> bool:
-        return any(m["doc_id"] == doc_id for m in self.vec_store.metadata.values())
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# 6. 파이프라인 (윤준서①↔김태훈③ 연결)
-# ════════════════════════════════════════════════════════════════════════════
-
-def ingest(parse_result: dict, searcher: HybridSearcher) -> dict:
-    """
-    윤준서① parse_pdf() 결과를 받아 청킹 + 인덱싱까지 처리.
-
-    Parameters
-    ----------
-    parse_result : parse_pdf() 반환값
-        {source_file, status, error, pages: [{page, text, flagged, ...}]}
-    searcher : HybridSearcher 인스턴스
-
-    Returns
-    -------
-    {
-        "doc_id":        str | None,
-        "status":        "success" | "skipped" | "failed",
-        "error":         None | str,
-        "total_pages":   int,
-        "indexed_pages": int,
-        "flagged_pages": list[int],
-        "chunk_count":   int,
-    }
-    """
-    if parse_result["status"] == "failed":
-        return {"doc_id": None, "status": "failed",
-                "error": parse_result["error"],
-                "total_pages": 0, "indexed_pages": 0,
-                "flagged_pages": [], "chunk_count": 0}
-
-    doc_id        = Path(parse_result["source_file"]).stem
-    flagged_pages = []
-    texts         = []
-
-    for p in parse_result["pages"]:
-        if p["flagged"]:
-            flagged_pages.append(p["page"])
-            print(f"  [경고] '{doc_id}' {p['page']}페이지 — OCR 신뢰도 낮음, 건너뜀")
-            continue
-        if not p["text"] or not p["text"].strip():
-            continue
-        texts.append(p["text"])
-
-    if not texts:
-        return {"doc_id": doc_id, "status": "skipped",
-                "error": "모든 페이지의 OCR 신뢰도가 낮아 인덱싱 불가",
-                "total_pages": len(parse_result["pages"]),
-                "indexed_pages": 0, "flagged_pages": flagged_pages, "chunk_count": 0}
-
-    chunks = chunk_text(doc_id, "\n".join(texts))
-
-    if not chunks:
-        return {"doc_id": doc_id, "status": "skipped",
-                "error": "텍스트 추출 후 청킹 결과가 없습니다.",
-                "total_pages": len(parse_result["pages"]),
-                "indexed_pages": 0, "flagged_pages": flagged_pages, "chunk_count": 0}
-
-    tokenized = searcher.index_document(doc_id, chunks)
-
-    return {
-        "doc_id":          doc_id,
-        "status":          "success",
-        "error":           None,
-        "total_pages":     len(parse_result["pages"]),
-        "indexed_pages":   len(texts),
-        "flagged_pages":   flagged_pages,
-        "chunk_count":     len(chunks),
-        # 김기빈④ Backend API에서 PostgreSQL CHUNKS 테이블 tokenized_text TEXT[] 컬럼 저장용
-        "tokenized_chunks": [
-            {"chunk_id": c["chunk_id"], "tokenized_text": t}
-            for c, t in zip(chunks, tokenized)
-        ],
-    }

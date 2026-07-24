@@ -22,12 +22,10 @@ class Document(Base):
     filename      = Column(String, nullable=False)                  # 파일 이름
     title         = Column(String, nullable=True)                   # 자동 추출 문서 제목 (파싱 첫 줄)
     saved_path    = Column(String, nullable=False)                  # 저장 경로
-    file_type     = Column(String, nullable=True)                   # 파일 형식 (pdf/docx/pptx/xlsx/hwp/hwpx/txt/md/png/jpg)
+    file_type     = Column(String, nullable=True)                   # 파일 형식 (pdf/docx/pptx/xlsx/hwp/hwpx/txt/md)
     original_path = Column(String, nullable=True)                   # 원본 디렉토리 경로 (폴더 업로드 시 보존)
-    memo          = Column(Text, nullable=True)                     # 관리자 메모 (문서 설명)
+    memo          = Column(Text, nullable=True)                     # 특이사항 메모(업로드한 사용자 본인 또는 관리자가 입력·수정 가능, 검색 결과에 노출)
     category      = Column(String, nullable=False, default="report") # 문서 분류 (spec/research/presentation/report/other)
-    category_ai_suggested = Column(Boolean, nullable=False, default=False)  # 파싱 완료 후 AI(Ollama)가 이 카테고리를 자동 분류했는지
-    category_ai_checked   = Column(Boolean, nullable=False, default=False)  # AI 분류 "시도"가 끝났는지(성공/실패 무관) — 프론트가 분류 완료를 기다릴 때 씀
     status        = Column(String, nullable=False)                  # "success" 또는 "failed"
     error         = Column(Text, nullable=True)                     # 에러 메시지 (없으면 null)
     page_count    = Column(Integer, default=0)                      # 총 페이지 수
@@ -111,7 +109,11 @@ class SearchLog(Base):
 
     id           = Column(Integer, primary_key=True, index=True)  # 고유 번호
     query        = Column(String, nullable=False)                  # 검색어
-    alpha        = Column(Float, nullable=False)                   # 의미검색 비중 (0~1)
+    # [정리 2026-07-25] mode(filename/semantic) 도입 이전, alpha 슬라이더로 정확검색·
+    # 의미검색 반영 비율을 조절하던 옛 하이브리드 검색의 흔적 — 지금은 의미 없는 값이지만
+    # 컬럼 자체를 DROP하는 마이그레이션은 갖추지 않아 남겨둔다. default를 줘서 main.py가
+    # 더 이상 값을 직접 넣어줄 필요가 없게만 정리했다.
+    alpha        = Column(Float, nullable=False, default=0.5)      # (사용 안 함 — 레거시 컬럼)
     result_count = Column(Integer, default=0)                      # 검색 결과 수
     user_email   = Column(String, nullable=True, index=True)       # 검색한 계정(로그인 꺼져있으면 "anonymous")
     searched_at  = Column(DateTime, default=_kst_now)     # 검색 시각 (자동 기록)

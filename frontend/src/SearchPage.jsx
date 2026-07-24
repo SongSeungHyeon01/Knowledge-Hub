@@ -15,7 +15,6 @@ import {
   Space, Divider, Empty, Spin, Radio, List, Pagination, Tooltip, Alert, Select,
   Row, Col, Modal, message, DatePicker, AutoComplete,
 } from 'antd'
-import dayjs from 'dayjs'
 import {
   SearchOutlined, FileTextOutlined, HistoryOutlined, CloseOutlined,
   FilePdfOutlined, FileWordOutlined, FilePptOutlined, FileExcelOutlined,
@@ -102,7 +101,7 @@ const FILE_TYPE_ICON = {
   txt:  <FileTextOutlined style={{ color: '#8c8c8c' }} />,
 }
 
-export default function SearchPage({ onNavigate }) {
+export default function SearchPage() {
   const isNarrow = useIsNarrow()
   const [tipVisible,  setTipVisible]  = useState(
     () => localStorage.getItem('km_tip_closed') !== 'true'

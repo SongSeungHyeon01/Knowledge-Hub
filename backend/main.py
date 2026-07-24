@@ -13,14 +13,13 @@ import tarfile
 import time
 import numpy as np
 from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, Query, Body, BackgroundTasks, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware  # CORS 설정용
 import itsdangerous
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_requests
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete as sa_delete, update as sa_update
-from typing import Literal
 from datetime import datetime, timedelta
 
 from sqlalchemy import text
@@ -260,6 +259,34 @@ async def _scheduled_deletion_log_sweep_task():
             print(f"[deletion-log] 정리 실패: {e}")
 
 
+# ── 세션 블랙리스트(RevokedSession) 정리 (2026-07-25) ─────────────────────────
+# [수정] 원래는 lifespan 시작 시 딱 한 번만 청소했다 — 서버를 오래 재시작하지 않으면
+# SESSION_MAX_AGE(7일)가 지나 더 이상 조회할 필요 없는 항목이 계속 쌓이는 문제가 있었다.
+# 다른 3개 정리 태스크(백업·미러trash·삭제로그)와 같은 반복 백그라운드 패턴으로 통일한다.
+_REVOKED_SESSION_SWEEP_INTERVAL_SEC = int(os.environ.get("REVOKED_SESSION_SWEEP_INTERVAL_SEC", str(24 * 3600)))  # 정리 주기(기본 24시간)
+
+
+async def _sweep_revoked_sessions():
+    cutoff = datetime.now() - timedelta(seconds=SESSION_MAX_AGE)
+    async with AsyncSessionLocal() as sess:
+        result = await sess.execute(sa_delete(RevokedSession).where(RevokedSession.revoked_at < cutoff))
+        await sess.commit()
+        return result.rowcount
+
+
+async def _scheduled_revoked_session_sweep_task():
+    while True:
+        try:
+            await asyncio.sleep(_REVOKED_SESSION_SWEEP_INTERVAL_SEC)
+            removed = await _sweep_revoked_sessions()
+            if removed:
+                print(f"[session] 만료된 세션 블랙리스트 {removed}건 정리")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[session] 세션 블랙리스트 정리 실패: {e}")
+
+
 # ── DB 백업 (2026-07-23) ──────────────────────────────────────────────────
 # 지금까지 백업 수단이 전혀 없었다 — 로컬 SQLite 파일이 지워지거나 프로덕션
 # PostgreSQL이 손상되면 복구할 방법이 없는 상태였다. Railway Volume(DATA_DIR)에
@@ -347,14 +374,11 @@ async def lifespan(_):
         _extra_admin_emails.update(e.lower() for e in rows)
         print(f"[startup] 추가 관리자 이메일 {len(_extra_admin_emails)}개 로드")
 
-    # 세션 블랙리스트 청소 — SESSION_MAX_AGE보다 오래된 항목은 그 세션 토큰 자체가
-    # 이미 자연 만료됐을 시점이라 더 이상 조회할 필요가 없다(무한정 쌓이는 것 방지).
-    async with AsyncSessionLocal() as sess:
-        cutoff = datetime.now() - timedelta(seconds=SESSION_MAX_AGE)
-        result = await sess.execute(sa_delete(RevokedSession).where(RevokedSession.revoked_at < cutoff))
-        await sess.commit()
-        if result.rowcount:
-            print(f"[startup] 만료된 세션 블랙리스트 {result.rowcount}건 정리")
+    # 세션 블랙리스트 청소 — 서버 시작 시 한 번 정리하고, 이후로는 반복 백그라운드
+    # 태스크(_scheduled_revoked_session_sweep_task)가 주기적으로 계속 정리한다.
+    removed = await _sweep_revoked_sessions()
+    if removed:
+        print(f"[startup] 만료된 세션 블랙리스트 {removed}건 정리")
 
     # [수정 2026-07-06] ALTER TABLE 5개를 engine.begin() 하나(트랜잭션 하나)에 묶지 않고
     # 각각 독립 트랜잭션에서 실행한다. PostgreSQL은 트랜잭션 안에서 문장 하나가 에러(예:
@@ -371,8 +395,6 @@ async def lifespan(_):
         "ALTER TABLE documents ADD COLUMN updated_at DATETIME",
         "ALTER TABLE documents ADD COLUMN view_count INTEGER DEFAULT 0",
         "ALTER TABLE documents ADD COLUMN uploaded_by VARCHAR",
-        "ALTER TABLE documents ADD COLUMN category_ai_suggested BOOLEAN DEFAULT false",
-        "ALTER TABLE documents ADD COLUMN category_ai_checked BOOLEAN DEFAULT false",
         "ALTER TABLE documents ADD COLUMN department VARCHAR",
         "ALTER TABLE users ADD COLUMN department VARCHAR",
         "ALTER TABLE search_logs ADD COLUMN user_email VARCHAR",
@@ -437,18 +459,22 @@ async def lifespan(_):
     deletion_log_sweep_task = asyncio.create_task(_scheduled_deletion_log_sweep_task())
     print(f"[startup] 삭제 보고서 정리 태스크 시작 (주기 {_DELETION_LOG_SWEEP_INTERVAL_SEC}s, 보관 {_DELETION_LOG_RETENTION_DAYS}일)")
 
+    revoked_session_sweep_task = asyncio.create_task(_scheduled_revoked_session_sweep_task())
+    print(f"[startup] 세션 블랙리스트 정리 태스크 시작 (주기 {_REVOKED_SESSION_SWEEP_INTERVAL_SEC}s)")
+
     yield
 
     sweep_task.cancel()
     backup_task.cancel()
     mirror_trash_task.cancel()
     deletion_log_sweep_task.cancel()
-    for t in (sweep_task, backup_task, mirror_trash_task, deletion_log_sweep_task):
+    revoked_session_sweep_task.cancel()
+    for t in (sweep_task, backup_task, mirror_trash_task, deletion_log_sweep_task, revoked_session_sweep_task):
         try:
             await t
         except asyncio.CancelledError:
             pass
-    print("[shutdown] 정체 문서 스윕·백업·미러 trash·삭제 보고서 정리 태스크 종료")
+    print("[shutdown] 정체 문서 스윕·백업·미러 trash·삭제 보고서·세션 블랙리스트 정리 태스크 종료")
 
 
 # FastAPI 앱 객체를 만듭니다
@@ -1229,9 +1255,9 @@ async def _ingest_chunks_to_db(doc_id: int, pages: list):
             await sess.execute(
                 sa_delete(Chunk).where(Chunk.doc_id == doc_id)
             )
-            for i, (text, pnum) in enumerate(zip(chunks, pnums)):
+            for i, (chunk_text_val, pnum) in enumerate(zip(chunks, pnums)):
                 emb_bytes = embs[i].tobytes() if embs is not None else None
-                chunk_row = Chunk(doc_id=doc_id, text=text, page_num=pnum, chunk_idx=i, embedding=emb_bytes)
+                chunk_row = Chunk(doc_id=doc_id, text=chunk_text_val, page_num=pnum, chunk_idx=i, embedding=emb_bytes)
                 sess.add(chunk_row)
             await sess.flush()  # IDs 확보
             await sess.commit()
@@ -1913,24 +1939,6 @@ async def 문서_상세(doc_id: int, db: AsyncSession = Depends(get_db)):
     }
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 검색 엔진 교체 지점 (김태훈 ③)
-#
-# 아래 함수 `실제_검색_실행` 하나만 교체하면 됩니다.
-# 입력:  q (검색어), alpha (의미검색 비중 0~1), category (카테고리 or None), db (DB 세션)
-# 출력:  아래 형태의 딕셔너리 리스트
-#   [
-#     {
-#       "doc_id":   int,    # DB의 Document.id
-#       "filename": str,    # 파일명
-#       "category": str,    # spec / research / presentation / report / other
-#       "pages":    int,    # 페이지 수
-#       "snippet":  str,    # 검색 결과 미리보기 텍스트
-#       "score":    float,  # 관련도 점수 (0~1)
-#     },
-#     ...
-#   ]
-# ──────────────────────────────────────────────────────────────────────────────
 def _extract_snippet_multi(text: str, tokens: list, max_len: int = 200) -> str:
     """여러 토큰이 가장 밀집된 위치에서 스니펫을 추출합니다."""
     if not tokens or not text.strip():
@@ -2208,10 +2216,10 @@ async def 실제_검색_실행(q: str, mode: str, category, db: AsyncSession, up
 # GET /search — 문서 검색 엔드포인트
 # 파라미터:
 #   q        : 검색어 (예: "모터 설계 사양")
-#   alpha    : (레거시 호환용 — 더 이상 결과에 영향 없음. 정확검색·의미검색을 항상 함께 반환한다)
+#   mode     : filename(파일명 검색, 기본값) | semantic(유사 검색)
 #   category : 카테고리 필터 (없으면 전체, 있으면 해당 카테고리만)
-# 응답의 "exact"는 쿼리 원문이 그대로 포함된 문서, "semantic"은 임베딩 유사도로 찾은
-# 문서(exact와 중복 제외)다 — 화면에 "정확한 검색"/"유사 의미 검색" 두 섹션으로 나눠 보여준다.
+# 응답의 results는 mode에 따라 파일명 부분일치 결과 또는 임베딩+BM25 재랭킹 결과 하나만
+# 담긴다 — 화면에서 "파일명 검색"/"유사 검색" 중 고른 모드 하나만 보여준다.
 @app.get("/search")
 async def 검색(
     request: Request,
@@ -2259,8 +2267,7 @@ async def 검색(
         results = [r for r in results if r.get("file_type") == file_type]
 
     # 검색 기록 저장 — 계정에 귀속된 서버측 기록(로그인 꺼져 있으면 "anonymous" 공용)
-    # alpha 컬럼은 이제 의미 없는 값(고정 0.5)이다 — mode 도입 전 스키마라 남겨둠, 마이그레이션은 별도 논의 필요
-    log = SearchLog(query=q, alpha=0.5, result_count=len(results), user_email=_current_user_email(request))
+    log = SearchLog(query=q, result_count=len(results), user_email=_current_user_email(request))
     db.add(log)
     await db.commit()
 
@@ -2558,8 +2565,12 @@ async def 내_문서_수정(
         doc.title = title.strip() or None
     if category is not None:
         category = category.strip()[:30]
-        if category:
-            doc.category = category
+        # [수정 2026-07-25] 빈 문자열을 조용히 무시하던 것을 명시적 거부로 변경 —
+        # 문서는 항상 카테고리가 지정돼 있어야 한다는 업로드 흐름의 전제를 이 엔드포인트도
+        # 지켜야 한다(그동안은 프론트 UI만 이를 강제하고 서버는 강제하지 않았음).
+        if not category:
+            raise HTTPException(status_code=400, detail="카테고리를 비워둘 수 없습니다")
+        doc.category = category
     if memo is not None:
         doc.memo = memo.strip()[:1000] or None
 
