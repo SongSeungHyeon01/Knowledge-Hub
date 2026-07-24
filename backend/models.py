@@ -1,9 +1,18 @@
 # models.py — 데이터베이스 테이블 정의 파일
 # 여기서 정의한 클래스 하나 = 데이터베이스 테이블 하나
 
+from datetime import datetime, timezone, timedelta
 from sqlalchemy import Column, Integer, BigInteger, String, Boolean, DateTime, Float, Text, LargeBinary, ForeignKey, UniqueConstraint
-from sqlalchemy.sql import func
 from database import Base
+
+# [수정 2026-07-24] 지금까지 모든 *_at 컬럼이 server_default=func.now()를 썼는데, 이건
+# DB 서버(SQLite/PostgreSQL)의 UTC 기준 현재 시각을 시간대 표시 없이 그대로 저장한다.
+# 프론트에서는 이 값을 그대로(또는 new Date()로) 보여주는 곳이 많아, 실제 한국 시각보다
+# 9시간 늦게 표시되는 문제가 있었다. 매 INSERT/UPDATE마다 애플리케이션 쪽에서 이미
+# KST(UTC+9)로 보정된 값을 만들어 저장하도록 바꿔, 이후로는 별도 변환 없이 그대로
+# 화면에 보여줘도 실제 한국 시각과 일치하게 한다.
+def _kst_now():
+    return datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=9)
 
 # Document 테이블: 업로드된 문서 정보를 저장합니다
 class Document(Base):
@@ -27,13 +36,13 @@ class Document(Base):
     view_count    = Column(Integer, nullable=False, default=0)      # 상세보기 조회수
     uploaded_by   = Column(String, nullable=True)                   # 업로드한 사람 이메일(로그인 꺼져 있으면 "anonymous")
     department    = Column(String, nullable=True)                   # 업로드자의 부서로 자동 지정 — 부서별 열람 제한 기준값(비어있으면 제한 없음)
-    uploaded_at   = Column(DateTime, server_default=func.now())     # 업로드 시각 (자동 기록, 이후 불변)
+    uploaded_at   = Column(DateTime, default=_kst_now)     # 업로드 시각 (자동 기록, 이후 불변)
     # [수정 2026-07-06] 주기적 스윕이 "parsing이 얼마나 오래됐는지" 판정할 기준 컬럼.
     # uploaded_at은 최초 업로드 시각으로 고정이라 재시도(retry) 시에는 갱신되지 않는다 —
     # 그걸 기준으로 삼으면 방금 재시도를 시작한 문서를 "오래됐다"고 오판해 강제로
     # failed 처리해버릴 수 있다. onupdate=func.now()로 해두면 ORM으로 이 행을 수정하고
     # commit할 때마다(업로드/재시도/파싱결과반영 등 모든 지점에서) 자동으로 갱신된다.
-    updated_at    = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    updated_at    = Column(DateTime, default=_kst_now, onupdate=_kst_now)
 
 
 # Chunk 테이블: 문서를 청크로 분할하여 저장합니다 (turbovec 벡터 ID와 1:1 대응)
@@ -70,7 +79,7 @@ class User(Base):
     name       = Column(String, nullable=True)
     picture    = Column(String, nullable=True)
     department = Column(String, nullable=True)   # 관리자가 지정 — 부서별 문서 접근 제한의 기준값
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    updated_at = Column(DateTime, default=_kst_now, onupdate=_kst_now)
 
 
 # AdminEmail 테이블: .env의 ADMIN_EMAILS(고정, 삭제 불가)에 더해 웹 화면에서
@@ -81,7 +90,7 @@ class AdminEmail(Base):
 
     email      = Column(String, primary_key=True)
     added_by   = Column(String, nullable=True)
-    created_at = Column(DateTime, server_default=func.now())
+    created_at = Column(DateTime, default=_kst_now)
 
 
 # RevokedSession 테이블: 로그아웃(또는 강제 종료)된 세션의 블랙리스트.
@@ -93,7 +102,7 @@ class RevokedSession(Base):
     __tablename__ = "revoked_sessions"
 
     session_id = Column(String, primary_key=True)
-    revoked_at = Column(DateTime, server_default=func.now())
+    revoked_at = Column(DateTime, default=_kst_now)
 
 
 # SearchLog 테이블: 검색 기록을 저장합니다
@@ -105,7 +114,7 @@ class SearchLog(Base):
     alpha        = Column(Float, nullable=False)                   # 의미검색 비중 (0~1)
     result_count = Column(Integer, default=0)                      # 검색 결과 수
     user_email   = Column(String, nullable=True, index=True)       # 검색한 계정(로그인 꺼져있으면 "anonymous")
-    searched_at  = Column(DateTime, server_default=func.now())     # 검색 시각 (자동 기록)
+    searched_at  = Column(DateTime, default=_kst_now)     # 검색 시각 (자동 기록)
 
 
 # Bookmark 테이블: 사용자별 문서 북마크 (로그인 꺼져 있으면 "anonymous" 단일 사용자로 동작)
@@ -118,7 +127,7 @@ class Bookmark(Base):
     id         = Column(Integer, primary_key=True, index=True)
     doc_id     = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
     user_email = Column(String, nullable=False, index=True)
-    created_at = Column(DateTime, server_default=func.now())
+    created_at = Column(DateTime, default=_kst_now)
 
 
 # Comment 테이블: 문서 상세 팝업에서 남기는 댓글 (로그인 꺼져 있으면 "anonymous" 공용 작성자)
@@ -129,7 +138,7 @@ class Comment(Base):
     doc_id     = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
     user_email = Column(String, nullable=False, index=True)
     content    = Column(Text, nullable=False)
-    created_at = Column(DateTime, server_default=func.now())
+    created_at = Column(DateTime, default=_kst_now)
 
 
 # Notification 테이블: 내 문서에 댓글이 달렸을 때 업로더에게 보여주는 인앱 알림.
@@ -143,7 +152,7 @@ class Notification(Base):
     comment_id = Column(Integer, ForeignKey("comments.id", ondelete="CASCADE"), nullable=True)
     message    = Column(Text, nullable=False)
     is_read    = Column(Boolean, nullable=False, default=False)
-    created_at = Column(DateTime, server_default=func.now())
+    created_at = Column(DateTime, default=_kst_now)
 
 
 # DocumentPermission 테이블: 문서별 읽기 권한 화이트리스트.
@@ -158,7 +167,7 @@ class DocumentPermission(Base):
     id         = Column(Integer, primary_key=True, index=True)
     doc_id     = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
     user_email = Column(String, nullable=False, index=True)
-    created_at = Column(DateTime, server_default=func.now())
+    created_at = Column(DateTime, default=_kst_now)
 
 
 # DeletionLog 테이블: 관리자가 문서를 삭제할 때 누가/언제/무엇을/왜 지웠는지 남기는 감사 로그.
@@ -174,4 +183,4 @@ class DeletionLog(Base):
     category   = Column(String, nullable=True)
     deleted_by = Column(String, nullable=False, index=True)   # 삭제한 관리자 이메일
     reason     = Column(Text, nullable=False)                 # 삭제 사유 (필수 입력)
-    deleted_at = Column(DateTime, server_default=func.now(), index=True)
+    deleted_at = Column(DateTime, default=_kst_now, index=True)
