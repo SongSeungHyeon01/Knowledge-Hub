@@ -541,11 +541,57 @@ export default function AdminPage({ onNavigate }) {
     enabled: navKey === 'deletion-log',
   })
 
+  // 삭제 보고서의 사유 수정 — [2026-07-24] 삭제 직후에는 정확한 사유를 몰라 "재업로드
+  // 예정" 같은 임시 메모만 남기고, 나중에 실제 처리 결과로 갱신해야 하는 경우가 있어 추가.
+  const [editingLogId,     setEditingLogId]     = useState(null)
+  const [editingLogReason, setEditingLogReason] = useState('')
+
+  const editDeletionLogReasonMutation = useMutation({
+    mutationFn: ({ id, reason }) => axios.patch(`${API}/admin/deletion-logs/${id}`, { reason }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['deletion-logs'] })
+      message.success('삭제 사유가 수정됐습니다')
+    },
+    onError: () => message.error('삭제 사유 수정 중 오류가 발생했습니다'),
+  })
+
+  const saveLogReason = (id) => {
+    const reason = editingLogReason.trim()
+    if (!reason) return
+    editDeletionLogReasonMutation.mutate({ id, reason }, { onSuccess: () => setEditingLogId(null) })
+  }
+
   const deletionLogColumns = [
     { title: '파일명',   dataIndex: 'filename',   key: 'filename', ellipsis: true },
     { title: '카테고리', dataIndex: 'category',   key: 'category', width: 110, render: (c) => c ? (CAT_LABEL[c] ?? c) : '-' },
     { title: '삭제한 관리자', dataIndex: 'deleted_by', key: 'deleted_by', width: 200 },
-    { title: '사유', dataIndex: 'reason', key: 'reason' },
+    {
+      title: '사유', dataIndex: 'reason', key: 'reason',
+      render: (reason, record) => editingLogId === record.id ? (
+        <Space.Compact style={{ width: '100%' }}>
+          <Input
+            size="small"
+            autoFocus
+            maxLength={300}
+            value={editingLogReason}
+            onChange={(e) => setEditingLogReason(e.target.value)}
+            onPressEnter={() => saveLogReason(record.id)}
+          />
+          <Button size="small" type="primary" onClick={() => saveLogReason(record.id)} loading={editDeletionLogReasonMutation.isPending}>저장</Button>
+          <Button size="small" onClick={() => setEditingLogId(null)}>취소</Button>
+        </Space.Compact>
+      ) : (
+        <Space>
+          <span>{reason}</span>
+          <Button
+            type="text" size="small"
+            icon={<EditOutlined style={{ fontSize: 11 }} />}
+            style={{ padding: '0 4px', height: 20 }}
+            onClick={() => { setEditingLogId(record.id); setEditingLogReason(reason) }}
+          />
+        </Space>
+      ),
+    },
     { title: '삭제 시각', dataIndex: 'deleted_at', key: 'deleted_at', width: 170, render: (t) => (t || '').slice(0, 16) },
   ]
 

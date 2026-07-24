@@ -1744,6 +1744,23 @@ async def 삭제_보고서_목록(limit: int = Query(200, ge=1, le=1000), db: As
     ]
 
 
+# PATCH /admin/deletion-logs/{id} — 삭제 보고서의 사유를 나중에 수정(예: "재업로드 예정" → 실제 처리 결과로 갱신)
+@app.patch("/admin/deletion-logs/{log_id}")
+async def 삭제_보고서_사유_수정(log_id: int, reason: str = Body(..., embed=True), db: AsyncSession = Depends(get_db)):
+    reason = reason.strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="삭제 사유를 입력해야 합니다")
+
+    result = await db.execute(select(DeletionLog).where(DeletionLog.id == log_id))
+    log = result.scalar_one_or_none()
+    if log is None:
+        raise HTTPException(status_code=404, detail="해당 삭제 기록을 찾을 수 없습니다")
+
+    log.reason = reason
+    await db.commit()
+    return {"id": log.id, "reason": log.reason}
+
+
 # ── DB 백업 관리 (관리자 전용) ────────────────────────────────────────────────
 @app.post("/admin/backup")
 async def 백업_실행():
