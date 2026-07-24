@@ -593,7 +593,7 @@ export default function UploadPage({ onNavigate }) {
                 showUploadList={false}
                 beforeUpload={handleUpload}
                 disabled={isUploading}
-                style={{ marginBottom: 20, background: '#fafcff' }}
+                style={{ marginBottom: 12, background: '#fafcff' }}
               >
                 <p className="ant-upload-drag-icon">
                   <InboxOutlined style={{ fontSize: 44, color: isUploading ? '#aaa' : '#1677ff' }} />
@@ -605,15 +605,22 @@ export default function UploadPage({ onNavigate }) {
                   지원 형식: PDF · HWP · HWPX · DOCX · PPT · PPTX · XLSX (파일당 최대 {MAX_SIZE_MB}MB)
                   <br />.xls(구버전 엑셀)는 처리 실패가 확인돼 지원 목록에서 제외
                 </p>
+              </Dragger>
+
+              {/* [2026-07-24] 예전엔 이 버튼이 위 Dragger 안에 중첩된 <Upload>였다 — Upload를
+                  Upload(Dragger 포함) 안에 중첩시키면 클릭 이벤트가 겹쳐서 파일 선택창·확인
+                  팝업이 두 번 뜨는 문제가 있었다(stopPropagation으로도 완전히 안 막힘). Dragger
+                  밖으로 완전히 분리된 형제 요소로 빼서 두 업로드 영역이 구조적으로 안 겹치게 했다. */}
+              <div style={{ textAlign: 'center', marginBottom: 20 }}>
                 <Upload
                   directory multiple showUploadList={false}
                   beforeUpload={handleUpload} disabled={isUploading} accept={ACCEPT_ATTR}
                 >
-                  <Button icon={<FolderOpenOutlined />} disabled={isUploading} onClick={e => e.stopPropagation()} style={{ marginTop: 10 }}>
+                  <Button icon={<FolderOpenOutlined />} disabled={isUploading}>
                     폴더째 업로드
                   </Button>
                 </Upload>
-              </Dragger>
+              </div>
 
               <Table
                 columns={columns}
