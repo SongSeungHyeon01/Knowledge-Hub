@@ -41,7 +41,8 @@ pandas==3.0.3              # BSD-3(허용) — 표(DataFrame) → 마크다운 �
 # ── 비-PDF 파서 (hwp_postprocess/ — ② 송승현 정본) ──────────────────────────
 # HWP·PPTX는 시스템에 LibreOffice 설치 필요 (Dockerfile에서 처리, pip 패키지 아님)
 python-docx>=1.1.0         # DOCX 파싱 (+ HWP→DOCX 변환 결과 파싱)
-openpyxl>=3.1.2            # XLSX/XLS 파싱
+openpyxl>=3.1.2            # XLSX 파싱
+xlrd>=2.0.1                # BSD — 구형식 XLS(OLE2/BIFF) 직접 파싱, LibreOffice 경유 불필요
 lxml>=5.0.0                # HWPX 내부 XML 파싱
 # python-pptx는 운영 코드에서 미사용 (PPTX는 LibreOffice→PDF 경유).
 # hwp_postprocess/test_office_parsers.py 실행 시에만 별도 설치: pip install python-pptx
