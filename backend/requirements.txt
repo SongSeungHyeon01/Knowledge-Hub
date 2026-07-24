@@ -38,13 +38,6 @@ tabulate==0.10.0           # MIT — 표 → 마크다운 변환 보조
 pillow==12.3.0             # HPND(허용) — from PIL import Image (스캔 이미지 처리)
 pandas==3.0.3              # BSD-3(허용) — 표(DataFrame) → 마크다운 변환
 
-# 업로드 파일 악성코드 검사(ClamAV 데몬과 유닉스 소켓 통신)는 표준 라이브러리
-# socket/struct만으로 직접 구현했다 — clamd 패키지의 instream()이 1KB 단위로만
-# 보내 대용량 파일에서 업로드가 느려지는 문제(2026-07-25 확인)가 있어 별도
-# 의존성 없이 자체 구현으로 교체. ClamAV 데몬 자체(GPL-2.0)는 별도 프로세스로
-# 떠 있고 이 코드와 링크되지 않는다(LibreOffice를 subprocess로 부르는 것과 동일한
-# 방식). 데몬 설치는 Dockerfile 참고.
-
 # ── 비-PDF 파서 (hwp_postprocess/ — ② 송승현 정본) ──────────────────────────
 # HWP·PPTX는 시스템에 LibreOffice 설치 필요 (Dockerfile에서 처리, pip 패키지 아님)
 python-docx>=1.1.0         # DOCX 파싱 (+ HWP→DOCX 변환 결과 파싱)

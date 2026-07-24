@@ -52,15 +52,6 @@ FROM python:3.11-slim
 #                          "[JavaVirtualMachine]: An unexpected error occurred while
 #                          searching for a Java"로 실패한다(실제 배포 빌드 실패로 확인,
 #                          2026-07-24 — Railway 빌드 로그에서 unopkg 단계가 이 에러로 죽음).
-#   clamav, clamav-daemon, clamav-freshclam → 업로드 파일 악성코드 검사(main.py의
-#                          _scan_for_malware가 유닉스 소켓으로 통신). freshclam 바이너리는
-#                          Debian에서 clamav-daemon의 "Recommends"일 뿐 "Depends"가
-#                          아니라서, 이 Dockerfile처럼 --no-install-recommends를 쓰면
-#                          명시적으로 같이 넣어주지 않으면 설치가 안 된다 — 시그니처DB가
-#                          하나도 없는 채로 clamd가 뜨는 걸 방지하기 위해 명시적으로 추가.
-#                          freshclam으로 빌드 시점 시그니처를 미리 받아두고, 컨테이너
-#                          시작 시(docker-entrypoint.sh) 한 번 더 갱신을 시도한다 —
-#                          시그니처DB만 최소 300MB 정도라 빌드 시간이 꽤 늘어난다.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libreoffice-writer \
         libreoffice-impress \
@@ -72,13 +63,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         default-jre-headless \
         libreoffice-java-common \
-        clamav \
-        clamav-daemon \
-        clamav-freshclam \
     && sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen \
     && locale-gen \
-    && service clamav-freshclam stop || true \
-    && freshclam --quiet || true \
     && rm -rf /var/lib/apt/lists/*
 
 ENV LANG=en_US.UTF-8 \
@@ -107,11 +93,6 @@ COPY backend/ .
 # 프론트 빌드 산출물 → backend/static/ (main.py 맨 끝의 StaticFiles가 서빙)
 COPY --from=frontend-build /front/dist ./static
 
-# ClamAV 데몬 설정 + 시작 스크립트 (main.py의 CLAMD_SOCKET 기본값과 경로 일치시킬 것)
-COPY clamd.conf ./clamd.conf
-COPY docker-entrypoint.sh /docker-entrypoint.sh
-RUN chmod +x /docker-entrypoint.sh
-
 # ── 환경변수 ────────────────────────────────────────────────────────────────
 # DATA_DIR             업로드 원본·파싱 JSON 저장 위치 → Railway Volume(/data)
 # EASYOCR_MODULE_PATH  ① core/parser.py의 EasyOCR 모델 저장 루트
@@ -130,6 +111,5 @@ ENV PYTHONUNBUFFERED=1 \
 
 EXPOSE 8000
 
-# docker-entrypoint.sh가 clamd(악성코드 검사 데몬)를 먼저 띄우고 소켓이 준비되길
-# 잠깐 기다린 뒤 uvicorn을 시작한다 — Railway의 PORT 환경변수는 그 안에서 그대로 읽는다.
-CMD ["/docker-entrypoint.sh"]
+# Railway가 PORT 환경변수를 주입한다 — 없으면 8000 (shell 형식이라 ${...} 확장됨)
+CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}
