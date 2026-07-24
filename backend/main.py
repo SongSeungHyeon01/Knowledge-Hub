@@ -1439,6 +1439,13 @@ async def 파일_업로드(
     category = (category or "").strip()[:30]
     memo = (memo or "").strip()[:1000] or None
 
+    # [임시 계측 2026-07-25] 업로드가 느리다는 반복 신고 때문에, 추측 대신 실제로
+    # 어느 단계가 오래 걸리는지 로그로 확인하기 위한 구간별 타이머. 원인이 파악되면
+    # 제거할 것.
+    _t0 = time.perf_counter()
+    def _lap(label: str):
+        print(f"[upload-timing] {file.filename}: {label} 까지 누적 {time.perf_counter() - _t0:.2f}초")
+
     # ── 검사 1: 파일이 아예 안 온 경우 ──────────────────────────────────
     if not file or not file.filename:
         return {"source_file": "", "status": "failed",
@@ -1473,6 +1480,7 @@ async def 파일_업로드(
         chunks_data.append(chunk_bytes)
     sha256_hex = hasher.hexdigest()
     contents = b"".join(chunks_data)
+    _lap("파일 수신+해시")
 
     # ── 검사 4: PDF 페이지 수 상한 (STEP 3, 2026-07-22) ──────────────────
     # 디스크 저장·Document 행 생성 전, 메모리에 있는 바이트로 바로 카운트한다
@@ -1492,6 +1500,7 @@ async def 파일_업로드(
             return {"source_file": file.filename, "status": "failed",
                     "error": f"페이지 수 초과 ({page_count}쪽). 최대 {HARD_PAGE_LIMIT}쪽까지 지원합니다 — 문서를 분할해 나눠 업로드해 주세요.",
                     "pages": []}
+    _lap("PDF 페이지 수 확인")
 
     # ── 중복 파일 처리 (2026-07-24 변경) — 사내 문서라 "덮어쓰기"로 예전 문서를
     # 지우면 안 된다는 요청에 따라, 같은 파일명이든 내용(SHA-256)이 완전히 같든
@@ -1507,6 +1516,7 @@ async def 파일_업로드(
         .order_by(Document.uploaded_at.desc()).limit(1)
     )).scalar_one_or_none()
     duplicate_of = {"id": dup.id, "filename": dup.filename} if dup is not None else None
+    _lap("중복 확인 DB 조회")
 
     # ── 저장 경로 결정 — original_path 있으면 디렉토리 구조 보존 ─────────
     # 경로 순회 공격 방지: '..' './' 절대경로 등 제거
@@ -1541,6 +1551,7 @@ async def 파일_업로드(
     except Exception:
         return {"source_file": file.filename, "status": "failed",
                 "error": "파일 저장 중 오류가 발생했습니다", "pages": []}
+    _lap("디스크 저장")
 
     # 업로드된 원본을 실시간 백업 미러로 복사 (파싱 성공/실패와 무관하게 원본은 보호) —
     # 응답을 막지 않도록 BackgroundTasks로 미룬다(2026-07-25, 업로드 속도 개선).
@@ -1576,9 +1587,11 @@ async def 파일_업로드(
     db.add(doc)
     await db.commit()
     await db.refresh(doc)  # auto-increment id 가져오기
+    _lap("DB insert(문서 행 생성)")
 
     # 응답 후 백그라운드에서 파싱 → 상태 갱신 → JSON 저장 → 임베딩 색인
     background_tasks.add_task(_parse_and_ingest, doc.id, save_path, file.filename, ext)
+    _lap("응답 반환 직전(전체)")
 
     return {
         "id":       doc.id,
