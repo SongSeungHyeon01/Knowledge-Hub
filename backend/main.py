@@ -1993,10 +1993,10 @@ def _extract_snippet_multi(text: str, tokens: list, max_len: int = 200) -> str:
 async def 실제_검색_실행(q: str, mode: str, category, db: AsyncSession, uploaded_by=None, date_from=None, date_to=None) -> dict:
     """두 모드로 나뉜 검색.
     - mode="filename": 파일명에 검색어가 그대로 포함된 문서만 찾는다(문서 내용은 보지 않음).
-    - mode="semantic": MiniLM 임베딩 코사인 유사도로 문서 "내용"을 찾는다. 모호한 문구를
-      넣어도 폭넓게 잡아내도록 임계값 없이(0보다 크면 전부) 후보로 삼는다. 후보가 정해진
-      뒤에는 그 안에서만 BM25로 순위를 보강해 랭킹 품질을 높인다(후보 자체를 늘리거나
-      줄이지는 않음 — 그래서 무관한 문서가 BM25 하나만으로 끼어드는 일은 없다).
+    - mode="semantic": MiniLM 임베딩 코사인 유사도로 문서 "내용"을 찾는다. 일단 넓게(0보다
+      크면) 후보로 잡은 뒤, 그 안에서 BM25로 실제 키워드 포함 여부를 확인해 의미 유사도가
+      낮으면서(SEM_FLOOR 미만) 키워드도 전혀 없는 문서는 최종 후보에서 뺀다. 짧은 단어
+      하나만 검색해도(예: "점주") 무관한 문서가 함께 나오지 않도록 하기 위함이다.
     검색어가 비어 있으면(카테고리 등 필터만으로 "둘러보기") 모드와 무관하게 최신순으로
     나열한다.
     """
@@ -2150,12 +2150,12 @@ async def 실제_검색_실행(q: str, mode: str, category, db: AsyncSession, up
         await _npz_fallback()
 
     docs_by_id = {d.id: d for d in docs}
-    candidate_ids = [did for did, s in sem_scores.items() if s > 0 and did in docs_by_id]
-    if not candidate_ids:
+    broad_ids = [did for did, s in sem_scores.items() if s > 0 and did in docs_by_id]
+    if not broad_ids:
         return {"results": []}
 
     # ── 의미 검색 후보 안에서 BM25로 랭킹 품질 보강 ────────────────────────────
-    # 후보(candidate_ids)는 이미 의미 유사도만으로 확정됐다 — BM25는 여기서 새
+    # 후보(broad_ids)는 일단 의미 유사도만으로 넓게 뽑혔다 — BM25는 여기서 새
     # 문서를 추가하지 않고, 이미 뽑힌 후보들의 "순서"만 문맥에 맞게 재조정한다.
     # (전체 문서 대상 글로벌 BM25 인덱스가 아니라 이 소규모 후보 집합만 매번
     # 새로 만들므로 캐시가 필요 없고, 예전에 있었던 "형태소 축약으로 무관한
@@ -2163,7 +2163,7 @@ async def 실제_검색_실행(q: str, mode: str, category, db: AsyncSession, up
     bm25_scores: dict = {}
     try:
         indexer = _get_search_indexer()
-        corpus_docs = [docs_by_id[did] for did in candidate_ids]
+        corpus_docs = [docs_by_id[did] for did in broad_ids]
         corpus_texts = []
         for doc in corpus_docs:
             info = _get_doc_text(doc.id)
@@ -2181,6 +2181,16 @@ async def 실제_검색_실행(q: str, mode: str, category, db: AsyncSession, up
             bm25_scores[doc.id] = float(s)
     except Exception as e:
         print(f"[search] 유사 검색 BM25 재랭킹 실패(의미검색 점수만 사용): {e}")
+
+    # [수정 2026-07-25] "점주"처럼 짧은 단어 하나만 검색하면, 무관한 문서도 코사인
+    # 유사도가 0.1~0.25대의 양수로 나오는 경우가 흔하다(임베딩 공간 특성상 완전
+    # 무관해도 음수가 잘 안 나옴) — 그래서 "0보다 크다"만으로는 무관한 문서를 걸러내지
+    # 못했다. 실제 키워드가 문서에 있으면(BM25>0) 의미 유사도가 다소 낮아도 후보로
+    # 남기고, 키워드도 없고 의미 유사도까지 낮으면(SEM_FLOOR 미만) 후보에서 뺀다.
+    SEM_FLOOR = 0.35
+    candidate_ids = [did for did in broad_ids if sem_scores[did] >= SEM_FLOOR or bm25_scores.get(did, 0) > 0]
+    if not candidate_ids:
+        return {"results": []}
 
     # RRF로 의미검색 순위(주 신호)와 BM25 순위(보강 신호)를 합친다 — 의미검색에
     # 더 작은 k를 줘서 주 신호로 삼고, BM25는 동점 상황을 갈라주는 보조 역할만 한다.
