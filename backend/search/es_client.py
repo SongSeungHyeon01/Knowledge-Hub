@@ -106,13 +106,19 @@ def delete_doc_chunks(doc_id: int):
         print(f"[es] doc_id={doc_id} 청크 삭제 실패: {e}")
 
 
-def bulk_index_chunks(rows: list[dict]):
+def bulk_index_chunks(rows: list[dict]) -> tuple[int, int]:
     """rows: [{chunk_id, doc_id, filename, title, memo, text, page_num, chunk_idx, embedding(list[float])}, ...]
     embedding이 없는 행(모델 로드 실패 등)은 건너뛴다 — BM25만으로도 검색은 가능해야 하므로
-    text가 있으면 embedding 없이도 색인한다(그 경우 kNN에는 안 걸리고 BM25에만 걸림)."""
+    text가 있으면 embedding 없이도 색인한다(그 경우 kNN에는 안 걸리고 BM25에만 걸림).
+
+    반환: (성공 건수, 실패 건수). 호출부가 실패를 "성공"으로 착각하지 않도록 반드시
+    반환값을 확인해야 한다 — ES 연결 실패/인덱스 생성 실패도 (0, len(rows))로 보고한다."""
     client = get_es_client()
-    if client is None or not ensure_index() or not rows:
-        return
+    if not rows:
+        return (0, 0)
+    if client is None or not ensure_index():
+        print(f"[es] bulk 색인 불가(ES 연결/인덱스 없음): {len(rows)}건 실패")
+        return (0, len(rows))
     from elasticsearch.helpers import bulk
 
     actions = []
@@ -134,10 +140,20 @@ def bulk_index_chunks(rows: list[dict]):
             "_id": str(r["chunk_id"]),
             "_source": doc,
         })
+    # raise_on_error=False + stats_only=False: 일부 행만 거부돼도 예외를 던지지 않고
+    # 거부된 행의 상세를 errors 리스트로 돌려준다 — 부분 실패를 건수로 셀 수 있다.
     try:
-        bulk(client, actions, refresh=True)
+        ok, errors = bulk(client, actions, refresh=True,
+                          raise_on_error=False, stats_only=False)
     except Exception as e:
         print(f"[es] bulk 색인 실패: {e}")
+        return (0, len(actions))
+    failed = len(errors)
+    if failed:
+        print(f"[es] bulk 색인 부분 실패: 성공 {ok}건 / 실패 {failed}건")
+        for err in errors[:5]:   # 원인 파악용으로 앞 5건만 — 수천 건이면 로그가 묻힌다
+            print(f"[es]   실패 상세: {err}")
+    return (ok, failed)
 
 
 def _doc_id_filter(doc_ids: list[int] | None):
@@ -146,14 +162,26 @@ def _doc_id_filter(doc_ids: list[int] | None):
     return {"terms": {"doc_id": [str(d) for d in doc_ids]}}
 
 
-def bm25_search(query_text: str, doc_ids: list[int] | None, size: int = 50) -> list[dict]:
+# BM25 후보 예산 — collapse 덕분에 "문서 수"로 해석된다(청크 수가 아님).
+# hybrid_search가 최종적으로 문서 단위로 랭킹하므로 문서 기준 예산이 맞고, 50보다 넉넉하게
+# 잡아 RRF가 고를 여지를 늘린다.
+BM25_CANDIDATE_DOCS = 100
+
+
+def bm25_search(query_text: str, doc_ids: list[int] | None, size: int = BM25_CANDIDATE_DOCS) -> list[dict]:
     """BM25(Lucene 기본) 텍스트 검색 — 전체 코퍼스 대상(즉석 재구성 불필요).
-    반환: [{"chunk_id","doc_id","text","page_num","score"}, ...] score 내림차순."""
+    반환: [{"chunk_id","doc_id","text","page_num","score"}, ...] score 내림차순.
+
+    [수정] `collapse: doc_id`로 문서당 최상위 청크 하나만 후보에 남긴다. filename/title/memo가
+    문서의 모든 청크에 중복 색인되어 있어서(bulk_index_chunks 참고), 파일명에 검색어가 걸린
+    문서 하나가 전 청크로 후보 예산을 독식하고 실제로 본문에 키워드를 가진 다른 문서들이
+    후보에서 밀려나던 문제를 막는다. collapse 사용 시 size는 "문서 수"로 해석된다
+    (doc_id가 keyword 타입이어야 하는데 ensure_index() 매핑에서 keyword로 잡혀 있다)."""
     client = get_es_client()
     if client is None or not ensure_index():
         return []
     must = [{"multi_match": {"query": query_text, "fields": ["text^2", "title", "filename", "memo"]}}]
-    body = {"query": {"bool": {"must": must}}}
+    body = {"query": {"bool": {"must": must}}, "collapse": {"field": "doc_id"}}
     doc_filter = _doc_id_filter(doc_ids)
     if doc_filter:
         body["query"]["bool"]["filter"] = [doc_filter]
@@ -217,7 +245,9 @@ def hybrid_search(query_text: str, query_vector: list[float] | None, doc_ids: li
 
     반환: {"doc_ids": [...], "final_scores": {doc_id: score}, "best_chunk": {doc_id: {"text","page_num"}}}
     """
-    bm25_hits = bm25_search(query_text, doc_ids, size=size) if query_text.strip() else []
+    # BM25는 collapse로 문서 단위 후보를 돌려주므로 size(청크 예산)가 아니라 문서 예산을 쓴다.
+    bm25_hits = (bm25_search(query_text, doc_ids, size=max(size, BM25_CANDIDATE_DOCS))
+                 if query_text.strip() else [])
     knn_hits = knn_search(query_vector, doc_ids, k=size) if query_vector is not None else []
 
     def _best_per_doc(hits):

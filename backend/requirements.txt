@@ -18,8 +18,8 @@ python-dotenv>=1.0.0  # backend/.env(git 미추적)에서 GOOGLE_CLIENT_ID 등 �
 # ── 검색 / 임베딩 ────────────────────────────────────────────────────────────
 sentence-transformers>=2.7.0
 elasticsearch>=8.15.0,<9.0.0   # 2026-07-28: turbovec+즉석 BM25+손으로 짠 RRF를 대체
-rank-bm25>=0.2.2   # search.py의 BM25Indexer(현재 미사용, 보류 코드)가 import — 지우면 그 모듈 로드가 깨짐
-kiwipiepy>=0.18.0  # 위와 동일 이유로 유지
+# rank-bm25·kiwipiepy는 제거(2026-07-30) — search.py의 BM25Indexer가 호출부 없는 죽은
+# 코드라 함께 삭제했다. BM25는 ES 내장 Lucene BM25가 담당한다.
 
 # ── 문서 파서 (core/parser.py, core/office_adapter.py, core/docling_parser.py) ──
 # [설치 방법] torch CPU 버전은 아래 명령어로 설치하세요 (일반 pip install 하면 GPU 버전이 깔릴 수 있음):
@@ -35,6 +35,7 @@ torch==2.12.1+cpu
 docling[easyocr]>=2.115.0  # MIT — 통합 파서 + OCR(EasyOCR 백엔드, 기존과 동일 엔진)
 pypdfium2>=4.0.0           # BSD — count_pdf_pages() 사전 페이지수 체크 (Docling도 내부적으로 씀)
 
-# ↓ parser.py가 직접 import/사용하는 라이브러리
-pillow==12.3.0             # HPND(허용) — from PIL import Image (스캔 이미지 처리)
-pandas==3.0.3              # BSD-3(허용) — 표(DataFrame) → 마크다운 변환
+# ↓ Docling의 전이 의존성 — 우리 코드가 직접 import하지는 않지만(core/parser.py가 직접
+#   쓰는 건 pypdfium2뿐이다) Docling 내부에서 쓰이므로 버전을 고정해 재현성을 확보한다.
+pillow==12.3.0             # HPND(허용) — 이미지 처리
+pandas==3.0.3              # BSD-3(허용) — 표(DataFrame) 처리

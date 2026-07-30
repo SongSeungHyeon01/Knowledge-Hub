@@ -684,7 +684,10 @@ export default function SearchPage() {
             <div style={{ marginTop: 8 }}>
               <Radio.Group value={fileType} onChange={(e) => setFileType(e.target.value)} buttonStyle="solid">
                 <Radio.Button value={null}>전체</Radio.Button>
-                {['pdf','docx','pptx','xlsx','hwp','hwpx','txt','md'].map(ft => (
+                {/* hwp/hwpx는 필터 옵션에서 제외(2026-07-30) — Docling 전환으로 신규 업로드가
+                    불가해 항상 0건이다. 단 위 FILE_TYPE_ICON/COLOR의 hwp 매핑은 기존에
+                    업로드된 문서 열람용으로 그대로 유지한다. */}
+                {['pdf','docx','pptx','xlsx','txt','md'].map(ft => (
                   <Radio.Button key={ft} value={ft}>{ft.toUpperCase()}</Radio.Button>
                 ))}
               </Radio.Group>

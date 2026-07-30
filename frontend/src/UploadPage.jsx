@@ -264,7 +264,9 @@ export default function UploadPage({ onNavigate }) {
 
   // [2026-07-28] HWP/HWPX 지원 포기 — 파서를 Docling으로 통합했는데 Docling이
   // 이 두 형식을 지원하지 않는다. 이미 업로드된 HWP/HWPX 문서는 그대로 열람 가능.
-  const SUPPORTED_EXT = ['.pdf','.docx','.pptx','.ppt','.xlsx','.xls','.txt','.md','.png','.jpg','.jpeg']
+  // 백엔드 SUPPORTED_EXTENSIONS(main.py)와 반드시 일치시킬 것 — 여기만 늘리면 파일 선택은
+  // 되는데 업로드는 거부되는 상태가 된다(png/jpg/jpeg가 그 상태였고 2026-07-30에 제거함).
+  const SUPPORTED_EXT = ['.pdf','.docx','.pptx','.ppt','.xlsx','.xls','.txt','.md']
   const ACCEPT_ATTR   = SUPPORTED_EXT.join(',')
   const MAX_SIZE_MB   = 500  // 2026-07-11: 백엔드 MAX_UPLOAD_SIZE(500MB)와 통일 — 이전엔 200MB로 따로 남아있었음
 
@@ -614,8 +616,7 @@ export default function UploadPage({ onNavigate }) {
                   {isUploading ? '업로드 중...' : '파일을 드래그하거나 클릭해서 업로드'}
                 </p>
                 <p className="ant-upload-hint">
-                  지원 형식: PDF · DOCX · PPT · PPTX · XLSX (파일당 최대 {MAX_SIZE_MB}MB)
-                  <br />.xls(구버전 엑셀)는 처리 실패가 확인돼 지원 목록에서 제외
+                  지원 형식: PDF · DOCX · PPT · PPTX · XLS · XLSX · TXT · MD (파일당 최대 {MAX_SIZE_MB}MB)
                 </p>
               </Dragger>
 

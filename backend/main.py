@@ -28,19 +28,18 @@ from database import engine, get_db, Base, AsyncSessionLocal
 from models import Document, SearchLog, Chunk, Bookmark, DocumentPermission, User, Comment, AdminEmail, RevokedSession, Notification, DeletionLog
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
-from core.parser import parse_pdf, count_pdf_pages, HARD_PAGE_LIMIT   # 백엔드 배포 정본 파서 — 최신 parser 브랜치(parser/parser.py) 기준, import only
-from core.office_adapter import parse_non_pdf       # 비-PDF 입구: ② hwp_postprocess 정본 + TXT/MD 리더
+from core.parser import parse_pdf, count_pdf_pages, HARD_PAGE_LIMIT   # PDF 파서 (Docling 기반, 2026-07-28 통합)
+from core.office_adapter import parse_non_pdf       # 비-PDF 입구: Docling(DOCX/PPT/PPTX/XLS/XLSX) + TXT/MD 리더
 
 # .env 파일(backend/.env, git 추적 안 됨)이 있으면 여기서 로드 — GOOGLE_CLIENT_ID·SESSION_SECRET·
 # ADMIN_EMAILS 같은 값을 매번 셸 명령에 export하지 않고 파일로 관리할 수 있게 한다.
 load_dotenv()
 
-# ③ 김태훈 검색 정본 (backend/search/search.py) — 알고리즘 구성요소만 가져다 쓴다.
-#   채택: 섹션 헤더 우선 청킹 / 언어감지 토크나이저 / 비대칭 RRF k / 영↔한 동의어 보강
+# ③ 김태훈 검색 정본 (backend/search/search.py) — 섹션 헤더 우선 청킹만 가져다 쓴다.
+#   나머지(BM25 토크나이저·비대칭 RRF k·영↔한 동의어 보강)는 Elasticsearch로 넘어가면서
+#   ES 내장 Lucene BM25 + es_client.hybrid_search()가 담당하게 됐다.
 #   저장은 설계도 C5 규칙(PostgreSQL CHUNKS PK = 검색 인덱스 청크 ID 1:1, 2026-07-28부터
 #   Elasticsearch _id로 사용)대로 이 파일이 담당.
-#   (_로 시작하는 이름도 가져오는 이유: ③ 정본의 내부 상수·함수를 재구현 없이 그대로
-#    재사용하기 위함 — 값을 바꾸지 말 것)
 from search.search import (
     chunk_text as _sb_chunk_text,        # 섹션 헤더 우선 청킹 (PRD 기준)
 )
@@ -1096,19 +1095,6 @@ def _get_embed_model():
 
 
 
-def _best_page_for_tokens(pages: list, tokens: list) -> int:
-    """토큰이 가장 많이 등장하는 페이지 번호를 반환합니다."""
-    if not pages or not tokens:
-        return 0
-    best_page, best_score = 0, 0
-    for page in pages:
-        score = sum(page.get("text", "").lower().count(t) for t in tokens)
-        if score > best_score:
-            best_score = score
-            best_page = page.get("page_num") or page.get("page", 0)
-    return best_page
-
-
 _doc_text_cache: dict = {}  # doc_id -> {"full_text": str, "pages": list}  (파싱 JSON 캐시)
 
 def _invalidate_doc_text(doc_id: int):
@@ -1211,7 +1197,7 @@ async def _ingest_chunks_to_db(doc_id: int, pages: list):
             # 기존 청크 삭제 (재시도 시) — ES에서도 함께 제거해야 한다. 안 그러면 삭제된
             # id의 "유령 청크"가 인덱스에 남아 검색 결과를 오염시킨다.
             from search import es_client as _es
-            _es.delete_doc_chunks(doc_id)
+            await asyncio.to_thread(_es.delete_doc_chunks, doc_id)
             await sess.execute(
                 sa_delete(Chunk).where(Chunk.doc_id == doc_id)
             )
@@ -1238,7 +1224,9 @@ async def _ingest_chunks_to_db(doc_id: int, pages: list):
                 }
                 for i, row in enumerate(refreshed)
             ]
-            _es.bulk_index_chunks(rows)
+            indexed, failed = await asyncio.to_thread(_es.bulk_index_chunks, rows)
+            if failed:
+                print(f"[ingest] doc_id={doc_id}: ES 색인 {failed}청크 실패(검색 누락) / {indexed}청크 성공")
         print(f"[ingest] doc_id={doc_id}: {len(chunks)}청크 저장 완료")
         _invalidate_doc_text(doc_id)
     except Exception as e:
@@ -1300,8 +1288,9 @@ async def _parse_and_ingest(doc_id: int, save_path: str, source_file: str, ext: 
     """[비동기 파싱 파이프라인] 업로드/재시도 응답을 즉시 돌려준 뒤 백그라운드에서 실행된다.
 
     ⭐ 왜 이렇게 하나 (2026-07-05):
-    파싱은 무겁다 — 페이지별 camelot 표 감지 때문에 대용량 PDF는 수십 분이 걸린다
-    (실측: 60쪽 57초, 1,950쪽 추정 ~50분). 예전처럼 업로드 요청 안에서 동기로 파싱하면
+    파싱은 무겁다 — 레이아웃 분석·표 구조 인식(Docling TableFormer)·OCR 때문에 대용량
+    PDF는 수십 분이 걸린다 (camelot 시절 실측: 60쪽 57초, 1,950쪽 추정 ~50분. 파서를
+    Docling으로 교체한 뒤에도 "무겁다"는 성질 자체는 그대로다). 예전처럼 업로드 요청 안에서 동기로 파싱하면
     (1) 응답이 수십 분 지연돼 프록시·게이트웨이 타임아웃으로 업로드가 실패하고,
     (2) 동기 함수가 이벤트 루프를 통째로 막아 파싱 동안 서버 전체가 멈춘다.
     → 파싱을 asyncio.to_thread(스레드풀)로 돌려 이벤트 루프를 막지 않게 하고,
@@ -1368,7 +1357,7 @@ async def _parse_and_ingest(doc_id: int, save_path: str, source_file: str, ext: 
     if result.get("status") == "success":
         await _ingest_chunks_to_db(doc_id, result.get("pages", []))
 
-    # 파싱 결과(JSON·임베딩 npz)도 실시간 백업 미러로 복사
+    # 파싱 결과 JSON도 실시간 백업 미러로 복사 (임베딩은 PostgreSQL Chunk + ES에 있다)
     try:
         await asyncio.to_thread(_mirror_parsed, doc_id)
     except Exception as e:
@@ -1629,6 +1618,9 @@ async def 파일_다운로드(doc_id: int, request: Request, db: AsyncSession = 
 # 문서 1건을 디스크(원본파일·파싱JSON)와 DB(Chunk·Document row) + Elasticsearch(청크)에서
 # 완전히 삭제하는 공통 로직 — 관리자 단건/일괄 삭제, 본인 문서 삭제(/me/documents)가 모두 이걸 쓴다.
 # db.delete(doc)까지만 하고 commit은 호출자가 한다(일괄 삭제는 여러 건을 모아 한 번에 commit).
+# ⚠ Elasticsearch 청크 삭제는 이 함수가 하지 않는다 — ES 삭제(refresh=True로 즉시 확정)를
+# PostgreSQL 커밋보다 먼저 하면 커밋이 실패했을 때 "문서는 목록에 살아있는데 검색엔 안 잡히는"
+# 상태로 갈라진다. 그래서 커밋 이후에 호출자가 _es_문서청크_삭제()를 호출하는 순서로 맞췄다.
 async def _문서_완전삭제(doc: Document, db: AsyncSession):
     doc_id = doc.id
 
@@ -1647,11 +1639,8 @@ async def _문서_완전삭제(doc: Document, db: AsyncSession):
     if os.path.exists(parsed_path):
         os.remove(parsed_path)
 
-    # Chunks 삭제 + Elasticsearch에서도 제거
+    # Chunks 삭제 (Elasticsearch 청크는 커밋 후에 호출자가 지운다 — 위 주석 참고)
     await db.execute(sa_delete(Chunk).where(Chunk.doc_id == doc_id))
-
-    from search import es_client as _es
-    _es.delete_doc_chunks(doc_id)
 
     # 이전(turbovec 시절) npz 잔재가 남아있으면 함께 정리 — 새 색인은 더 이상 만들지 않는다
     npz_path = os.path.join(PARSED_DIR, f"{doc_id}_emb.npz")
@@ -1661,6 +1650,18 @@ async def _문서_완전삭제(doc: Document, db: AsyncSession):
     _invalidate_doc_text(doc_id)
 
     await db.delete(doc)
+
+
+# PostgreSQL 커밋이 끝난 뒤 Elasticsearch에서 청크를 제거한다 — _문서_완전삭제()와 짝을 이룬다.
+# ES 삭제 실패는 커밋을 되돌리지 않는다(이미 확정됨). 대신 로그를 남겨 "검색에는 남아있는
+# 유령 청크"를 사람이 나중에 식별할 수 있게 한다.
+async def _es_문서청크_삭제(doc_ids: list[int]):
+    from search import es_client as _es
+    for doc_id in doc_ids:
+        try:
+            await asyncio.to_thread(_es.delete_doc_chunks, doc_id)
+        except Exception as e:
+            print(f"[es] doc_id={doc_id}: 청크 삭제 실패(검색에 잔존 가능) — {e}")
 
 
 # DELETE /admin/documents/bulk — 여러 문서 일괄 삭제
@@ -1688,6 +1689,7 @@ async def 문서_일괄_삭제(
             await _문서_완전삭제(doc, db)
             deleted.append(doc_id)
     await db.commit()
+    await _es_문서청크_삭제(deleted)
     return {"deleted": deleted, "count": len(deleted)}
 
 
@@ -1716,6 +1718,7 @@ async def 문서_삭제(
     db.add(DeletionLog(doc_id=doc.id, filename=doc.filename, category=doc.category, deleted_by=_current_user_email(request), reason=reason))
     await _문서_완전삭제(doc, db)
     await db.commit()
+    await _es_문서청크_삭제([doc_id])
 
     return {"message": f"'{filename}' 문서가 삭제됐습니다", "id": doc_id}
 
@@ -2044,7 +2047,9 @@ async def 실제_검색_실행(q: str, mode: str, category, db: AsyncSession, up
         ))[0].tolist()
 
     from search import es_client as _es
-    hybrid = _es.hybrid_search(q_stripped, q_vec, list(docs_by_id.keys()), size=50)
+    hybrid = await asyncio.to_thread(
+        _es.hybrid_search, q_stripped, q_vec, list(docs_by_id.keys()), 50
+    )
     candidate_ids = [did for did in hybrid["doc_ids"] if did in docs_by_id]
     if not candidate_ids:
         return {"results": []}
@@ -2055,18 +2060,11 @@ async def 실제_검색_실행(q: str, mode: str, category, db: AsyncSession, up
     results = []
     for did in candidate_ids:
         doc = docs_by_id[did]
-        chunk_info = best_chunk.get(did)
-        if chunk_info:
-            snippet  = _extract_snippet_multi(chunk_info["text"], tokens)
-            page_num = chunk_info["page_num"]
-        else:
-            info = _get_doc_text(did)
-            full_text = info["full_text"]
-            snippet  = (
-                _extract_snippet_multi(full_text, tokens) if full_text.strip()
-                else (doc.title or doc.filename)
-            )
-            page_num = _best_page_for_tokens(info["pages"], tokens)
+        # best_chunk는 hybrid_search가 candidate_ids 전체를 채워서 돌려준다(es_client.py 참고)
+        # — 그래서 여기서 파싱 JSON을 다시 읽는 폴백 분기는 도달 불가라 제거했다.
+        chunk_info = best_chunk[did]
+        snippet  = _extract_snippet_multi(chunk_info["text"], tokens)
+        page_num = chunk_info["page_num"]
 
         results.append({
             "doc_id":      doc.id,
@@ -2468,6 +2466,7 @@ async def 내_문서_삭제(doc_id: int, request: Request, db: AsyncSession = De
     filename = doc.filename
     await _문서_완전삭제(doc, db)
     await db.commit()
+    await _es_문서청크_삭제([doc_id])
     return {"message": f"'{filename}' 문서가 삭제됐습니다", "id": doc_id}
 
 

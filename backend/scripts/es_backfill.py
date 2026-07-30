@@ -26,7 +26,7 @@ from search import es_client
 async def main():
     if not es_client.ensure_index():
         print("[백필] Elasticsearch에 연결할 수 없습니다 — 컨테이너가 떠 있는지 확인하세요.")
-        return
+        return 1
 
     async with AsyncSessionLocal() as sess:
         doc_rows = (await sess.execute(
@@ -61,15 +61,28 @@ async def main():
         })
 
     BATCH = 500
+    total_ok = 0
+    total_failed = 0
     for i in range(0, len(rows), BATCH):
         batch = rows[i:i + BATCH]
-        es_client.bulk_index_chunks(batch)
-        print(f"[백필] {min(i + BATCH, len(rows))}/{len(rows)} 색인 완료")
+        ok, failed = es_client.bulk_index_chunks(batch)
+        total_ok += ok
+        total_failed += failed
+        done = min(i + BATCH, len(rows))
+        if failed:
+            print(f"[백필] {done}/{len(rows)} — 성공 {ok}건 / 실패 {failed}건")
+        else:
+            print(f"[백필] {done}/{len(rows)} 색인 완료")
 
     if skipped_no_emb:
         print(f"[백필] 참고: embedding이 없는 청크 {skipped_no_emb}개는 BM25로만 검색됨(kNN 대상 아님)")
-    print("[백필] 완료")
+
+    if total_failed:
+        print(f"[백필] 실패 — 색인 성공 {total_ok}건 / 실패 {total_failed}건 (실패한 청크는 검색에 안 잡힙니다)")
+        return 1
+    print(f"[백필] 완료 — 색인 성공 {total_ok}건")
+    return 0
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    sys.exit(asyncio.run(main()))

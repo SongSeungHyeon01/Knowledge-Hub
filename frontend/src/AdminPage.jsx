@@ -645,7 +645,7 @@ export default function AdminPage({ onNavigate }) {
                     <Input placeholder="파일명 검색" prefix={<SearchOutlined style={{ color: '#aaa' }} />} value={filterText} onChange={e => setFilterText(e.target.value)} allowClear style={{ width: isNarrow ? '100%' : 300 }} />
                     <Select placeholder="카테고리" value={filterCategory} onChange={setFilterCategory} allowClear style={{ width: isNarrow ? '100%' : 170 }} options={allCategoryOptions} />
                     <Select placeholder="상태" value={filterStatus} onChange={setFilterStatus} allowClear style={{ width: isNarrow ? '100%' : 140 }} options={[{ value: 'success', label: '성공' }, { value: 'failed', label: '실패' }]} />
-                    <Select placeholder="파일 형식" value={filterFileType} onChange={setFilterFileType} allowClear style={{ width: isNarrow ? '100%' : 160 }} options={['pdf','docx','pptx','xlsx','hwp','hwpx','txt','md','png','jpg'].map(ft => ({ value: ft, label: ft.toUpperCase() }))} />
+                    <Select placeholder="파일 형식" value={filterFileType} onChange={setFilterFileType} allowClear style={{ width: isNarrow ? '100%' : 160 }} options={['pdf','docx','pptx','xlsx','txt','md','png','jpg'].map(ft => ({ value: ft, label: ft.toUpperCase() }))} />
                     {(filterText || filterCategory || filterStatus || filterFileType) && (
                       <Button onClick={() => { setFilterText(''); setFilterCategory(null); setFilterStatus(null); setFilterFileType(null) }}>필터 초기화</Button>
                     )}
