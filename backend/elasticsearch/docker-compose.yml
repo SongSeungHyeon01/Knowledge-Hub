@@ -1,0 +1,16 @@
+services:
+  es-project-knowledge-hub:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+    container_name: project_knowledge_hub_es
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+    ports:
+      - "9200:9200"
+    volumes:
+      - project_knowledge_hub_es_data:/usr/share/elasticsearch/data
+
+volumes:
+  project_knowledge_hub_es_data:

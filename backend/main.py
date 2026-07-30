@@ -37,7 +37,8 @@ load_dotenv()
 
 # ③ 김태훈 검색 정본 (backend/search/search.py) — 알고리즘 구성요소만 가져다 쓴다.
 #   채택: 섹션 헤더 우선 청킹 / 언어감지 토크나이저 / 비대칭 RRF k / 영↔한 동의어 보강
-#   저장은 설계도 C5 규칙(PostgreSQL CHUNKS PK = turbovec 벡터 ID 1:1)대로 이 파일이 담당.
+#   저장은 설계도 C5 규칙(PostgreSQL CHUNKS PK = 검색 인덱스 청크 ID 1:1, 2026-07-28부터
+#   Elasticsearch _id로 사용)대로 이 파일이 담당.
 #   (_로 시작하는 이름도 가져오는 이유: ③ 정본의 내부 상수·함수를 재구현 없이 그대로
 #    재사용하기 위함 — 값을 바꾸지 말 것)
 from search.search import (
@@ -75,9 +76,11 @@ os.makedirs(MIRROR_TRASH_PARSED_DIR, exist_ok=True)
 # 지원 파일 형식 목록
 # (png/jpg 단독 이미지는 미지원으로 정리 — 2026-07-04 결정. 문서 속 이미지는
 #  PDF OCR 경로·DOCX embedded 이미지 OCR로 이미 처리된다)
+# [2026-07-28] HWP/HWPX 지원 포기 — Docling으로 파서를 통합했는데 Docling이
+# HWP/HWPX를 지원하지 않는다(공식 지원 포맷 목록에 없음, 재확인 완료). 기존에
+# 업로드된 HWP/HWPX 문서는 DB에 그대로 남아 열람 가능하지만, 새 업로드는 거부된다.
 SUPPORTED_EXTENSIONS = {
-    '.pdf', '.docx', '.pptx', '.ppt', '.xlsx', '.xls',
-    '.hwp', '.hwpx', '.txt', '.md',
+    '.pdf', '.docx', '.pptx', '.ppt', '.xlsx', '.xls', '.txt', '.md',
 }
 
 # 파일 크기 상한 (500MB — OOM 방지 1MB 스트리밍)
@@ -91,20 +94,6 @@ MAX_UPLOAD_SIZE = 500 * 1024 * 1024
 # 전용 전역 상한(MAX_UPLOAD_SIZE)보다 더 타이트한 값을 별도로 둔다.
 NON_PDF_MAX_SIZE_MB = int(os.environ.get("NON_PDF_MAX_SIZE_MB", "100"))
 NON_PDF_MAX_SIZE = NON_PDF_MAX_SIZE_MB * 1024 * 1024
-
-
-# ── turbovec 인덱스 (전역, 지연 초기화) ──────────────────────────────────────
-_vec_index = None   # turbovec.IdMapIndex or None (설치 안 됐을 때)
-
-def _get_vec_index():
-    global _vec_index
-    if _vec_index is None:
-        try:
-            import turbovec
-            _vec_index = turbovec.IdMapIndex(dim=384, bit_width=4)
-        except ImportError:
-            pass
-    return _vec_index
 
 
 # ── 정체 문서 주기적 스윕 (2026-07-06) ────────────────────────────────────────
@@ -170,8 +159,10 @@ def _mirror_upload_safe(save_path: str, filename: str):
 
 
 def _mirror_parsed(doc_id: int):
-    """파싱 결과(JSON)와 임베딩(npz)을 실시간 미러로 복사한다. 존재하는 파일만 복사한다."""
-    for fname in (f"{doc_id}.json", f"{doc_id}_emb.npz"):
+    """파싱 결과(JSON)를 실시간 미러로 복사한다. 존재하는 파일만 복사한다.
+    [수정 2026-07-28] 임베딩은 이제 Elasticsearch에만 저장되므로(npz 폐기) 더 이상
+    미러링 대상이 아니다."""
+    for fname in (f"{doc_id}.json",):
         src = os.path.join(PARSED_DIR, fname)
         if os.path.exists(src):
             shutil.copy2(src, os.path.join(MIRROR_PARSED_DIR, fname))
@@ -198,7 +189,7 @@ def _mirror_remove(doc_id: int, saved_path: str):
     if os.path.exists(mirror_upload_path):
         _move_to_trash(mirror_upload_path, os.path.join(MIRROR_TRASH_UPLOAD_DIR, rel))
 
-    for fname in (f"{doc_id}.json", f"{doc_id}_emb.npz"):
+    for fname in (f"{doc_id}.json",):
         src = os.path.join(MIRROR_PARSED_DIR, fname)
         if os.path.exists(src):
             _move_to_trash(src, os.path.join(MIRROR_TRASH_PARSED_DIR, fname))
@@ -375,7 +366,7 @@ async def _scheduled_backup_task():
 
 @asynccontextmanager
 async def lifespan(_):
-    """서버 시작 시 DB 테이블 생성 + 스키마 마이그레이션 + turbovec 재구성."""
+    """서버 시작 시 DB 테이블 생성 + 스키마 마이그레이션 + Elasticsearch 인덱스 확인."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
@@ -432,31 +423,14 @@ async def lifespan(_):
             await sess.commit()
             print(f"[startup] 중단된 parsing 문서 {len(stuck)}건을 failed로 정리")
 
-    # turbovec 인덱스 재구성 (DB CHUNKS에서 임베딩 로드)
-    idx = _get_vec_index()
-    if idx is not None:
-        async with AsyncSessionLocal() as sess:
-            rows = (await sess.execute(
-                select(Chunk).where(Chunk.embedding != None)
-            )).scalars().all()
-            # [수정 2026-07-04] turbovec IdMapIndex에는 add()가 없고 add_with_ids()
-            # (배치 전용)만 있다. 기존 idx.add(...)는 try/except에 삼켜져 조용히
-            # 전부 실패했음 → 벡터·id를 모아 한 번에 배치 등록한다. (C5: id=Chunk PK)
-            vecs, ids = [], []
-            for row in rows:
-                try:
-                    vecs.append(np.frombuffer(row.embedding, dtype=np.float32))
-                    ids.append(int(row.id))
-                except Exception:
-                    pass
-            count = 0
-            if vecs:
-                try:
-                    idx.add_with_ids(np.vstack(vecs), np.array(ids, dtype=np.uint64))
-                    count = len(ids)
-                except Exception as e:
-                    print(f"[startup] turbovec 재구성 실패: {e}")
-        print(f"[startup] turbovec 재구성 완료: {count}개 벡터")
+    # Elasticsearch 인덱스 확인/생성 — ES는 자체 저장소라 turbovec처럼 매 재시작마다
+    # PostgreSQL에서 벡터를 다시 부어줄 필요가 없다. 인덱스가 없을 때만 매핑과 함께
+    # 새로 만든다(ensure_index()가 idempotent).
+    from search import es_client as _es
+    if _es.ensure_index():
+        print("[startup] Elasticsearch 인덱스 확인 완료")
+    else:
+        print("[startup] Elasticsearch 연결 실패 — 유사 검색이 동작하지 않을 수 있습니다")
 
     sweep_task = asyncio.create_task(_sweep_stale_parsing())
     print(f"[startup] 정체 문서 스윕 태스크 시작 (주기 {_SWEEP_INTERVAL_SEC}s, 기준 {_SWEEP_STALE_MINUTES}분)")
@@ -1120,24 +1094,6 @@ def _get_embed_model():
     return _embed_model
 
 
-# ── 유사 검색 재랭킹용 BM25 토크나이저 (지연 로딩) ──────────────────────────
-# 2026-07-23: 유사 검색(임베딩) 후보 안에서 랭킹 품질을 보강하기 위해서만 쓴다 —
-# 예전처럼 전체 문서를 대상으로 한 글로벌 BM25 인덱스/캐시가 아니라, 매 검색마다
-# "이미 의미상 후보로 뽑힌" 소규모 문서 집합에 대해서만 그때그때 새로 만든다
-# (후보가 원래도 최대 수십 건이라 캐싱 없이도 충분히 빠르다). 이 방식이면 BM25가
-# 후보를 "추가"하는 일은 없고 순위만 보강하므로, 예전에 겪었던 "형태소 축약으로
-# 무관한 문서가 정확검색으로 잘못 분류되는" 문제가 재발하지 않는다.
-_search_indexer = None
-
-def _get_search_indexer():
-    global _search_indexer
-    if _search_indexer is None:
-        try:
-            from search.search import BM25Indexer
-            _search_indexer = BM25Indexer()   # 내부에서 Kiwi 로드 (첫 호출만 느림)
-        except Exception as e:
-            print(f"[search] BM25 토크나이저 로드 실패: {e}")
-    return _search_indexer
 
 
 def _best_page_for_tokens(pages: list, tokens: list) -> int:
@@ -1219,7 +1175,14 @@ def _build_chunks(pages: list) -> tuple:
 
 
 async def _ingest_chunks_to_db(doc_id: int, pages: list):
-    """청크 분할 → MiniLM 임베딩 → CHUNKS 테이블 저장 → turbovec 색인."""
+    """청크 분할 → MiniLM 임베딩 → CHUNKS 테이블 저장 → Elasticsearch 색인.
+
+    [수정 2026-07-28] turbovec 인메모리 인덱스 + npz fallback을 Elasticsearch로
+    교체했다. 임베딩을 "만드는" 부분(MiniLM 호출)은 그대로다 — 바뀐 건 그 결과를
+    보관하는 곳뿐이다. PostgreSQL의 Chunk.embedding 컬럼은 원본 보관용으로 그대로
+    유지한다(ES가 죽거나 인덱스가 꼬여도 여기서 다시 색인할 수 있게 하는 안전장치 —
+    scripts/es_backfill.py 참고).
+    """
     model = _get_embed_model()
     chunks, pnums = _build_chunks(pages)
     if not chunks:
@@ -1235,34 +1198,20 @@ async def _ingest_chunks_to_db(doc_id: int, pages: list):
     else:
         embs = None
 
-    # npz 저장 (turbovec 인덱스 없을 때 유사 검색의 numpy fallback용)
-    if embs is not None:
-        npz_path = os.path.join(PARSED_DIR, f"{doc_id}_emb.npz")
-        np.savez_compressed(npz_path,
-            embeddings=embs,
-            chunks=np.array(chunks, dtype=object),
-            pnums=np.array(pnums, dtype=np.int32))
-
-    # DB에 Chunk 저장 + turbovec 색인
+    # DB에 Chunk 저장 + Elasticsearch 색인
     # [수정 2026-07-06] 이 시점은 이미 doc.status="success"로 커밋된 뒤일 수 있으므로
     # 여기서 예외가 나도 status는 건드리지 않는다(건드리면 "성공했는데 실패로 뒤집힘"
     # 이라는 또 다른 혼란이 생김). 대신 조용히 삼키지 않고 반드시 로그를 남겨, 색인이
     # 누락된 문서(검색에 안 잡히는 문서)를 나중에 사람이 로그로 식별할 수 있게 한다.
-    idx = _get_vec_index()
     try:
         async with AsyncSessionLocal() as sess:
-            # 기존 청크 삭제 (재시도 시) — C5 규칙: DB에서 지우는 청크는 turbovec에서도
-            # 함께 제거해야 한다. 안 그러면 삭제된 id의 "유령 벡터"가 인덱스에 남아
-            # 메모리를 차지하고, 검색 상위 k 자리를 뺏어 실제 결과를 밀어낸다.
-            old_ids = (await sess.execute(
-                select(Chunk.id).where(Chunk.doc_id == doc_id)
-            )).scalars().all()
-            if idx is not None:
-                for cid in old_ids:
-                    try:
-                        idx.remove(int(cid))
-                    except Exception:
-                        pass
+            doc_row = (await sess.execute(
+                select(Document.filename, Document.title, Document.memo).where(Document.id == doc_id)
+            )).first()
+            # 기존 청크 삭제 (재시도 시) — ES에서도 함께 제거해야 한다. 안 그러면 삭제된
+            # id의 "유령 청크"가 인덱스에 남아 검색 결과를 오염시킨다.
+            from search import es_client as _es
+            _es.delete_doc_chunks(doc_id)
             await sess.execute(
                 sa_delete(Chunk).where(Chunk.doc_id == doc_id)
             )
@@ -1272,17 +1221,24 @@ async def _ingest_chunks_to_db(doc_id: int, pages: list):
                 sess.add(chunk_row)
             await sess.flush()  # IDs 확보
             await sess.commit()
-            # turbovec에 추가 — add()는 없는 API. add_with_ids() 배치 등록 (C5: id=Chunk PK)
-            if idx is not None and embs is not None:
-                refreshed = (await sess.execute(
-                    select(Chunk).where(Chunk.doc_id == doc_id).order_by(Chunk.chunk_idx)
-                )).scalars().all()
-                new_ids = np.array([int(row.id) for row in refreshed], dtype=np.uint64)
-                if len(new_ids):
-                    try:
-                        idx.add_with_ids(embs[:len(new_ids)], new_ids)
-                    except Exception as e:
-                        print(f"[ingest] turbovec 색인 실패: {e}")
+            refreshed = (await sess.execute(
+                select(Chunk).where(Chunk.doc_id == doc_id).order_by(Chunk.chunk_idx)
+            )).scalars().all()
+            rows = [
+                {
+                    "chunk_id": int(row.id),
+                    "doc_id": doc_id,
+                    "filename": doc_row.filename if doc_row else "",
+                    "title": doc_row.title if doc_row else "",
+                    "memo": doc_row.memo if doc_row else "",
+                    "text": row.text,
+                    "page_num": row.page_num,
+                    "chunk_idx": row.chunk_idx,
+                    "embedding": embs[i].tolist() if embs is not None and i < len(embs) else None,
+                }
+                for i, row in enumerate(refreshed)
+            ]
+            _es.bulk_index_chunks(rows)
         print(f"[ingest] doc_id={doc_id}: {len(chunks)}청크 저장 완료")
         _invalidate_doc_text(doc_id)
     except Exception as e:
@@ -1670,7 +1626,7 @@ async def 파일_다운로드(doc_id: int, request: Request, db: AsyncSession = 
     )
 
 
-# 문서 1건을 디스크(원본파일·파싱JSON·임베딩npz)와 DB(Chunk·turbovec·Document row)에서
+# 문서 1건을 디스크(원본파일·파싱JSON)와 DB(Chunk·Document row) + Elasticsearch(청크)에서
 # 완전히 삭제하는 공통 로직 — 관리자 단건/일괄 삭제, 본인 문서 삭제(/me/documents)가 모두 이걸 쓴다.
 # db.delete(doc)까지만 하고 commit은 호출자가 한다(일괄 삭제는 여러 건을 모아 한 번에 commit).
 async def _문서_완전삭제(doc: Document, db: AsyncSession):
@@ -1691,21 +1647,13 @@ async def _문서_완전삭제(doc: Document, db: AsyncSession):
     if os.path.exists(parsed_path):
         os.remove(parsed_path)
 
-    # Chunks 삭제 + turbovec 제거
-    chunk_ids = (await db.execute(
-        select(Chunk.id).where(Chunk.doc_id == doc_id)
-    )).scalars().all()
+    # Chunks 삭제 + Elasticsearch에서도 제거
     await db.execute(sa_delete(Chunk).where(Chunk.doc_id == doc_id))
 
-    idx = _get_vec_index()
-    if idx is not None:
-        for cid in chunk_ids:
-            try:
-                idx.remove(int(cid))
-            except Exception:
-                pass
+    from search import es_client as _es
+    _es.delete_doc_chunks(doc_id)
 
-    # npz 삭제
+    # 이전(turbovec 시절) npz 잔재가 남아있으면 함께 정리 — 새 색인은 더 이상 만들지 않는다
     npz_path = os.path.join(PARSED_DIR, f"{doc_id}_emb.npz")
     if os.path.exists(npz_path):
         os.remove(npz_path)
@@ -1993,10 +1941,10 @@ def _extract_snippet_multi(text: str, tokens: list, max_len: int = 200) -> str:
 async def 실제_검색_실행(q: str, mode: str, category, db: AsyncSession, uploaded_by=None, date_from=None, date_to=None) -> dict:
     """두 모드로 나뉜 검색.
     - mode="filename": 파일명에 검색어가 그대로 포함된 문서만 찾는다(문서 내용은 보지 않음).
-    - mode="semantic": MiniLM 임베딩 코사인 유사도로 문서 "내용"을 찾는다. 일단 넓게(0보다
-      크면) 후보로 잡은 뒤, 그 안에서 BM25로 실제 키워드 포함 여부를 확인해 의미 유사도가
-      낮으면서(SEM_FLOOR 미만) 키워드도 전혀 없는 문서는 최종 후보에서 뺀다. 짧은 단어
-      하나만 검색해도(예: "점주") 무관한 문서가 함께 나오지 않도록 하기 위함이다.
+    - mode="semantic": Elasticsearch 하이브리드(BM25 + kNN, 파이썬에서 RRF로 융합)로
+      문서 "내용"을 찾는다(es_client.hybrid_search). 코퍼스 안에 실제 키워드 매치가
+      하나라도 있으면 키워드 없는 순수 의미 유사도 문서는 제외한다 — 짧은 단어 하나만
+      검색해도(예: "점주") 무관한 문서가 함께 나오지 않도록 하기 위함이다.
     검색어가 비어 있으면(카테고리 등 필터만으로 "둘러보기") 모드와 무관하게 최신순으로
     나열한다.
     """
@@ -2076,156 +2024,41 @@ async def 실제_검색_실행(q: str, mode: str, category, db: AsyncSession, up
             })
         return {"results": results}
 
-    # -- 유사 검색 -- MiniLM 임베딩 코사인 유사도로 문서 "내용"을 찾는다 --------------
-    # 한국어 쿼리 <-> 영어 문서 교차 검색 지원. "모호한 문구를 넣어도 내용과 일치하는
-    # 목록을 전부 보여주게 해달라"는 요구에 맞춰, 별도 임계값으로 걸러내지 않고
-    # 0보다 큰(즉 방향이 조금이라도 맞는) 유사도는 전부 후보로 삼는다.
+    # -- 유사 검색 -- Elasticsearch 하이브리드(BM25 + kNN)로 문서 "내용"을 찾는다 --------
+    # [수정 2026-07-28] turbovec + 즉석 BM25Okapi 재구성 + 손으로 짠 RRF를 Elasticsearch로
+    # 교체했다. BM25는 이제 이 함수가 매번 다시 만들지 않고 ES에 이미 색인된 전체
+    # 코퍼스를 그대로 쓴다 — doc_ids 필터로 위에서 이미 적용된 category/uploaded_by/date
+    # 필터·status="success" 범위만 유지한다(부서 접근 제한은 이 함수가 리턴한 뒤 별도로
+    # 적용됨 — _filter_readable_ids, /search 핸들러).
+    #
+    # "점주" 버그(2026-07-25 2차 수정)의 우선순위 로직 — 코퍼스 안에 실제 키워드
+    # 매치(BM25)가 하나라도 있으면 키워드 없는 순수 의미 유사도 문서는 제외 — 는
+    # es_client.hybrid_search() 안으로 그대로 옮겨졌다.
     tokens = [t.lower() for t in re.split(r"[\s\W]+", q_stripped) if len(t) >= 2]  # 스니펫 위치 찾기용
-    sem_scores: dict = {}
-    sem_chunks: dict = {}   # doc_id -> 가장 유사한 청크 텍스트 (스니펫용)
-    sem_pages:  dict = {}   # doc_id -> 가장 유사한 청크의 페이지 번호
-    async def _npz_fallback():
-        """turbovec 인덱스가 없거나, 오류가 났거나, (색인 유실 등으로) 결과가 0건일 때
-        문서별로 저장해 둔 .npz 임베딩을 직접 코사인 유사도 계산해 찾는다."""
-        if model is None:
-            return
-        try:
-            q_emb_np = (await asyncio.to_thread(
-                model.encode, [q_stripped],
-                normalize_embeddings=True,
-                show_progress_bar=False,
-            ))[0]
-            for doc in docs:
-                emb_path = os.path.join(PARSED_DIR, f"{doc.id}_emb.npz")
-                if not os.path.exists(emb_path):
-                    continue
-                data     = np.load(emb_path, allow_pickle=True)
-                embs     = data["embeddings"]
-                sims     = embs @ q_emb_np
-                best_idx = int(np.argmax(sims))
-                sem_scores[doc.id] = float(sims[best_idx])
-                if "chunks" in data:
-                    sem_chunks[doc.id] = str(data["chunks"][best_idx])
-                if "pnums" in data:
-                    sem_pages[doc.id]  = int(data["pnums"][best_idx])
-        except Exception as e:
-            print(f"[search] 시맨틱 오류: {e}")
-
-    idx = _get_vec_index()
-    model = _get_embed_model()
-    if idx is not None and model is not None:
-        q_emb = (await asyncio.to_thread(
-            model.encode, [q_stripped], normalize_embeddings=True, show_progress_bar=False
-        ))[0].astype(np.float32)
-        try:
-            # [수정 2026-07-04] turbovec search는 2차원 쿼리 배열을 받고
-            # (scores, ids) "순서"로 반환한다 -- 기존 코드는 (ids, scores)로
-            # 거꾸로 받고 1차원을 넘겨서 시맨틱 경로가 항상 예외->fallback으로 빠졌음.
-            scores_2d, ids_2d = idx.search(q_emb.reshape(1, -1), 50)
-            vec_scores, vec_ids = scores_2d[0], ids_2d[0]
-            if vec_ids is not None and len(vec_ids) > 0:
-                chunk_rows = (await db.execute(
-                    select(Chunk.id, Chunk.doc_id, Chunk.text, Chunk.page_num)
-                    .where(Chunk.id.in_([int(i) for i in vec_ids]))
-                )).all()
-                id_to_row = {row.id: row for row in chunk_rows}
-                for cid, score in zip(vec_ids, vec_scores):
-                    row = id_to_row.get(int(cid))
-                    if row is None:
-                        continue
-                    did = row.doc_id
-                    if float(score) > sem_scores.get(did, -1):
-                        sem_scores[did] = float(score)
-                        sem_chunks[did] = row.text
-                        sem_pages[did]  = row.page_num
-        except Exception as e:
-            print(f"[search] turbovec 오류, numpy fallback: {e}")
-            await _npz_fallback()
-        # turbovec 색인이 DB Chunk와 어긋나 있으면(예: 색인 유실) 오류 없이 그냥 0건이
-        # 나올 수 있다 — 이 경우도 조용히 넘어가지 않고 npz로 한 번 더 찾아본다.
-        if not sem_scores:
-            await _npz_fallback()
-    else:
-        # turbovec 없으면 기존 npz 방식 fallback
-        await _npz_fallback()
-
     docs_by_id = {d.id: d for d in docs}
-    broad_ids = [did for did, s in sem_scores.items() if s > 0 and did in docs_by_id]
-    if not broad_ids:
-        return {"results": []}
+    model = _get_embed_model()
+    q_vec = None
+    if model is not None:
+        q_vec = (await asyncio.to_thread(
+            model.encode, [q_stripped], normalize_embeddings=True, show_progress_bar=False
+        ))[0].tolist()
 
-    # ── 의미 검색 후보 안에서 BM25로 랭킹 품질 보강 ────────────────────────────
-    # 후보(broad_ids)는 일단 의미 유사도만으로 넓게 뽑혔다 — BM25는 여기서 새
-    # 문서를 추가하지 않고, 이미 뽑힌 후보들의 "순서"만 문맥에 맞게 재조정한다.
-    # (전체 문서 대상 글로벌 BM25 인덱스가 아니라 이 소규모 후보 집합만 매번
-    # 새로 만들므로 캐시가 필요 없고, 예전에 있었던 "형태소 축약으로 무관한
-    # 문서가 후보에 잘못 끼어드는" 문제도 구조적으로 재발하지 않는다.)
-    bm25_scores: dict = {}
-    try:
-        indexer = _get_search_indexer()
-        corpus_docs = [docs_by_id[did] for did in broad_ids]
-        corpus_texts = []
-        for doc in corpus_docs:
-            info = _get_doc_text(doc.id)
-            corpus_texts.append(" ".join(filter(None, [doc.filename, doc.title or "", doc.memo or "", info["full_text"]])))
-        if indexer is not None:
-            corpus   = [indexer._tokenize(t) for t in corpus_texts]
-            q_tokens = indexer._tokenize_query(q_stripped)
-        else:
-            corpus   = [[t.lower() for t in re.split(r"[\s\W]+", t) if len(t) >= 2] for t in corpus_texts]
-            q_tokens = [t.lower() for t in re.split(r"[\s\W]+", q_stripped) if len(t) >= 2]
-        from rank_bm25 import BM25Okapi
-        bm25_index = BM25Okapi(corpus)
-        raw_scores = bm25_index.get_scores(q_tokens)
-        for doc, s in zip(corpus_docs, raw_scores):
-            bm25_scores[doc.id] = float(s)
-    except Exception as e:
-        print(f"[search] 유사 검색 BM25 재랭킹 실패(의미검색 점수만 사용): {e}")
-
-    # [수정 2026-07-25, 1차] "점주"처럼 짧은 단어 하나만 검색하면 무관한 문서도 코사인
-    # 유사도가 0.1~0.25대 양수로 나오는 경우가 흔해 "0보다 크다"만으로는 걸러지지
-    # 않았다. 그래서 의미 유사도 기준값(SEM_FLOOR)을 도입했었다.
-    #
-    # [수정 2026-07-25, 2차] 그런데 그 기준값 자체가 안전하지 않다는 게 실제 운영
-    # 데이터로 드러났다 — 예를 들어 README.md의 "⚠️ 꼭 지킬 규칙" 섹션(내용은 "점주"와
-    # 전혀 무관)이 실측 유사도 0.3656으로, 진짜 관련 문서(약 0.3대)보다도 오히려 높게
-    # 나왔다. 즉 이 임베딩 모델은 한두 글자짜리 단어로는 "진짜 관련"과 "우연히 문장
-    # 구조만 비슷한 무관한 내용"을 숫자 하나로 깔끔하게 못 가른다 — 기준값을 아무리
-    # 조정해도 두 구간이 겹친다.
-    #
-    # 그래서 우선순위를 뒤집는다: 코퍼스 안에 실제로 그 단어(BM25 기준)를 포함한
-    # 문서가 하나라도 있으면, 의미 유사도만으로 들어온 문서는 전부 제외하고 실제
-    # 키워드가 있는 문서만 최종 후보로 남긴다. 진짜 키워드가 코퍼스 어디에도 전혀
-    # 없을 때만(모호한 문구·패러프레이즈 검색) 기존처럼 의미 유사도로 폭넓게 찾는다.
-    has_keyword_match = any(s > 0 for s in bm25_scores.values())
-    if has_keyword_match:
-        candidate_ids = [did for did in broad_ids if bm25_scores.get(did, 0) > 0]
-    else:
-        candidate_ids = broad_ids
+    from search import es_client as _es
+    hybrid = _es.hybrid_search(q_stripped, q_vec, list(docs_by_id.keys()), size=50)
+    candidate_ids = [did for did in hybrid["doc_ids"] if did in docs_by_id]
     if not candidate_ids:
         return {"results": []}
 
-    # RRF로 의미검색 순위(주 신호)와 BM25 순위(보강 신호)를 합친다 — 의미검색에
-    # 더 작은 k를 줘서 주 신호로 삼고, BM25는 동점 상황을 갈라주는 보조 역할만 한다.
-    K_SEM, K_BM25 = 30, 60
-    n = len(candidate_ids)
-    sem_rank = {did: i + 1 for i, did in enumerate(sorted(candidate_ids, key=lambda d: sem_scores[d], reverse=True))}
-    bm25_rank = {}
-    if bm25_scores:
-        for i, did in enumerate(sorted(bm25_scores, key=bm25_scores.get, reverse=True)):
-            bm25_rank[did] = i + 1
-    final_scores = {}
-    for did in candidate_ids:
-        sr = sem_rank.get(did, n + 1)
-        br = bm25_rank.get(did, n + 1)
-        final_scores[did] = 1 / (K_SEM + sr) + 1 / (K_BM25 + br)
+    final_scores = hybrid["final_scores"]
+    best_chunk   = hybrid["best_chunk"]
 
     results = []
     for did in candidate_ids:
         doc = docs_by_id[did]
-        if did in sem_chunks:
-            snippet  = _extract_snippet_multi(sem_chunks[did], tokens)
-            page_num = sem_pages.get(did, 0)
+        chunk_info = best_chunk.get(did)
+        if chunk_info:
+            snippet  = _extract_snippet_multi(chunk_info["text"], tokens)
+            page_num = chunk_info["page_num"]
         else:
             info = _get_doc_text(did)
             full_text = info["full_text"]

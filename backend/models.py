@@ -43,10 +43,11 @@ class Document(Base):
     updated_at    = Column(DateTime, default=_kst_now, onupdate=_kst_now)
 
 
-# Chunk 테이블: 문서를 청크로 분할하여 저장합니다 (turbovec 벡터 ID와 1:1 대응)
+# Chunk 테이블: 문서를 청크로 분할하여 저장합니다 (검색 인덱스 청크 ID와 1:1 대응 —
+# 2026-07-28부터 Elasticsearch _id로 사용, 이전에는 turbovec 벡터 ID였음)
 #
 # [수정 2026-07-04] id 타입을 with_variant로 분기하는 이유:
-#   PostgreSQL → BIGSERIAL (설계도 C5 규칙: 이 id가 곧 turbovec 벡터 ID(uint64))
+#   PostgreSQL → BIGSERIAL (설계도 C5 규칙: 이 id가 곧 검색 인덱스 쪽 청크 ID(uint64))
 #   SQLite(로컬 개발) → INTEGER. SQLite는 BIGINT PK에 자동증가를 지원하지 않아
 #   기존 코드로는 로컬에서 청크 INSERT가 전부 "NOT NULL constraint failed"로 죽었음.
 _BigIntPK = BigInteger().with_variant(Integer, "sqlite")
@@ -54,17 +55,18 @@ _BigIntPK = BigInteger().with_variant(Integer, "sqlite")
 class Chunk(Base):
     __tablename__ = "chunks"
     # [수정 2026-07-06] SQLite는 이 옵션 없이는 삭제된 rowid를 재사용할 수 있어(테이블
-    # 최대값+1만 보장), turbovec에 남은 "죽은" 벡터 id와 새 청크 id가 충돌해 검색 결과가
-    # 오염될 위험이 있다. PostgreSQL의 BIGSERIAL/SERIAL(시퀀스)은 삭제된 값을 재사용하지
-    # 않으므로, SQLite에도 같은 "재사용 없음" 특성을 강제해 환경별 동작 차이를 없앤다.
+    # 최대값+1만 보장), 검색 인덱스에 남은 "죽은" 청크 id와 새 청크 id가 충돌해 검색
+    # 결과가 오염될 위험이 있다. PostgreSQL의 BIGSERIAL/SERIAL(시퀀스)은 삭제된 값을
+    # 재사용하지 않으므로, SQLite에도 같은 "재사용 없음" 특성을 강제해 환경별 동작
+    # 차이를 없앤다.
     __table_args__ = {"sqlite_autoincrement": True}
 
-    id        = Column(_BigIntPK, primary_key=True, autoincrement=True)   # turbovec 벡터 ID와 1:1
+    id        = Column(_BigIntPK, primary_key=True, autoincrement=True)   # ES 청크 _id와 1:1
     doc_id    = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
     text      = Column(Text, nullable=False)                              # 청크 텍스트
     page_num  = Column(Integer, default=0)                                # 원본 페이지 번호
     chunk_idx = Column(Integer, default=0)                                # 문서 내 청크 순서
-    embedding = Column(LargeBinary, nullable=True)                        # float32 bytes, 재시작 시 turbovec 재구성
+    embedding = Column(LargeBinary, nullable=True)                        # float32 bytes, ES 백필/재색인용 원본 보관
 
 
 # User 테이블: 구글 로그인한 사람의 이메일→이름·프로필 사진을 기억해 둔다.

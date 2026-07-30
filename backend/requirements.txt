@@ -17,32 +17,24 @@ python-dotenv>=1.0.0  # backend/.env(git 미추적)에서 GOOGLE_CLIENT_ID 등 �
 
 # ── 검색 / 임베딩 ────────────────────────────────────────────────────────────
 sentence-transformers>=2.7.0
-rank-bm25>=0.2.2
-turbovec>=0.1.0
-kiwipiepy>=0.18.0
+elasticsearch>=8.15.0,<9.0.0   # 2026-07-28: turbovec+즉석 BM25+손으로 짠 RRF를 대체
+rank-bm25>=0.2.2   # search.py의 BM25Indexer(현재 미사용, 보류 코드)가 import — 지우면 그 모듈 로드가 깨짐
+kiwipiepy>=0.18.0  # 위와 동일 이유로 유지
 
-# ── PDF 파서 (core/parser.py) — parser/requirements.txt와 정확히 일치 유지 ──
+# ── 문서 파서 (core/parser.py, core/office_adapter.py, core/docling_parser.py) ──
 # [설치 방법] torch CPU 버전은 아래 명령어로 설치하세요 (일반 pip install 하면 GPU 버전이 깔릴 수 있음):
 # pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
-easyocr==1.7.2
 numpy==2.4.4
 torch==2.12.1+cpu
 
-# ↓ PyMuPDF 대체 라이브러리 (전부 MIT/Apache/BSD 계열)
-pdfplumber==0.11.10        # MIT — 텍스트 추출
-camelot-py==2.0.0          # MIT — 표 추출 (기본 백엔드 pdfium, Ghostscript 불필요)
-img2table[easyocr]==2.0.0  # MIT — 스캔 이미지 내 표 인식
-tabulate==0.10.0           # MIT — 표 → 마크다운 변환 보조
+# [2026-07-28 교체] pdfplumber+camelot-py+img2table+tabulate(PDF)와
+# python-docx+openpyxl+xlrd+lxml+LibreOffice(DOCX/PPTX/XLSX/HWP/HWPX)를
+# Docling 하나로 통합했다. HWP/HWPX는 Docling이 지원하지 않아 지원을 포기했다.
+# Docling은 PDF·DOCX·PPTX·XLSX(+ 구형 DOC/XLS/PPT)를 전부 자체 처리하며
+# LibreOffice·Poppler 등 외부 시스템 바이너리가 필요 없다.
+docling[easyocr]>=2.115.0  # MIT — 통합 파서 + OCR(EasyOCR 백엔드, 기존과 동일 엔진)
+pypdfium2>=4.0.0           # BSD — count_pdf_pages() 사전 페이지수 체크 (Docling도 내부적으로 씀)
 
-# ↓ parser.py가 직접 import/사용하는 라이브러리 (전에는 다른 패키지에 딸려 설치돼 목록에서 빠져 있었음)
+# ↓ parser.py가 직접 import/사용하는 라이브러리
 pillow==12.3.0             # HPND(허용) — from PIL import Image (스캔 이미지 처리)
 pandas==3.0.3              # BSD-3(허용) — 표(DataFrame) → 마크다운 변환
-
-# ── 비-PDF 파서 (hwp_postprocess/ — ② 송승현 정본) ──────────────────────────
-# HWP·PPTX는 시스템에 LibreOffice 설치 필요 (Dockerfile에서 처리, pip 패키지 아님)
-python-docx>=1.1.0         # DOCX 파싱 (+ HWP→DOCX 변환 결과 파싱)
-openpyxl>=3.1.2            # XLSX 파싱
-xlrd>=2.0.1                # BSD — 구형식 XLS(OLE2/BIFF) 직접 파싱, LibreOffice 경유 불필요
-lxml>=5.0.0                # HWPX 내부 XML 파싱
-# python-pptx는 운영 코드에서 미사용 (PPTX는 LibreOffice→PDF 경유).
-# hwp_postprocess/test_office_parsers.py 실행 시에만 별도 설치: pip install python-pptx
