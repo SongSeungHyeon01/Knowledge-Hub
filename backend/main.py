@@ -363,6 +363,62 @@ async def _scheduled_backup_task():
             print(f"[backup] 자동 백업 실패: {e}")
 
 
+# ── Elasticsearch 자동 복구 (2026-07-31) ─────────────────────────────────────
+# Railway 배포 환경에서 ES에 영속 볼륨을 못 붙이는 문제(컨테이너 실행 권한 문제,
+# docs/오류보고서 참고)가 있어 ES가 재시작될 때마다 인덱스가 통째로 비워진다.
+# Postgres의 Chunk.embedding이 원본을 그대로 보관하고 있으므로, 주기적으로
+# "ES 청크 수가 Postgres보다 눈에 띄게 적다"를 감지해서 자동으로 재색인한다 —
+# 사람이 매번 scripts/es_backfill.py를 수동으로 돌리지 않아도 되게 하는 안전망.
+_ES_SELFHEAL_INTERVAL_SEC = int(os.environ.get("ES_SELFHEAL_INTERVAL_SEC", str(10 * 60)))  # 10분마다
+_ES_SELFHEAL_RATIO = 0.9  # ES 청크 수가 Postgres의 이 비율 밑으로 떨어지면 재색인 트리거
+
+
+async def _es_selfheal_once():
+    """ES 인덱스 상태를 한 번 점검하고, 유실된 것으로 보이면 재색인한다."""
+    from search import es_client as _es
+
+    client = await asyncio.to_thread(_es.get_es_client)
+    if client is None:
+        print("[es-selfheal] ES에 연결할 수 없음 — 다음 주기에 재시도")
+        return
+
+    if not await asyncio.to_thread(_es.ensure_index):
+        return
+
+    try:
+        res = await asyncio.to_thread(client.count, index=_es.ES_INDEX)
+        es_count = res.body["count"]
+    except Exception as e:
+        print(f"[es-selfheal] ES 청크 수 조회 실패: {e}")
+        return
+
+    async with AsyncSessionLocal() as sess:
+        pg_count = (await sess.execute(select(func.count()).select_from(Chunk))).scalar()
+
+    if pg_count == 0:
+        return  # 문서가 아예 없으면 비교 대상 자체가 없음
+
+    if es_count < pg_count * _ES_SELFHEAL_RATIO:
+        print(f"[es-selfheal] ES 청크 수({es_count})가 Postgres({pg_count})보다 적음 — 자동 재색인 시작")
+        from scripts.es_backfill import run_backfill
+        ok, failed = await run_backfill()
+        print(f"[es-selfheal] 자동 재색인 완료 — 성공 {ok}건 / 실패 {failed}건")
+
+
+async def _scheduled_es_selfheal_task():
+    # 서버가 막 재시작됐는데 그 사이 ES가 이미 비어있던 경우를 빨리 잡기 위해
+    # 첫 점검은 대기 없이 바로 한다(다른 스윕 태스크들은 매번 sleep부터 하지만,
+    # 이건 "재시작 후 ES 유실 여부"가 핵심 시나리오라 즉시 확인이 더 유용하다).
+    while True:
+        try:
+            await _es_selfheal_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[es-selfheal] 점검 중 오류: {e}")
+        await asyncio.sleep(_ES_SELFHEAL_INTERVAL_SEC)
+
+
 @asynccontextmanager
 async def lifespan(_):
     """서버 시작 시 DB 테이블 생성 + 스키마 마이그레이션 + Elasticsearch 인덱스 확인."""
@@ -446,6 +502,9 @@ async def lifespan(_):
     revoked_session_sweep_task = asyncio.create_task(_scheduled_revoked_session_sweep_task())
     print(f"[startup] 세션 블랙리스트 정리 태스크 시작 (주기 {_REVOKED_SESSION_SWEEP_INTERVAL_SEC}s)")
 
+    es_selfheal_task = asyncio.create_task(_scheduled_es_selfheal_task())
+    print(f"[startup] Elasticsearch 자동 복구 태스크 시작 (주기 {_ES_SELFHEAL_INTERVAL_SEC}s)")
+
     yield
 
     sweep_task.cancel()
@@ -453,12 +512,13 @@ async def lifespan(_):
     mirror_trash_task.cancel()
     deletion_log_sweep_task.cancel()
     revoked_session_sweep_task.cancel()
-    for t in (sweep_task, backup_task, mirror_trash_task, deletion_log_sweep_task, revoked_session_sweep_task):
+    es_selfheal_task.cancel()
+    for t in (sweep_task, backup_task, mirror_trash_task, deletion_log_sweep_task, revoked_session_sweep_task, es_selfheal_task):
         try:
             await t
         except asyncio.CancelledError:
             pass
-    print("[shutdown] 정체 문서 스윕·백업·미러 trash·삭제 보고서·세션 블랙리스트 정리 태스크 종료")
+    print("[shutdown] 정체 문서 스윕·백업·미러 trash·삭제 보고서·세션 블랙리스트·ES 자동복구 태스크 종료")
 
 
 # FastAPI 앱 객체를 만듭니다
