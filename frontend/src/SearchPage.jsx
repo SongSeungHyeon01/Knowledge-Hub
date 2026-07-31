@@ -790,6 +790,16 @@ export default function SearchPage() {
           </div>
           <Divider style={{ margin: '12px 0' }} />
 
+          {results.engine_down && (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message="검색엔진 연결 실패"
+              description="유사 검색(내용 기반) 엔진에 일시적으로 연결할 수 없습니다. 결과가 없는 게 아니라 엔진이 다운된 상태입니다 — 잠시 후 다시 시도하거나 파일명 검색을 이용해 주세요."
+            />
+          )}
+
           {results.total === 0 ? (
             <div style={{ textAlign: 'center', padding: '32px 0' }}>
               <Empty description={results.query ? `"${results.query}"에 대한 검색 결과가 없습니다` : '조건에 맞는 문서가 없습니다'} />

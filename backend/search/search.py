@@ -6,7 +6,7 @@ main.py가 이 파일에서 쓰는 건 chunk_text() 하나다(섹션 헤더 우�
 [정리 2026-07-30] rank-bm25 + kiwipiepy 기반 BM25Indexer를 삭제했다. Elasticsearch
 마이그레이션(2026-07-28)으로 main.py의 호출부(_get_search_indexer)가 제거된 뒤 호출부가
 전혀 없는 죽은 코드였고, 그 상태로 rank-bm25/kiwipiepy 의존성만 붙잡고 있었다. BM25는
-이제 ES 내장 Lucene BM25(+ standard 분석기, nori 플러그인은 아직 미설치)가 담당한다.
+이제 ES 내장 Lucene BM25(+ nori 한국어 형태소 분석기, 2026-07-31부터 연결됨 — es_client.py 참고)가 담당한다.
 
 [정리 2026-07-25] 이 파일은 원래 임베딩·벡터저장소·하이브리드 검색엔진까지 포함한
 독립 모듈(HybridSearcher 등)로 작성됐었다. 하지만 main.py는 자체 인덱스·임베딩 로더·

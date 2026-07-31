@@ -15,18 +15,20 @@ Elastic 공식 discuss 포럼에서도 동일 오류 재현됨). 그래서 BM25 
 각각 따로 던지고, main.py가 기존에 쓰던 것과 같은 RRF 공식을 파이썬에서 직접 적용한다
 — 이 부분은 무료 티어에서도 라이선스 제약이 없다.
 
-[알려진 제약] 한국어 형태소 분석기(nori 플러그인) 설치가 이 세션에서는 이 머신의
-네트워크 문제(TLS bad record MAC, 큰 아티팩트 다운로드 시 반복 실패)로 아직 설치하지
-못했다 — 지금은 표준(standard) 분석기로 동작한다. nori는 나중에 네트워크가 안정적일
-때(또는 Oracle Cloud 배포 시) Dockerfile로 재시도할 것. standard 분석기는 공백/구두점
-기준 토큰화라 "점주" 같은 짧은 한국어 단어의 형태소 인식은 kiwipiepy보다 정밀하지
-않지만, BM25 자체는 정상 동작한다.
+[2026-07-31] 한국어 형태소 분석기(nori) 플러그인을 Railway ES 이미지에 설치 완료
+(backend/elasticsearch/Dockerfile — `elasticsearch-plugin install analysis-nori`,
+Railway 빌드 환경에서는 로컬 머신의 TLS 문제 없이 정상 설치됨). text/title/filename/
+memo 필드 매핑에 `"analyzer": "nori"`를 지정해 실제로 연결했다 — analyzer는 기존
+인덱스에 사후 변경이 안 되므로, `ES_INDEX` 이름에 `_v2` 접미사를 붙여 새 인덱스로
+전환한다(어차피 이 환경은 ES에 영속 볼륨이 없어 재시작마다 색인이 비므로, 이름을
+바꿔도 데이터 마이그레이션 이슈가 없다 — main.py의 자동 복구 태스크가 새 인덱스를
+Postgres에서 다시 채운다).
 """
 
 import os
 
 ES_URL = os.environ.get("ES_URL", "http://localhost:9200")
-ES_INDEX = os.environ.get("ES_INDEX", "project_knowledge_hub_chunks")
+ES_INDEX = os.environ.get("ES_INDEX", "project_knowledge_hub_chunks_v2")
 EMBED_DIM = 384
 
 _es_client = None
@@ -68,10 +70,10 @@ def ensure_index():
                 "properties": {
                     "chunk_id":  {"type": "long"},
                     "doc_id":    {"type": "keyword"},
-                    "filename":  {"type": "text"},
-                    "title":     {"type": "text"},
-                    "memo":      {"type": "text"},
-                    "text":      {"type": "text"},
+                    "filename":  {"type": "text", "analyzer": "nori"},
+                    "title":     {"type": "text", "analyzer": "nori"},
+                    "memo":      {"type": "text", "analyzer": "nori"},
+                    "text":      {"type": "text", "analyzer": "nori"},
                     "page_num":  {"type": "integer"},
                     "chunk_idx": {"type": "integer"},
                     "embedding": {
@@ -243,8 +245,14 @@ def hybrid_search(query_text: str, query_vector: list[float] | None, doc_ids: li
     없는 문서(순수 의미 유사도만 있는 문서)는 최종 후보에서 뺀다. 키워드가 전혀 없을 때만
     (모호한 패러프레이즈 검색) kNN 후보를 그대로 쓴다.
 
-    반환: {"doc_ids": [...], "final_scores": {doc_id: score}, "best_chunk": {doc_id: {"text","page_num"}}}
+    반환: {"doc_ids": [...], "final_scores": {doc_id: score}, "best_chunk": {doc_id: {"text","page_num"}},
+           "engine_down": bool} — engine_down=True면 "검색 결과가 원래 없는 것"이 아니라
+    "ES에 연결 자체가 안 돼서" 빈 결과라는 뜻이다(main.py가 이 값을 응답에 실어 프론트가
+    "검색결과 없음"과 "검색엔진 다운"을 구분해 보여줄 수 있게 한다).
     """
+    if get_es_client() is None:
+        return {"doc_ids": [], "final_scores": {}, "best_chunk": {}, "engine_down": True}
+
     # BM25는 collapse로 문서 단위 후보를 돌려주므로 size(청크 예산)가 아니라 문서 예산을 쓴다.
     bm25_hits = (bm25_search(query_text, doc_ids, size=max(size, BM25_CANDIDATE_DOCS))
                  if query_text.strip() else [])
@@ -268,7 +276,7 @@ def hybrid_search(query_text: str, query_vector: list[float] | None, doc_ids: li
     else:
         candidate_ids = list(sem_best.keys())
     if not candidate_ids:
-        return {"doc_ids": [], "final_scores": {}, "best_chunk": {}}
+        return {"doc_ids": [], "final_scores": {}, "best_chunk": {}, "engine_down": False}
 
     sem_rank = {
         did: i + 1
@@ -288,4 +296,4 @@ def hybrid_search(query_text: str, query_vector: list[float] | None, doc_ids: li
         src = sem_best.get(did) or bm25_best.get(did)
         best_chunk[did] = {"text": src["text"], "page_num": src["page_num"]}
 
-    return {"doc_ids": candidate_ids, "final_scores": final_scores, "best_chunk": best_chunk}
+    return {"doc_ids": candidate_ids, "final_scores": final_scores, "best_chunk": best_chunk, "engine_down": False}

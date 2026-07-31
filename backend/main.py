@@ -2036,7 +2036,7 @@ async def 실제_검색_실행(q: str, mode: str, category, db: AsyncSession, up
             pass
     docs = (await db.execute(stmt)).scalars().all()
     if not docs:
-        return {"results": []}
+        return {"results": [], "engine_down": False}
 
     q_stripped = q.strip()
     if not q_stripped:
@@ -2061,7 +2061,7 @@ async def 실제_검색_실행(q: str, mode: str, category, db: AsyncSession, up
                 "uploaded_by": d.uploaded_by,
                 "uploaded_at": str(d.uploaded_at),
             })
-        return {"results": results}
+        return {"results": results, "engine_down": False}
 
     if mode == "filename":
         # -- 파일명 검색 -- 문서 "내용"은 전혀 보지 않고 파일명 문자열만 본다 --------
@@ -2085,7 +2085,7 @@ async def 실제_검색_실행(q: str, mode: str, category, db: AsyncSession, up
                 "uploaded_by": d.uploaded_by,
                 "uploaded_at": str(d.uploaded_at),
             })
-        return {"results": results}
+        return {"results": results, "engine_down": False}
 
     # -- 유사 검색 -- Elasticsearch 하이브리드(BM25 + kNN)로 문서 "내용"을 찾는다 --------
     # [수정 2026-07-28] turbovec + 즉석 BM25Okapi 재구성 + 손으로 짠 RRF를 Elasticsearch로
@@ -2111,8 +2111,10 @@ async def 실제_검색_실행(q: str, mode: str, category, db: AsyncSession, up
         _es.hybrid_search, q_stripped, q_vec, list(docs_by_id.keys()), 50
     )
     candidate_ids = [did for did in hybrid["doc_ids"] if did in docs_by_id]
+    # engine_down=True면 "검색 결과가 없는 것"이 아니라 "ES에 연결 자체가 안 되는 것" —
+    # 프론트가 둘을 구분해서 보여줄 수 있게 응답에 그대로 실어 보낸다.
     if not candidate_ids:
-        return {"results": []}
+        return {"results": [], "engine_down": hybrid.get("engine_down", False)}
 
     final_scores = hybrid["final_scores"]
     best_chunk   = hybrid["best_chunk"]
@@ -2146,7 +2148,7 @@ async def 실제_검색_실행(q: str, mode: str, category, db: AsyncSession, up
         for r in results:
             r["score"] = round(r["score"] / top, 4)
 
-    return {"results": results[:50]}
+    return {"results": results[:50], "engine_down": False}
 
 
 # GET /search — 문서 검색 엔드포인트
@@ -2209,7 +2211,8 @@ async def 검색(
 
     return {"query": q, "mode": mode, "category": category, "file_type": file_type,
             "uploaded_by": uploaded_by, "date_from": date_from, "date_to": date_to,
-            "total": len(results), "results": results}
+            "total": len(results), "results": results,
+            "engine_down": bucket.get("engine_down", False)}
 
 
 # GET /uploaders — 검색 화면의 "작성자" 필터 드롭다운용, 실제로 문서를 올린 적 있는
