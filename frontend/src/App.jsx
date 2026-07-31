@@ -33,9 +33,29 @@ const { Header, Content } = Layout
 
 const API = import.meta.env.VITE_API_URL
 
+// [2026-07-31] 탭마다 주소창 URL을 분리 — 새로고침·북마크·공유 링크로 같은 화면에
+// 바로 올 수 있게 한다. 라우팅 라이브러리 없이 기존 코드 스타일(main.jsx의 pathname
+// 분기)을 그대로 따라 pushState/popstate로 직접 구현.
+const TAB_TO_PATH = { search: '/', upload: '/upload', bookmarks: '/bookmarks', myinfo: '/me' }
+const PATH_TO_TAB = { '/': 'search', '/search': 'search', '/upload': 'upload', '/bookmarks': 'bookmarks', '/me': 'myinfo' }
+const tabFromPath = (pathname) => PATH_TO_TAB[pathname] ?? 'search'
+
 export default function App() {
   const isNarrow = useIsNarrow()
-  const [current,   setCurrent]   = useState('search')
+  const [current, setCurrentState] = useState(() => tabFromPath(window.location.pathname))
+  // 탭을 바꿀 때마다 상태와 주소창 URL을 함께 갱신한다 — 기존 setCurrent(key) 호출부는
+  // 그대로 두고 이 함수만 교체했다.
+  const setCurrent = (key) => {
+    setCurrentState(key)
+    const path = TAB_TO_PATH[key] ?? '/'
+    if (window.location.pathname !== path) window.history.pushState(null, '', path)
+  }
+  // 브라우저 뒤로가기/앞으로가기 대응 — URL만 바뀌고 리액트 상태는 그대로인 상황을 동기화
+  useEffect(() => {
+    const handler = () => setCurrentState(tabFromPath(window.location.pathname))
+    window.addEventListener('popstate', handler)
+    return () => window.removeEventListener('popstate', handler)
+  }, [])
   // 로고 클릭 시 항상 메인(검색) 화면으로 — 이미 검색 탭이어도 검색 결과·필터 등
   // 남아 있는 내부 상태를 지우고 처음 화면으로 되돌리기 위해 key를 바꿔 강제로 다시 마운트한다
   const [homeKey,   setHomeKey]    = useState(0)
@@ -158,8 +178,7 @@ export default function App() {
     <Layout style={{ minHeight: '100vh', background: '#f7f8fa' }}>
       <Header
         style={{
-          background: '#fff',
-          borderBottom: '1px solid #eef0f2',
+          background: '#152A4E',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
@@ -169,6 +188,7 @@ export default function App() {
           position: 'sticky',
           top: 0,
           zIndex: 100,
+          boxShadow: '0 1px 3px rgba(10,20,40,0.15)',
         }}
       >
         {/* 좌측: 브랜드 (클릭 시 항상 메인 화면인 검색 탭으로 이동, 내부 상태도 초기화) */}
@@ -177,30 +197,30 @@ export default function App() {
           style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: isNarrow ? 0 : 220, cursor: 'pointer', flexShrink: 0 }}
         >
           <div style={{
-            width: 30, height: 30, borderRadius: 8, background: '#f1f5f9',
+            width: 30, height: 30, borderRadius: 7, background: '#3D5A99',
             display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
           }}>
             <svg width="18" height="18" viewBox="0 0 32 32">
-              <g fill="none" stroke="#64748b" strokeWidth="1.6" strokeLinejoin="round">
+              <g fill="none" stroke="#E9EEF7" strokeWidth="1.6" strokeLinejoin="round">
                 <rect x="6" y="10" width="10" height="17" rx="1" />
                 <rect x="17" y="14" width="9" height="13" rx="1" />
-                <rect x="9" y="13" width="1.6" height="1.6" fill="#64748b" stroke="none" />
-                <rect x="9" y="17" width="1.6" height="1.6" fill="#64748b" stroke="none" />
-                <rect x="9" y="21" width="1.6" height="1.6" fill="#64748b" stroke="none" />
-                <rect x="12.5" y="13" width="1.6" height="1.6" fill="#64748b" stroke="none" />
-                <rect x="12.5" y="17" width="1.6" height="1.6" fill="#64748b" stroke="none" />
-                <rect x="12.5" y="21" width="1.6" height="1.6" fill="#64748b" stroke="none" />
-                <rect x="19.5" y="17" width="1.6" height="1.6" fill="#64748b" stroke="none" />
-                <rect x="19.5" y="21" width="1.6" height="1.6" fill="#64748b" stroke="none" />
-                <rect x="22.5" y="17" width="1.6" height="1.6" fill="#64748b" stroke="none" />
-                <rect x="22.5" y="21" width="1.6" height="1.6" fill="#64748b" stroke="none" />
+                <rect x="9" y="13" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
+                <rect x="9" y="17" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
+                <rect x="9" y="21" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
+                <rect x="12.5" y="13" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
+                <rect x="12.5" y="17" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
+                <rect x="12.5" y="21" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
+                <rect x="19.5" y="17" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
+                <rect x="19.5" y="21" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
+                <rect x="22.5" y="17" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
+                <rect x="22.5" y="21" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
               </g>
             </svg>
           </div>
           {!isNarrow && (
             <div style={{ lineHeight: 1.25 }}>
-              <div style={{ fontWeight: 800, fontSize: 15, color: '#1a1a1a' }}>Knowledge Hub</div>
-              <div style={{ fontSize: 11, color: '#8c8c8c' }}>코싸이온(주)</div>
+              <div style={{ fontWeight: 700, fontSize: 15, color: '#fff', letterSpacing: 0.2 }}>Knowledge Hub</div>
+              <div style={{ fontSize: 11, color: '#9AABC9' }}>코싸이온(주)</div>
             </div>
           )}
         </div>
@@ -214,10 +234,11 @@ export default function App() {
           : { position: 'absolute', left: '50%', transform: 'translateX(-50%)' }}>
           <Menu
             mode="horizontal"
+            theme="dark"
             selectedKeys={[current]}
             onClick={(e) => setCurrent(e.key)}
             items={menuItems}
-            style={{ border: 'none', minWidth: isNarrow ? 0 : 320, justifyContent: 'center' }}
+            style={{ border: 'none', minWidth: isNarrow ? 0 : 320, justifyContent: 'center', background: 'transparent' }}
           />
         </div>
 
@@ -255,7 +276,7 @@ export default function App() {
                               {/* 문서명은 길면 한 줄로 잘라 보여준다 — 문장 안에 태그로 끼워넣으면 줄바꿈으로 깨져서 별도 줄로 분리 */}
                               <Tooltip title={n.doc_label} placement="bottomLeft">
                                 <div style={{
-                                  fontSize: 11.5, color: '#1677ff', marginTop: 3,
+                                  fontSize: 11.5, color: '#1B3A6B', marginTop: 3,
                                   overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                                 }}>
                                   <FileTextOutlined style={{ marginRight: 4 }} />{n.doc_label}
@@ -308,7 +329,7 @@ export default function App() {
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', minWidth: 0 }}>
                 <Avatar size={28} src={me.picture} icon={!me.picture && <UserOutlined />} />
                 {!isNarrow && (
-                  <span style={{ fontSize: 13, color: '#595959', lineHeight: 1.4, maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{me.name ?? me.email}</span>
+                  <span style={{ fontSize: 13, color: '#DCE3EF', lineHeight: 1.4, maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{me.name ?? me.email}</span>
                 )}
                 {isAdmin && !isNarrow && (
                   <Tag color="blue" style={{ margin: 0, fontSize: 11, lineHeight: '16px', padding: '0 6px' }}>관리자</Tag>

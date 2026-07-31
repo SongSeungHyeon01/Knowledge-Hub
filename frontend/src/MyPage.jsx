@@ -123,7 +123,7 @@ export default function MyPage({ me }) {
           <Text type="secondary" style={{ fontSize: 12.5 }}>{me?.email}</Text>
         </div>
         <div style={{ marginLeft: 'auto', textAlign: 'right' }}>
-          <div style={{ fontSize: 20, fontWeight: 700, color: '#1677ff' }}>{docs.length}</div>
+          <div style={{ fontSize: 20, fontWeight: 700, color: '#1B3A6B' }}>{docs.length}</div>
           <Text type="secondary" style={{ fontSize: 12 }}>업로드한 문서</Text>
         </div>
       </div>

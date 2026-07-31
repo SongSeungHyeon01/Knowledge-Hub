@@ -266,7 +266,9 @@ export default function UploadPage({ onNavigate }) {
   // 이 두 형식을 지원하지 않는다. 이미 업로드된 HWP/HWPX 문서는 그대로 열람 가능.
   // 백엔드 SUPPORTED_EXTENSIONS(main.py)와 반드시 일치시킬 것 — 여기만 늘리면 파일 선택은
   // 되는데 업로드는 거부되는 상태가 된다(png/jpg/jpeg가 그 상태였고 2026-07-30에 제거함).
-  const SUPPORTED_EXT = ['.pdf','.docx','.pptx','.ppt','.xlsx','.xls','.txt','.md']
+  // [2026-08-01] .ppt/.xls도 같은 이유로 제거 — 실제 업로드 테스트 결과 Docling이
+  // 이 두 형식을 LibreOffice 서브프로세스 없이는 못 열어서 전부 파싱 실패로 확인됨.
+  const SUPPORTED_EXT = ['.pdf','.docx','.pptx','.xlsx','.txt','.md']
   const ACCEPT_ATTR   = SUPPORTED_EXT.join(',')
   const MAX_SIZE_MB   = 500  // 2026-07-11: 백엔드 MAX_UPLOAD_SIZE(500MB)와 통일 — 이전엔 200MB로 따로 남아있었음
 
@@ -550,7 +552,7 @@ export default function UploadPage({ onNavigate }) {
             />
             <div style={{ display: 'flex', justifyContent: 'space-between', paddingTop: 8, marginTop: 4, borderTop: '1px solid #f0f0f0' }}>
               <Text strong style={{ fontSize: 13 }}>합계</Text>
-              <Text strong style={{ color: '#1677ff' }}>{stats?.total_documents ?? 0}</Text>
+              <Text strong style={{ color: '#1B3A6B' }}>{stats?.total_documents ?? 0}</Text>
             </div>
           </Card>
         </Col>
@@ -610,13 +612,13 @@ export default function UploadPage({ onNavigate }) {
                 style={{ marginBottom: 12, background: '#fafcff' }}
               >
                 <p className="ant-upload-drag-icon">
-                  <InboxOutlined style={{ fontSize: 44, color: isUploading ? '#aaa' : '#1677ff' }} />
+                  <InboxOutlined style={{ fontSize: 44, color: isUploading ? '#aaa' : '#1B3A6B' }} />
                 </p>
                 <p className="ant-upload-text">
                   {isUploading ? '업로드 중...' : '파일을 드래그하거나 클릭해서 업로드'}
                 </p>
                 <p className="ant-upload-hint">
-                  지원 형식: PDF · DOCX · PPT · PPTX · XLS · XLSX · TXT · MD (파일당 최대 {MAX_SIZE_MB}MB)
+                  지원 형식: PDF · DOCX · PPTX · XLSX · TXT · MD (파일당 최대 {MAX_SIZE_MB}MB)
                 </p>
               </Dragger>
 

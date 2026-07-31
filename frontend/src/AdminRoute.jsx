@@ -67,37 +67,38 @@ export default function AdminRoute() {
     <Layout style={{ minHeight: '100vh', background: '#f7f8fa' }}>
       <Header
         style={{
-          background: '#fff', borderBottom: '1px solid #eef0f2', display: 'flex',
+          background: '#152A4E', display: 'flex',
           alignItems: 'center', justifyContent: 'space-between', padding: '0 28px', height: 64, lineHeight: '64px',
           position: 'sticky', top: 0, zIndex: 100,
+          boxShadow: '0 1px 3px rgba(10,20,40,0.15)',
         }}
       >
         <div onClick={goHome} style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', flexShrink: 0 }}>
           <div style={{
-            width: 30, height: 30, borderRadius: 8, background: '#f1f5f9',
+            width: 30, height: 30, borderRadius: 7, background: '#3D5A99',
             display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
           }}>
             <svg width="18" height="18" viewBox="0 0 32 32">
-              <g fill="none" stroke="#64748b" strokeWidth="1.6" strokeLinejoin="round">
+              <g fill="none" stroke="#E9EEF7" strokeWidth="1.6" strokeLinejoin="round">
                 <rect x="6" y="10" width="10" height="17" rx="1" />
                 <rect x="17" y="14" width="9" height="13" rx="1" />
-                <rect x="9" y="13" width="1.6" height="1.6" fill="#64748b" stroke="none" />
-                <rect x="9" y="17" width="1.6" height="1.6" fill="#64748b" stroke="none" />
-                <rect x="9" y="21" width="1.6" height="1.6" fill="#64748b" stroke="none" />
-                <rect x="12.5" y="13" width="1.6" height="1.6" fill="#64748b" stroke="none" />
-                <rect x="12.5" y="17" width="1.6" height="1.6" fill="#64748b" stroke="none" />
-                <rect x="12.5" y="21" width="1.6" height="1.6" fill="#64748b" stroke="none" />
-                <rect x="19.5" y="17" width="1.6" height="1.6" fill="#64748b" stroke="none" />
-                <rect x="19.5" y="21" width="1.6" height="1.6" fill="#64748b" stroke="none" />
-                <rect x="22.5" y="17" width="1.6" height="1.6" fill="#64748b" stroke="none" />
-                <rect x="22.5" y="21" width="1.6" height="1.6" fill="#64748b" stroke="none" />
+                <rect x="9" y="13" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
+                <rect x="9" y="17" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
+                <rect x="9" y="21" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
+                <rect x="12.5" y="13" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
+                <rect x="12.5" y="17" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
+                <rect x="12.5" y="21" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
+                <rect x="19.5" y="17" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
+                <rect x="19.5" y="21" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
+                <rect x="22.5" y="17" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
+                <rect x="22.5" y="21" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
               </g>
             </svg>
           </div>
           {!isNarrow && (
             <div style={{ lineHeight: 1.25 }}>
-              <div style={{ fontWeight: 800, fontSize: 15, color: '#1a1a1a' }}>Knowledge Hub · 관리자</div>
-              <div style={{ fontSize: 11, color: '#8c8c8c' }}>코싸이온(주)</div>
+              <div style={{ fontWeight: 700, fontSize: 15, color: '#fff', letterSpacing: 0.2 }}>Knowledge Hub · 관리자</div>
+              <div style={{ fontSize: 11, color: '#9AABC9' }}>코싸이온(주)</div>
             </div>
           )}
         </div>

@@ -91,3 +91,6 @@ backend/test_office_parsers_backup_*.py
 
 # ===== OMC 에이전트 로컬 상태 (개인 도구 설정) =====
 .omc/
+
+# ===== Claude Code 브레인스토밍 목업 (개인 작업용, 팀 공유 불필요) =====
+.superpowers/

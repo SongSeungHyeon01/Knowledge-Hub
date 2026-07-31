@@ -45,11 +45,34 @@ const FILE_TYPE_COLOR = {
   txt: 'default', md: 'cyan', png: 'magenta', jpg: 'magenta', jpeg: 'magenta',
 }
 
+// [2026-07-31] 관리자 서브탭마다 주소창 URL을 분리 — App.jsx와 동일한 방식(라우팅
+// 라이브러리 없이 pushState/popstate 직접 처리).
+const ADMIN_KEY_TO_PATH = {
+  docs: '/admin', failed: '/admin/review', 'deletion-log': '/admin/deletion-log',
+  category: '/admin/category', departments: '/admin/departments', admins: '/admin/admins',
+}
+const ADMIN_PATH_TO_KEY = {
+  '/admin': 'docs', '/admin/': 'docs', '/admin/review': 'failed',
+  '/admin/deletion-log': 'deletion-log', '/admin/category': 'category',
+  '/admin/departments': 'departments', '/admin/admins': 'admins',
+}
+const adminKeyFromPath = (pathname) => ADMIN_PATH_TO_KEY[pathname] ?? 'docs'
+
 export default function AdminPage({ onNavigate }) {
   const isNarrow = useIsNarrow()
   const queryClient = useQueryClient()
 
-  const [navKey, setNavKey] = useState('docs')  // docs | ocr | history | category | admins
+  const [navKey, setNavKeyState] = useState(() => adminKeyFromPath(window.location.pathname))  // docs | failed | deletion-log | category | departments | admins
+  const setNavKey = (key) => {
+    setNavKeyState(key)
+    const path = ADMIN_KEY_TO_PATH[key] ?? '/admin'
+    if (window.location.pathname !== path) window.history.pushState(null, '', path)
+  }
+  useEffect(() => {
+    const handler = () => setNavKeyState(adminKeyFromPath(window.location.pathname))
+    window.addEventListener('popstate', handler)
+    return () => window.removeEventListener('popstate', handler)
+  }, [])
 
   // 좌측 서브메뉴가 상단 헤더(AdminRoute.jsx의 #admin-nav-slot)로 이동 — 마운트된 뒤에야
   // 그 DOM 노드가 존재하므로 useEffect에서 한 번 찾아 포털 대상으로 저장한다.
@@ -429,9 +452,9 @@ export default function AdminPage({ onNavigate }) {
       render: (name, record) => (
         <span style={{ cursor: 'pointer' }} onClick={() => openDetail(record)}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-            <FileTextOutlined style={{ color: '#1677ff', flexShrink: 0 }} />
+            <FileTextOutlined style={{ color: '#1B3A6B', flexShrink: 0 }} />
             <Tooltip title={name}>
-              <Text style={{ color: '#1677ff', maxWidth: 170, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block', verticalAlign: 'bottom' }}>
+              <Text style={{ color: '#1B3A6B', maxWidth: 170, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block', verticalAlign: 'bottom' }}>
                 {name}
               </Text>
             </Tooltip>
@@ -602,11 +625,12 @@ export default function AdminPage({ onNavigate }) {
       {navSlot && createPortal(
         <Menu
           mode="horizontal"
+          theme="dark"
           selectedKeys={[navKey]}
           onClick={(e) => setNavKey(e.key)}
           items={leftMenuItems}
           disabledOverflow={!isNarrow}
-          style={{ border: 'none', lineHeight: '62px', whiteSpace: isNarrow ? 'normal' : 'nowrap', maxWidth: '100%' }}
+          style={{ border: 'none', lineHeight: '62px', whiteSpace: isNarrow ? 'normal' : 'nowrap', maxWidth: '100%', background: 'transparent' }}
         />,
         navSlot
       )}
@@ -658,8 +682,8 @@ export default function AdminPage({ onNavigate }) {
               </ACard>
 
               {selectedRowKeys.length > 0 && (
-                <div style={{ marginBottom: 16, padding: '10px 14px', background: '#e6f4ff', borderRadius: 6, display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
-                  <Text strong style={{ color: '#1677ff' }}>{selectedRowKeys.length}개 선택됨</Text>
+                <div style={{ marginBottom: 16, padding: '10px 14px', background: '#E9EEF7', borderRadius: 6, display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
+                  <Text strong style={{ color: '#1B3A6B' }}>{selectedRowKeys.length}개 선택됨</Text>
                   <Select placeholder="카테고리 선택" value={bulkCategory} onChange={setBulkCategory} allowClear style={{ width: 130 }} options={allCategoryOptions} />
                   <Popconfirm
                     title={`선택한 ${selectedRowKeys.length}개 문서의 카테고리를 "${CAT_LABEL[bulkCategory]}"(으)로 변경할까요?`}
@@ -924,9 +948,9 @@ export default function AdminPage({ onNavigate }) {
                         const barH = d.count > 0 ? Math.max((d.count / maxCount) * CHART_H, 8) : 3
                         return (
                           <div key={d.date} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
-                            <span style={{ fontSize: 11, fontWeight: 600, color: d.count > 0 ? (isToday ? '#1677ff' : '#595959') : 'transparent' }}>{d.count > 0 ? d.count : '0'}</span>
+                            <span style={{ fontSize: 11, fontWeight: 600, color: d.count > 0 ? (isToday ? '#1B3A6B' : '#595959') : 'transparent' }}>{d.count > 0 ? d.count : '0'}</span>
                             <Tooltip title={`${d.date}: ${d.count}건`}>
-                              <div style={{ width: '100%', height: barH, background: d.count > 0 ? (isToday ? '#0958d9' : '#91caff') : '#f0f0f0', borderRadius: '4px 4px 0 0' }} />
+                              <div style={{ width: '100%', height: barH, background: d.count > 0 ? (isToday ? '#1B3A6B' : '#AEBEDA') : '#f0f0f0', borderRadius: '4px 4px 0 0' }} />
                             </Tooltip>
                           </div>
                         )

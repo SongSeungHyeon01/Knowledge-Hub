@@ -78,8 +78,17 @@ os.makedirs(MIRROR_TRASH_PARSED_DIR, exist_ok=True)
 # [2026-07-28] HWP/HWPX 지원 포기 — Docling으로 파서를 통합했는데 Docling이
 # HWP/HWPX를 지원하지 않는다(공식 지원 포맷 목록에 없음, 재확인 완료). 기존에
 # 업로드된 HWP/HWPX 문서는 DB에 그대로 남아 열람 가능하지만, 새 업로드는 거부된다.
+# [2026-08-01 실측 확인, 지원 포기] .ppt/.xls(구버전 바이너리 포맷)를 목록에 올려
+# 놨었는데, 실제 업로드 테스트 결과 전부 파싱 실패로 확인됐다. Docling의
+# allowed_formats엔 PPT/XLS가 있지만, 내부적으로 이 두 형식을 .pptx/.xlsx로 먼저
+# 변환하는 과정에서 **LibreOffice를 서브프로세스로 호출**한다(에러: "LibreOffice is
+# required to convert a .ppt file to .pptx. Install LibreOffice and make sure it is
+# on PATH."). 오늘 마이그레이션 전체가 LibreOffice 의존성을 없애는 게 목적이었고
+# 실제 배포 이미지엔 LibreOffice가 없어서, 이 두 형식은 프로덕션에서 100% 실패한다
+# — 그래서 HWP/HWPX와 같은 이유로 지원을 포기한다. 기존에 업로드된 .ppt/.xls
+# 문서는 DB에 남아 열람만 가능(신규 업로드만 거부).
 SUPPORTED_EXTENSIONS = {
-    '.pdf', '.docx', '.pptx', '.ppt', '.xlsx', '.xls', '.txt', '.md',
+    '.pdf', '.docx', '.pptx', '.xlsx', '.txt', '.md',
 }
 
 # 파일 크기 상한 (500MB — OOM 방지 1MB 스트리밍)

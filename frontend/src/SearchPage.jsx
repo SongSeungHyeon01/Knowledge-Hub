@@ -24,6 +24,7 @@ import {
   FileSearchOutlined, BulbOutlined, ReloadOutlined,
 } from '@ant-design/icons'
 import axios from 'axios'
+import dayjs from 'dayjs'
 import useIsNarrow from './useIsNarrow'
 
 const { Title, Text, Paragraph } = Typography
@@ -135,13 +136,21 @@ export default function SearchPage() {
     localStorage.setItem('km_tip_closed', 'true')
   }
 
-  const [query,      setQuery]      = useState('')
-  const [searchMode, setSearchMode] = useState('filename')  // 'filename'(기본) | 'semantic'
-  const [category,   setCategory]   = useState(null)
-  const [fileType,   setFileType]   = useState(null)
-  const [author,     setAuthor]     = useState(null)   // 작성자(업로더) 이메일 필터
-  const [authorInput, setAuthorInput] = useState('')    // 작성자 자동완성 입력창에 표시되는 텍스트(이름)
-  const [dateRange,  setDateRange]  = useState(null)    // [dayjs, dayjs] | null — 업로드 날짜 범위 필터
+  // [2026-07-31] 주소창 쿼리스트링(?q=...&mode=...)에서 초기 검색 상태를 복원한다 —
+  // 새로고침·북마크·링크 공유로 같은 검색 결과에 바로 올 수 있게 함. 한 번만 읽으면
+  // 되므로 매 렌더 재계산을 피하려고 useState 지연 초기화 안에서만 파싱한다.
+  const [urlParams] = useState(() => new URLSearchParams(window.location.search))
+
+  const [query,      setQuery]      = useState(() => urlParams.get('q') || '')
+  const [searchMode, setSearchMode] = useState(() => urlParams.get('mode') === 'semantic' ? 'semantic' : 'filename')
+  const [category,   setCategory]   = useState(() => urlParams.get('category') || null)
+  const [fileType,   setFileType]   = useState(() => urlParams.get('file_type') || null)
+  const [author,     setAuthor]     = useState(() => urlParams.get('uploaded_by') || null)   // 작성자(업로더) 이메일 필터
+  const [authorInput, setAuthorInput] = useState('')    // 작성자 자동완성 입력창에 표시되는 텍스트(이름) — uploaderList 로드 후 이메일→이름 매칭해서 채움(아래 effect)
+  const [dateRange,  setDateRange]  = useState(() => {  // [dayjs, dayjs] | null — 업로드 날짜 범위 필터
+    const from = urlParams.get('date_from'), to = urlParams.get('date_to')
+    return (from || to) ? [from ? dayjs(from) : null, to ? dayjs(to) : null] : null
+  })
   const [results,    setResults]    = useState(null)
   const [loading,    setLoading]    = useState(false)
   const [recentList,    setRecentList]    = useState([])
@@ -243,6 +252,15 @@ export default function SearchPage() {
       .catch(() => {})
   }, [])
 
+  // URL의 uploaded_by(이메일)로 author를 복원했을 때, 자동완성 입력창엔 이메일이 아니라
+  // 이름을 보여줘야 하므로 uploaderList가 로드된 뒤 한 번 매칭해서 채운다.
+  useEffect(() => {
+    if (author && !authorInput) {
+      const match = uploaderList.find(u => u.email === author)
+      if (match) setAuthorInput(match.name)
+    }
+  }, [uploaderList]) // eslint-disable-line
+
   // 카테고리 칩을 고르면 그 카테고리만, "전체"면 전부 다시 불러온다 (검색어 없이 둘러보기 모드)
   // [2026-07-24] 예전엔 8초마다 자동으로 다시 불러왔는데, 검색 결과 화면을 보고 있을 때도
   // 이 둘러보기용 API가 백그라운드에서 계속 호출돼(화면엔 안 쓰이는데도) 낭비였다 —
@@ -279,6 +297,18 @@ export default function SearchPage() {
     }
   }, []) // eslint-disable-line
 
+  // URL 쿼리스트링으로 검색 상태가 복원된 경우(새로고침·공유 링크) 바로 검색 실행 —
+  // 알림/관리자 기록에서 넘어온 경우(pendingSearch/pendingCategory)는 그쪽이 이미
+  // 처리하므로 중복 실행하지 않는다.
+  useEffect(() => {
+    if (pendingSearch || pendingCategory) return
+    const hasFilter = query || category || fileType || author || dateRange?.[0] || dateRange?.[1]
+    if (hasFilter) {
+      if (category || fileType || author || dateRange?.[0] || dateRange?.[1]) setAdvancedOpen(true)
+      handleSearch(query, category)
+    }
+  }, []) // eslint-disable-line
+
   // "/" 단축키: 검색 페이지에 있을 때 어디서든 포커스
   useEffect(() => {
     const handler = (e) => {
@@ -310,6 +340,21 @@ export default function SearchPage() {
       .catch(() => message.error('검색 기록 삭제에 실패했습니다'))
   }
 
+  // 현재 검색 조건을 주소창 쿼리스트링에 반영한다(replaceState — 검색마다 히스토리가
+  // 쌓이지 않게). 새로고침·북마크·링크 공유로 같은 검색 결과에 바로 올 수 있게 하는 게 목적.
+  const syncUrl = (q, categoryOverride) => {
+    const params = new URLSearchParams()
+    if (q) params.set('q', q)
+    if (searchMode === 'semantic') params.set('mode', searchMode)
+    if (categoryOverride) params.set('category', categoryOverride)
+    if (fileType) params.set('file_type', fileType)
+    if (author) params.set('uploaded_by', author)
+    if (dateRange?.[0]) params.set('date_from', dateRange[0].format('YYYY-MM-DD'))
+    if (dateRange?.[1]) params.set('date_to', dateRange[1].format('YYYY-MM-DD'))
+    const qs = params.toString()
+    window.history.replaceState(null, '', qs ? `/?${qs}` : '/')
+  }
+
   // categoryOverride: UploadPage의 "카테고리" 클릭처럼, category state를 막 setCategory한
   // 직후 곧바로 검색을 트리거해야 할 때 쓴다 — setCategory 직후엔 state가 아직 안 바뀐 상태라
   // (React 배치 업데이트) category를 그대로 읽으면 이전 값으로 검색돼 버린다.
@@ -333,6 +378,7 @@ export default function SearchPage() {
       })
       setResults(res.data)
       setQuery(q)
+      syncUrl(q, categoryOverride)
 
       // 알림에서 넘어온 경우 — 검색 결과 중 그 문서를 찾아 바로 상세 팝업으로 연다(한 번만).
       if (pendingOpenDocIdRef.current != null) {
@@ -432,7 +478,7 @@ export default function SearchPage() {
 
   // 리스트형 보기
   const renderListCard = (r) => {
-    const CAT_ACCENT = { spec: '#1677ff', research: '#722ed1', presentation: '#13c2c2', report: '#52c41a' }
+    const CAT_ACCENT = { spec: '#1B3A6B', research: '#722ed1', presentation: '#13c2c2', report: '#52c41a' }
     const accent = CAT_ACCENT[r.category] ?? '#8c8c8c'
     return (
       <Card
@@ -478,7 +524,7 @@ export default function SearchPage() {
           {r.file_type && <Tag color={FILE_TYPE_COLOR[r.file_type] ?? 'default'} style={{ margin: 0 }}>{r.file_type.toUpperCase()}</Tag>}
           {r.score > 0 && (
             <Tooltip title={`관련도 ${Math.round(r.score * 100)}%`}>
-              <Tag style={{ margin: 0 }}>{Math.round(r.score * 100)}%</Tag>
+              <Tag style={{ margin: 0, background: '#E9EEF7', border: 'none', color: '#1B3A6B', fontWeight: 500 }}>관련도 {Math.round(r.score * 100)}%</Tag>
             </Tooltip>
           )}
           {r.page_num > 0 && (
@@ -936,7 +982,7 @@ export default function SearchPage() {
           ) : (
             <Space orientation="vertical" style={{ width: '100%' }} size={10}>
               {browseDocs.slice((browsePage - 1) * PAGE_SIZE, browsePage * PAGE_SIZE).map(doc => {
-                const CAT_ACCENT = { spec: '#1677ff', research: '#722ed1', presentation: '#13c2c2', report: '#52c41a' }
+                const CAT_ACCENT = { spec: '#1B3A6B', research: '#722ed1', presentation: '#13c2c2', report: '#52c41a' }
                 const accent = CAT_ACCENT[doc.category] ?? '#8c8c8c'
                 return (
                   <Card

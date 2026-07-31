@@ -60,27 +60,28 @@ export default function LoginPage({ googleClientId, onLogin }) {
       alignItems: 'center', justifyContent: 'center', background: '#f7f8fa', padding: 24,
     }}>
       <div style={{
-        width: 30, height: 30, borderRadius: 8, background: '#f1f5f9', marginBottom: 16,
+        width: 44, height: 44, borderRadius: 10, background: '#1B3A6B', marginBottom: 16,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
+        boxShadow: '0 2px 8px rgba(27,58,107,0.25)',
       }}>
-        <svg width="18" height="18" viewBox="0 0 32 32">
-          <g fill="none" stroke="#64748b" strokeWidth="1.6" strokeLinejoin="round">
+        <svg width="26" height="26" viewBox="0 0 32 32">
+          <g fill="none" stroke="#E9EEF7" strokeWidth="1.6" strokeLinejoin="round">
             <rect x="6" y="10" width="10" height="17" rx="1" />
             <rect x="17" y="14" width="9" height="13" rx="1" />
-            <rect x="9" y="13" width="1.6" height="1.6" fill="#64748b" stroke="none" />
-            <rect x="9" y="17" width="1.6" height="1.6" fill="#64748b" stroke="none" />
-            <rect x="9" y="21" width="1.6" height="1.6" fill="#64748b" stroke="none" />
-            <rect x="12.5" y="13" width="1.6" height="1.6" fill="#64748b" stroke="none" />
-            <rect x="12.5" y="17" width="1.6" height="1.6" fill="#64748b" stroke="none" />
-            <rect x="12.5" y="21" width="1.6" height="1.6" fill="#64748b" stroke="none" />
-            <rect x="19.5" y="17" width="1.6" height="1.6" fill="#64748b" stroke="none" />
-            <rect x="19.5" y="21" width="1.6" height="1.6" fill="#64748b" stroke="none" />
-            <rect x="22.5" y="17" width="1.6" height="1.6" fill="#64748b" stroke="none" />
-            <rect x="22.5" y="21" width="1.6" height="1.6" fill="#64748b" stroke="none" />
+            <rect x="9" y="13" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
+            <rect x="9" y="17" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
+            <rect x="9" y="21" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
+            <rect x="12.5" y="13" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
+            <rect x="12.5" y="17" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
+            <rect x="12.5" y="21" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
+            <rect x="19.5" y="17" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
+            <rect x="19.5" y="21" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
+            <rect x="22.5" y="17" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
+            <rect x="22.5" y="21" width="1.6" height="1.6" fill="#E9EEF7" stroke="none" />
           </g>
         </svg>
       </div>
-      <Title level={3} style={{ margin: '0 0 2px' }}>Knowledge Hub</Title>
+      <Title level={3} style={{ margin: '0 0 2px', color: '#152A4E' }}>Knowledge Hub</Title>
       <Text style={{ fontSize: 12, color: '#8c8c8c', marginBottom: 12 }}>코싸이온(주)</Text>
       <Text type="secondary" style={{ marginBottom: 28 }}>회사 계정으로 로그인해 주세요</Text>
 
