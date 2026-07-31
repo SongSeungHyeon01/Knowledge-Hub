@@ -66,6 +66,22 @@ def ensure_index():
             return True
         client.indices.create(
             index=ES_INDEX,
+            settings={
+                # nori 플러그인은 nori_tokenizer/필터만 제공하고 완성된 analyzer를 미리
+                # 등록해주지 않는다 — mappings에서 "analyzer": "nori"로 바로 참조하면
+                # "analyzer [nori] has not been configured in mappings" 오류가 난다.
+                # 여기서 직접 조립해서 이름을 "nori"로 등록해야 아래 매핑이 그 이름으로
+                # 찾을 수 있다.
+                "analysis": {
+                    "analyzer": {
+                        "nori": {
+                            "type": "custom",
+                            "tokenizer": "nori_tokenizer",
+                            "filter": ["nori_readingform", "lowercase"],
+                        }
+                    }
+                }
+            },
             mappings={
                 "properties": {
                     "chunk_id":  {"type": "long"},
