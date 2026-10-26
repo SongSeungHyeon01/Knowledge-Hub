@@ -251,6 +251,13 @@ export default function AdminPage({ onNavigate }) {
     }
   }
 
+  // 상세 화면에서 다운로드하면 서버(GET /files)가 횟수를 세고, 상세·목록 표 숫자는 다시 불러오지 않고 바로 1 올린다
+  const bumpDownloadCount = (docId) => {
+    setDetailData(d => (d && d.id === docId ? { ...d, download_count: (d.download_count ?? 0) + 1 } : d))
+    queryClient.setQueryData(['documents'], list =>
+      Array.isArray(list) ? list.map(d => (d.id === docId ? { ...d, download_count: (d.download_count ?? 0) + 1 } : d)) : list)
+  }
+
   const openDetail = async (doc) => {
     setDrawerOpen(true)
     setDetailLoading(true)
@@ -261,15 +268,6 @@ export default function AdminPage({ onNavigate }) {
       const res = await axios.get(`${API}/admin/documents/${doc.id}/detail`)
       setDetailData(res.data)
       loadPermissions(doc.id)
-      // 상세를 연 것만 조회 1회로 센다(OCR 수정 창도 같은 상세 API를 읽지만 그건 조회가 아니다).
-      // 올라간 값으로 상세 화면과 목록 표를 바로 고친다 — 목록 전체를 다시 불러오지 않는다.
-      axios.post(`${API}/documents/${doc.id}/view`)
-        .then(({ data }) => {
-          setDetailData(d => (d && d.id === doc.id ? { ...d, view_count: data.view_count } : d))
-          queryClient.setQueryData(['documents'], list =>
-            Array.isArray(list) ? list.map(d => (d.id === doc.id ? { ...d, view_count: data.view_count } : d)) : list)
-        })
-        .catch(() => {})
     } catch {
       message.error('상세 데이터를 불러오지 못했습니다')
       setDrawerOpen(false)
@@ -495,9 +493,9 @@ export default function AdminPage({ onNavigate }) {
     },
     { title: '페이지', dataIndex: 'page_count', width: 60, align: 'center', onHeaderCell: nowrapHeader, sorter: (a, b) => a.page_count - b.page_count },
     {
-      title: '조회수', dataIndex: 'view_count', width: 64, align: 'center', onHeaderCell: nowrapHeader,
-      sorter: (a, b) => (a.view_count ?? 0) - (b.view_count ?? 0),
-      render: (v) => <Text type="secondary"><EyeOutlined style={{ marginRight: 4 }} />{v ?? 0}</Text>,
+      title: '다운로드', dataIndex: 'download_count', width: 76, align: 'center', onHeaderCell: nowrapHeader,
+      sorter: (a, b) => (a.download_count ?? 0) - (b.download_count ?? 0),
+      render: (v) => <Text type="secondary"><DownloadOutlined style={{ marginRight: 4 }} />{v ?? 0}</Text>,
     },
     {
       title: '담당자', dataIndex: 'uploaded_by', width: 100, onHeaderCell: nowrapHeader,
@@ -902,7 +900,7 @@ export default function AdminPage({ onNavigate }) {
                                   <Col><Text type="secondary" style={{ fontSize: 11.5 }}>{(doc.uploaded_at || '').slice(0, 10)}</Text></Col>
                                 </Row>
                                 <Row justify="space-between" align="middle">
-                                  <Col><Text type="secondary" style={{ fontSize: 11.5 }}><EyeOutlined style={{ marginRight: 4 }} />{doc.view_count ?? 0}</Text></Col>
+                                  <Col><Tooltip title="다운로드 횟수"><Text type="secondary" style={{ fontSize: 11.5 }}><DownloadOutlined style={{ marginRight: 4 }} />{doc.download_count ?? 0}</Text></Tooltip></Col>
                                   {doc.uploaded_by && doc.uploaded_by !== 'anonymous' && (
                                     <Col><Text type="secondary" style={{ fontSize: 11.5 }} ellipsis={{ tooltip: doc.uploaded_by }}><UserOutlined style={{ marginRight: 4 }} />{doc.uploaded_by_name ?? doc.uploaded_by}</Text></Col>
                                   )}
@@ -1212,7 +1210,7 @@ export default function AdminPage({ onNavigate }) {
         placement="right" width={580} open={drawerOpen}
         onClose={() => { setDrawerOpen(false); setMemoEdit(null); setTitleEdit(null) }}
         destroyOnClose
-        extra={detailData && <Button icon={<DownloadOutlined />} type="primary" href={`${API}/files/${detailData.id}`} download>파일 다운로드</Button>}
+        extra={detailData && <Button icon={<DownloadOutlined />} type="primary" href={`${API}/files/${detailData.id}`} download onClick={() => bumpDownloadCount(detailData.id)}>파일 다운로드</Button>}
       >
         {detailLoading && <div style={{ textAlign: 'center', paddingTop: 60 }}><Spin size="large" tip="불러오는 중..." /></div>}
 
@@ -1240,7 +1238,7 @@ export default function AdminPage({ onNavigate }) {
                 <Col span={12}><Text type="secondary">카테고리</Text><br /><Tag color={detailData.category ? CAT_COLOR[detailData.category] : undefined}>{detailData.category ? (CAT_LABEL[detailData.category] ?? detailData.category) : '미지정'}</Tag></Col>
                 <Col span={12}><Text type="secondary">상태</Text><br /><Tag color={detailData.status === 'success' ? 'green' : 'red'}>{detailData.status === 'success' ? '성공' : '실패'}</Tag></Col>
                 <Col span={12}><Text type="secondary">총 페이지</Text><br /><Text>{detailData.page_count}페이지</Text></Col>
-                <Col span={12}><Text type="secondary">조회수</Text><br /><Text><EyeOutlined style={{ marginRight: 4 }} />{detailData.view_count ?? 0}</Text></Col>
+                <Col span={12}><Text type="secondary">다운로드</Text><br /><Text><DownloadOutlined style={{ marginRight: 4 }} />{detailData.download_count ?? 0}</Text></Col>
                 <Col span={12}>
                   <Text type="secondary">담당자</Text><br />
                   {detailData.uploaded_by && detailData.uploaded_by !== 'anonymous'

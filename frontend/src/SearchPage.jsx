@@ -19,7 +19,7 @@ import {
   SearchOutlined, FileTextOutlined, HistoryOutlined, CloseOutlined,
   FilePdfOutlined, FileWordOutlined, FilePptOutlined, FileExcelOutlined,
   FileImageOutlined, FileMarkdownOutlined, FileOutlined, DownloadOutlined,
-  StarOutlined, StarFilled, EyeOutlined, UserOutlined,
+  StarOutlined, StarFilled, UserOutlined,
   UnorderedListOutlined, AppstoreOutlined,
   FileSearchOutlined, BulbOutlined, ReloadOutlined,
 } from '@ant-design/icons'
@@ -125,7 +125,7 @@ export default function SearchPage() {
 
   // 알림(댓글 등)에서 넘어온 경우 — 검색을 거치지 않고 그 문서를 바로 상세 팝업으로 열고,
   // 댓글 번호가 있으면 그 댓글로 스크롤한다. ref로 두는 이유: 한 번 쓰고 나면 다시 안 열리게
-  // 지워야 하고, StrictMode가 effect를 두 번 돌려도 조회수가 두 번 오르지 않게 하려고.
+  // 지워야 하고, StrictMode가 effect를 두 번 돌려도 팝업이 두 번 열리지 않게 하려고.
   const pendingOpenDocIdRef = useRef((() => {
     const id = localStorage.getItem('km_launch_doc_id')
     if (id) localStorage.removeItem('km_launch_doc_id')
@@ -189,10 +189,11 @@ export default function SearchPage() {
   const [commentPosting,  setCommentPosting]  = useState(false)
   const [focusCommentId,  setFocusCommentId]  = useState(null)  // 알림으로 들어왔을 때 강조할 댓글
 
-  // 조회수가 바뀐 문서를 화면에 떠 있는 목록(검색 결과·둘러보기)과 팝업에서 한꺼번에 고친다 —
-  // 다시 검색하지 않아도 카드의 조회수가 바로 바뀌게 하려는 것.
-  const applyViewCount = (docId, viewCount) => {
-    const patch = (d) => (d.doc_id === docId ? { ...d, view_count: viewCount } : d)
+  // [2026-10-26] 조회수 대신 다운로드 횟수를 보여준다. 다운로드 버튼을 누르면 서버(GET /files)가 1을
+  // 세고, 화면에 떠 있는 목록(검색 결과·둘러보기)과 팝업의 숫자는 여기서 바로 1 올린다 —
+  // 다시 검색하지 않아도 카드 숫자가 바로 바뀌게 하려는 것.
+  const bumpDownloadCount = (docId) => {
+    const patch = (d) => (d.doc_id === docId ? { ...d, download_count: (d.download_count ?? 0) + 1 } : d)
     setDetailDoc(d => (d ? patch(d) : d))
     setResults(r => (r?.results ? { ...r, results: r.results.map(patch) } : r))
     setBrowseDocs(list => list.map(patch))
@@ -208,10 +209,6 @@ export default function SearchPage() {
       .then(res => setComments(res.data))
       .catch(() => {})
       .finally(() => setCommentsLoading(false))
-    // 상세를 연 것을 조회 1회로 센다. 실패해도(권한·네트워크) 팝업은 그대로 둔다.
-    axios.post(`${API}/documents/${doc.doc_id}/view`)
-      .then(res => applyViewCount(doc.doc_id, res.data.view_count))
-      .catch(() => {})
   }
 
   // 알림에서 지정한 댓글이 그려지면 그 위치로 스크롤하고, 잠깐 강조했다가 원래대로 돌린다
@@ -548,7 +545,7 @@ export default function SearchPage() {
             <Button
               size="small" icon={<DownloadOutlined />} href={`${API}/files/${r.doc_id}`} download
               type="primary" ghost
-              onClick={(e) => e.stopPropagation()}
+              onClick={(e) => { e.stopPropagation(); bumpDownloadCount(r.doc_id) }}
             >
               다운로드
             </Button>
@@ -583,7 +580,7 @@ export default function SearchPage() {
               </div>
             )}
             <Space size={12}>
-              <Text type="secondary" style={{ fontSize: 12 }}><EyeOutlined style={{ marginRight: 4 }} />{r.view_count ?? 0}</Text>
+              <Tooltip title="다운로드 횟수"><Text type="secondary" style={{ fontSize: 12 }}><DownloadOutlined style={{ marginRight: 4 }} />{r.download_count ?? 0}</Text></Tooltip>
               {r.uploaded_at && (
                 <Tooltip title={r.uploaded_at}>
                   <Text type="secondary" style={{ fontSize: 12 }}>{formatDate(r.uploaded_at)}</Text>
@@ -1050,7 +1047,7 @@ export default function SearchPage() {
                         <Button
                           size="small" icon={<DownloadOutlined />} href={`${API}/files/${doc.doc_id}`} download
                           type="primary" ghost
-                          onClick={(e) => e.stopPropagation()}
+                          onClick={(e) => { e.stopPropagation(); bumpDownloadCount(doc.doc_id) }}
                         >
                           다운로드
                         </Button>
@@ -1073,7 +1070,7 @@ export default function SearchPage() {
                           </div>
                         )}
                         <Space size={12}>
-                          <Text type="secondary" style={{ fontSize: 12 }}><EyeOutlined style={{ marginRight: 4 }} />{doc.view_count ?? 0}</Text>
+                          <Tooltip title="다운로드 횟수"><Text type="secondary" style={{ fontSize: 12 }}><DownloadOutlined style={{ marginRight: 4 }} />{doc.download_count ?? 0}</Text></Tooltip>
                           {doc.uploaded_at && (
                             <Tooltip title={doc.uploaded_at}>
                               <Text type="secondary" style={{ fontSize: 12 }}>{formatDate(doc.uploaded_at)}</Text>
@@ -1126,13 +1123,15 @@ export default function SearchPage() {
                 {detailDoc.uploaded_at && (
                   <Text type="secondary" style={{ fontSize: 12 }}>{formatDate(detailDoc.uploaded_at)}</Text>
                 )}
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  <EyeOutlined style={{ marginRight: 4 }} />{detailDoc.view_count ?? 0}
-                </Text>
+                <Tooltip title="다운로드 횟수">
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    <DownloadOutlined style={{ marginRight: 4 }} />{detailDoc.download_count ?? 0}
+                  </Text>
+                </Tooltip>
               </Space>
 
               <Space>
-                <Button icon={<DownloadOutlined />} type="primary" ghost href={`${API}/files/${detailDoc.doc_id}`} download>
+                <Button icon={<DownloadOutlined />} type="primary" ghost href={`${API}/files/${detailDoc.doc_id}`} download onClick={() => bumpDownloadCount(detailDoc.doc_id)}>
                   다운로드
                 </Button>
                 <Tooltip title="북마크">

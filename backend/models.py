@@ -31,7 +31,8 @@ class Document(Base):
     page_count    = Column(Integer, default=0)                      # 총 페이지 수
     has_flagged   = Column(Boolean, default=False)                  # OCR 저신뢰 페이지 있으면 True
     sha256        = Column(String(64), nullable=True, index=True)   # SHA-256 해시 (중복 체크용)
-    view_count    = Column(Integer, nullable=False, default=0)      # 상세보기 조회수
+    view_count    = Column(Integer, nullable=False, default=0)      # 상세보기 조회수 (2026-10-26부터 화면에 안 씀 — download_count로 대체, 기존 값 보존용)
+    download_count = Column(Integer, nullable=False, default=0)     # 원본 파일 다운로드 횟수 (GET /files/{id})
     uploaded_by   = Column(String, nullable=True)                   # 업로드한 사람 이메일(로그인 꺼져 있으면 "anonymous")
     department    = Column(String, nullable=True)                   # 업로드자의 부서로 자동 지정 — 부서별 열람 제한 기준값(비어있으면 제한 없음)
     uploaded_at   = Column(DateTime, default=_kst_now)     # 업로드 시각 (자동 기록, 이후 불변)

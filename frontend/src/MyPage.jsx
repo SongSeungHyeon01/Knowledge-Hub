@@ -8,7 +8,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Typography, Avatar, Table, Tag, Button, Space, Modal, Input, Select, Popconfirm, message, Empty, Row, Col } from 'antd'
 import {
   UserOutlined, EditOutlined, DeleteOutlined,
-  CheckCircleOutlined, CloseCircleOutlined, LoadingOutlined, EyeOutlined,
+  CheckCircleOutlined, CloseCircleOutlined, LoadingOutlined, DownloadOutlined,
 } from '@ant-design/icons'
 import axios from 'axios'
 import useIsNarrow from './useIsNarrow'
@@ -85,7 +85,7 @@ export default function MyPage({ me }) {
     { title: '카테고리', dataIndex: 'category', width: 110, render: (c) => <Tag color={c ? CATEGORY_COLOR[c] : undefined}>{c ? (CATEGORY_LABEL[c] ?? c) : '미지정'}</Tag> },
     { title: '형식', dataIndex: 'file_type', width: 80, render: (t) => t ? <Tag>{t.toUpperCase()}</Tag> : '—' },
     { title: '상태', dataIndex: 'status', width: 100, render: (s) => STATUS_TAG[s] ?? <Tag>{s}</Tag> },
-    { title: '조회수', dataIndex: 'view_count', width: 80, render: (v) => <span><EyeOutlined style={{ marginRight: 4 }} />{v ?? 0}</span> },
+    { title: '다운로드', dataIndex: 'download_count', width: 90, render: (v) => <span><DownloadOutlined style={{ marginRight: 4 }} />{v ?? 0}</span> },
     { title: '업로드일', dataIndex: 'uploaded_at', width: 160 },
     {
       title: '', width: 100,

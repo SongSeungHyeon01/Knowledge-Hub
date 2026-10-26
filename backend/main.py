@@ -451,6 +451,7 @@ async def lifespan(_):
         "ALTER TABLE documents ADD COLUMN sha256 VARCHAR(64)",
         "ALTER TABLE documents ADD COLUMN updated_at DATETIME",
         "ALTER TABLE documents ADD COLUMN view_count INTEGER DEFAULT 0",
+        "ALTER TABLE documents ADD COLUMN download_count INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE documents ADD COLUMN uploaded_by VARCHAR",
         "ALTER TABLE documents ADD COLUMN department VARCHAR",
         "ALTER TABLE users ADD COLUMN department VARCHAR",
@@ -797,7 +798,7 @@ async def 북마크_목록(request: Request, db: AsyncSession = Depends(get_db))
         {
             "id": doc.id, "filename": doc.filename, "title": doc.title,
             "category": doc.category, "file_type": doc.file_type,
-            "page_count": doc.page_count, "view_count": doc.view_count,
+            "page_count": doc.page_count, "download_count": doc.download_count,
             "status": doc.status, "uploaded_at": str(doc.uploaded_at),
             "bookmarked_at": str(bookmarked_at),
         }
@@ -855,30 +856,11 @@ async def 문서_요약(doc_id: int, request: Request, db: AsyncSession = Depend
         "content_preview":  preview,
         "page_num":         0,
         "score":            0,
-        "view_count":       doc.view_count,
+        "download_count":       doc.download_count,
         "uploaded_by":      doc.uploaded_by,
         "uploaded_by_name": names.get(doc.uploaded_by),
         "uploaded_at":      str(doc.uploaded_at),
     }
-
-
-# ── 조회수 — 화면에서 문서 상세를 열 때마다 1 올린다 ──────────────────────────────
-# 읽고 더해서 다시 쓰면(doc.view_count += 1) 두 사람이 동시에 열었을 때 하나가 덮여 사라진다.
-# DB 안에서 한 문장으로 더하고, 더한 값을 그대로 돌려줘서 화면이 다시 조회하지 않고 바로 반영한다.
-@app.post("/documents/{doc_id}/view")
-async def 조회수_증가(doc_id: int, request: Request, db: AsyncSession = Depends(get_db)):
-    if not await _can_read_doc(db, doc_id, _current_user_email(request)):
-        raise HTTPException(status_code=403, detail="이 문서를 읽을 권한이 없습니다")
-    new_count = (await db.execute(
-        sa_update(Document)
-        .where(Document.id == doc_id)
-        .values(view_count=func.coalesce(Document.view_count, 0) + 1)
-        .returning(Document.view_count)
-    )).scalar_one_or_none()
-    if new_count is None:
-        raise HTTPException(status_code=404, detail="문서가 삭제됐거나 찾을 수 없습니다")
-    await db.commit()
-    return {"doc_id": doc_id, "view_count": new_count}
 
 
 # ── 문서 상세 팝업의 댓글 — 로그인 켜져 있으면 작성자별, 꺼져 있으면 "anonymous" 공용 ──────
@@ -1716,6 +1698,18 @@ async def 파일_다운로드(doc_id: int, request: Request, db: AsyncSession = 
     if not os.path.exists(doc.saved_path):
         raise HTTPException(status_code=404, detail="파일이 서버에 없습니다")
 
+    # [2026-10-26] 다운로드 횟수 — 화면의 "조회수"를 대신한다. 읽고 더해서 다시 쓰면 두 사람이 동시에
+    # 받았을 때 하나가 덮여 사라지므로 DB 안에서 한 문장으로 1을 더한다. 이어받기(Range: bytes=N-,
+    # N>0)는 같은 다운로드의 나머지 조각이라 세지 않고, 파일을 받지 않는 HEAD 요청도 세지 않는다.
+    range_header = request.headers.get("range", "")
+    if request.method == "GET" and (not range_header or range_header.replace(" ", "").startswith("bytes=0-")):
+        await db.execute(
+            sa_update(Document)
+            .where(Document.id == doc_id)
+            .values(download_count=func.coalesce(Document.download_count, 0) + 1)
+        )
+        await db.commit()
+
     return FileResponse(
         path=doc.saved_path,
         filename=doc.filename,
@@ -1936,7 +1930,7 @@ async def 문서_목록(db: AsyncSession = Depends(get_db)):
             "error":           doc.error,
             "page_count":      doc.page_count,
             "has_flagged":     doc.has_flagged,
-            "view_count":      doc.view_count,
+            "download_count":      doc.download_count,
             "uploaded_by":     doc.uploaded_by,
             "uploaded_by_name": names.get(doc.uploaded_by),
             "uploaded_at":     str(doc.uploaded_at),
@@ -1987,9 +1981,9 @@ async def 문서_상세(doc_id: int, db: AsyncSession = Depends(get_db)):
     if doc is None:
         raise HTTPException(status_code=404, detail="해당 문서를 찾을 수 없습니다")
 
-    # [2026-10-26] 조회수는 여기서 올리지 않는다 — OCR 수정 창도 이 API로 페이지 텍스트를 읽어서
-    # 관리자가 OCR을 고칠 때마다 조회수가 올라갔다. 이제 화면이 문서를 "열었을 때"만
-    # POST /documents/{doc_id}/view 로 따로 올린다.
+    # [2026-10-26] 여기서 조회수를 올리지 않는다 — OCR 수정 창도 이 API로 페이지 텍스트를 읽어서
+    # 관리자가 OCR을 고칠 때마다 숫자가 올라갔다. 화면에 보이는 숫자는 이제 조회수가 아니라
+    # 다운로드 횟수(GET /files/{doc_id}에서 셈)다.
 
     # 저장된 파싱 결과 JSON을 읽어옵니다
     parsed_path = os.path.join(PARSED_DIR, f"{doc_id}.json")
@@ -2013,7 +2007,7 @@ async def 문서_상세(doc_id: int, db: AsyncSession = Depends(get_db)):
         "error":           doc.error,
         "page_count":      doc.page_count,
         "has_flagged":     doc.has_flagged,
-        "view_count":      doc.view_count,
+        "download_count":      doc.download_count,
         "uploaded_by":     doc.uploaded_by,
         "uploaded_by_name": names.get(doc.uploaded_by),
         "uploaded_at":     str(doc.uploaded_at),
@@ -2106,7 +2100,7 @@ async def 실제_검색_실행(q: str, mode: str, category, db: AsyncSession, up
                 "content_preview": preview,
                 "page_num":    0,
                 "score":       0,
-                "view_count":  d.view_count,
+                "download_count":  d.download_count,
                 "uploaded_by": d.uploaded_by,
                 "uploaded_at": str(d.uploaded_at),
             })
@@ -2130,7 +2124,7 @@ async def 실제_검색_실행(q: str, mode: str, category, db: AsyncSession, up
                 "content_preview": preview,
                 "page_num":    0,
                 "score":       0,   # 파일명 포함 여부는 이분법이라 관련도 배지를 붙이지 않는다
-                "view_count":  d.view_count,
+                "download_count":  d.download_count,
                 "uploaded_by": d.uploaded_by,
                 "uploaded_at": str(d.uploaded_at),
             })
@@ -2183,7 +2177,7 @@ async def 실제_검색_실행(q: str, mode: str, category, db: AsyncSession, up
             "content_preview": snippet,
             "page_num":    page_num,
             "score":       final_scores[did],
-            "view_count":  doc.view_count,
+            "download_count":  doc.download_count,
             "uploaded_by": doc.uploaded_by,
             "uploaded_at": str(doc.uploaded_at),
         })
@@ -2533,7 +2527,7 @@ async def 내_문서_목록(request: Request, db: AsyncSession = Depends(get_db)
             "category":    doc.category,
             "file_type":   doc.file_type,
             "status":      doc.status,
-            "view_count":  doc.view_count,
+            "download_count":  doc.download_count,
             "uploaded_at": str(doc.uploaded_at),
         }
         for doc in docs

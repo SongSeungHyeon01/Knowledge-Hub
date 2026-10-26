@@ -3,11 +3,11 @@
 
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Typography, Row, Col, Card, Tag, Button, Empty, Spin, Input, message } from 'antd'
+import { Typography, Row, Col, Card, Tag, Button, Empty, Spin, Input, Tooltip, message } from 'antd'
 import {
   StarFilled, DownloadOutlined, SearchOutlined,
   FilePdfOutlined, FileWordOutlined, FilePptOutlined, FileExcelOutlined,
-  FileTextOutlined, FileOutlined, EyeOutlined,
+  FileTextOutlined, FileOutlined,
 } from '@ant-design/icons'
 import axios from 'axios'
 import useIsNarrow from './useIsNarrow'
@@ -56,6 +56,12 @@ export default function BookmarksPage({ onNavigate }) {
     } catch {
       message.error('북마크 제거에 실패했습니다')
     }
+  }
+
+  // 다운로드 버튼을 누르면 서버가 횟수를 세고, 화면 숫자는 다시 불러오지 않고 여기서 바로 1 올린다
+  const bumpDownloadCount = (docId) => {
+    queryClient.setQueryData(['bookmarks'], list =>
+      Array.isArray(list) ? list.map(b => (b.id === docId ? { ...b, download_count: (b.download_count ?? 0) + 1 } : b)) : list)
   }
 
   const filtered = bookmarks.filter(b =>
@@ -128,12 +134,15 @@ export default function BookmarksPage({ onNavigate }) {
                   )}
                 </div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    <EyeOutlined style={{ marginRight: 4 }} />{doc.view_count ?? 0}
-                  </Text>
+                  <Tooltip title="다운로드 횟수">
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      <DownloadOutlined style={{ marginRight: 4 }} />{doc.download_count ?? 0}
+                    </Text>
+                  </Tooltip>
                   <Button
                     size="small" icon={<DownloadOutlined />}
                     href={`${API}/files/${doc.id}`} download type="primary" ghost
+                    onClick={() => bumpDownloadCount(doc.id)}
                   >
                     다운로드
                   </Button>
