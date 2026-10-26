@@ -503,6 +503,11 @@ async def lifespan(_):
     search_selfheal_task = asyncio.create_task(_scheduled_search_selfheal_task())
     print(f"[startup] 검색 인덱스 자동 복구 태스크 시작 (주기 {_SEARCH_SELFHEAL_INTERVAL_SEC}s)")
 
+    # 임베딩 모델을 서버 시작 직후 백그라운드에서 미리 올린다 — KURE-v1(약 2.3GB)은 첫 검색 때
+    # 올리면 그 검색이 10초 넘게 걸렸다(2026-10-25 실측 12.8초). 시작 자체는 막지 않는다.
+    from search import embedder as _embedder
+    embed_warmup_task = asyncio.create_task(asyncio.to_thread(_embedder.get_model))
+
     yield
 
     sweep_task.cancel()
@@ -516,7 +521,9 @@ async def lifespan(_):
             await t
         except asyncio.CancelledError:
             pass
-    print("[shutdown] 정체 문서 스윕·백업·미러 trash·삭제 보고서·세션 블랙리스트·ES 자동복구 태스크 종료")
+    if not embed_warmup_task.done():   # 스레드에서 도는 모델 로딩은 취소할 수 없어 기다리지 않고 알리기만 한다
+        print("[shutdown] 임베딩 모델을 올리는 중에 종료합니다")
+    print("[shutdown] 정체 문서 스윕·백업·미러 trash·삭제 보고서·세션 블랙리스트·검색 인덱스 자동복구 태스크 종료")
 
 
 # FastAPI 앱 객체를 만듭니다

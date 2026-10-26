@@ -44,6 +44,23 @@ COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
         --extra-index-url https://download.pytorch.org/whl/cpu
 
+# ── 모델을 이미지 안에 미리 받아둔다 (2026-10-25) ───────────────────────────────
+# DOCLING_ARTIFACTS_PATH를 주면 Docling은 모델을 내려받지 않고 그 폴더에서만 찾는다(완전 오프라인).
+# 예전엔 이 값을 /data(실행 시 볼륨이 덮어쓰는 경로)로 두고 모델을 미리 받지 않아, 배포 환경에서
+# 파싱 모델을 못 찾을 수 있었다. 폐쇄망 운영을 전제로 빌드 단계에서 /opt/models에 받아둔다.
+#   - Docling 레이아웃·표(TableFormer) 모델
+#   - RapidOCR 한국어 인식 모델(PP-OCRv5 korean) + 검출·방향 모델
+#   - 임베딩 모델(EMBED_MODEL, 기본 KURE-v1) → HF_HOME
+ARG EMBED_MODEL=nlpai-lab/KURE-v1
+ARG EMBED_DIM=1024
+ENV DOCLING_ARTIFACTS_PATH=/opt/models/docling \
+    HF_HOME=/opt/models/hf \
+    EMBED_MODEL=${EMBED_MODEL} \
+    EMBED_DIM=${EMBED_DIM}
+RUN docling-tools models download layout tableformer rapidocr \
+        --rapidocr-backend-lang onnxruntime:korean -o /opt/models/docling \
+    && python -c "import os; from sentence_transformers import SentenceTransformer; SentenceTransformer(os.environ['EMBED_MODEL'])"
+
 # 백엔드 소스 복사 (.dockerignore가 venv·data·km.db 등을 걸러준다)
 COPY backend/ .
 
@@ -51,17 +68,12 @@ COPY backend/ .
 COPY --from=frontend-build /front/dist ./static
 
 # ── 환경변수 ────────────────────────────────────────────────────────────────
-# DATA_DIR              업로드 원본·파싱 JSON 저장 위치 → Railway Volume(/data)
-# EASYOCR_MODULE_PATH   Docling의 OCR 백엔드(EasyOCR)가 쓰는 모델 저장 루트 —
-#                       easyocr 라이브러리(config.py)가 이 환경변수를 자동으로 읽는다
-# DOCLING_ARTIFACTS_PATH Docling 자체 모델(레이아웃·TableFormer 등) 캐시 위치
-# HF_HOME               sentence-transformers(MiniLM ~470MB) 캐시 → Volume
-# 첫 기동 때만 모델을 내려받고, 이후엔 Volume 캐시를 재사용한다 (설계도 확정)
+# DATA_DIR         업로드 원본·파싱 JSON 저장 위치 → 볼륨(/data)
+# HF_HUB_OFFLINE   위에서 받아둔 모델만 쓰고 실행 중에는 인터넷에서 받지 않는다(폐쇄망)
+# OPENSEARCH_URL   검색 엔진 주소 — 배포 환경에 맞게 반드시 지정(backend/opensearch/ 참고)
 ENV PYTHONUNBUFFERED=1 \
     DATA_DIR=/data \
-    EASYOCR_MODULE_PATH=/data/easyocr \
-    DOCLING_ARTIFACTS_PATH=/data/docling_models \
-    HF_HOME=/data/hf_cache
+    HF_HUB_OFFLINE=1
 
 EXPOSE 8000
 

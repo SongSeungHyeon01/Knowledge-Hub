@@ -4,11 +4,21 @@
 모델 이름과 차원을 여기서만 정한다. 모델은 EMBED_MODEL 환경변수로 바꿀 수 있고,
 검색 인덱스의 벡터 차원(opensearch_client.EMBED_DIM)과 다르면 시작할 때 바로 알린다 —
 차원이 다른 벡터는 색인 단계에서 전부 거부되는데, 그 실패가 조용히 묻히지 않게 하려는 것.
+
+[2026-10-25] 기본 모델을 paraphrase-multilingual-MiniLM-L12-v2 → nlpai-lab/KURE-v1(MIT, 1024차원)로
+바꿨다. 질문 47개 측정(eval/run_eval.py, 같은 파싱 결과에서 모델만 교체)에서:
+  MiniLM   hit@1 61.7% / hit@5  93.6% / MRR 0.721 / 청크 1,512개 임베딩 42초
+  e5-small hit@1 78.7% / hit@5  93.6% / MRR 0.859 / 109초
+  KURE-v1  hit@1 89.4% / hit@5 100.0% / MRR 0.941 / 471초 (검색 1회 평균 0.18초)
+MiniLM은 입력을 128토큰에서 자르는데 우리 청크(400자)는 134~218토큰이라 뒷부분이 버려졌다.
+KURE-v1은 8192토큰까지 받는다. 가벼운 구성이 필요하면 EMBED_MODEL=intfloat/multilingual-e5-small,
+EMBED_DIM=384로 바꾸고 scripts/search_backfill.py --reembed로 다시 색인한다.
 """
 
 import os
+import threading
 
-EMBED_MODEL = os.environ.get("EMBED_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "nlpai-lab/KURE-v1")
 
 # 질문/문서 앞에 붙여야 하는 접두어 — 각 모델 카드에 적힌 사용법 그대로(2026-10-24 확인).
 # 표에 없는 모델은 EMBED_QUERY_PREFIX / EMBED_PASSAGE_PREFIX 환경변수로 지정한다.
@@ -23,10 +33,16 @@ PASSAGE_PREFIX = os.environ.get("EMBED_PASSAGE_PREFIX", _KNOWN_PREFIXES.get(EMBE
 
 _model = None
 _load_failed = False
+_load_lock = threading.Lock()   # 시작 시 미리 올리기와 첫 검색이 겹쳐도 모델을 한 번만 올린다
 
 
 def get_model():
     """지연 로딩. 실패하면 None — 호출부는 임베딩 없이(BM25만으로) 동작해야 한다."""
+    with _load_lock:
+        return _load_model()
+
+
+def _load_model():
     global _model, _load_failed
     if _model is None and not _load_failed:
         try:

@@ -75,6 +75,20 @@ def cmd_upload(args):
             _wait_parsed(args.base, [r["id"]], args.timeout)
 
     rows = _wait_parsed(args.base, list(ids), args.timeout)
+    if args.settle_url:
+        # 문서 상태는 파싱이 끝나면 success가 되고, 임베딩·색인은 그 뒤에 이어서 돈다.
+        # 색인이 끝나기 전에 채점하지 않도록 검색 엔진 청크 수가 30초 동안 그대로일 때까지 기다린다.
+        last, stable_since = -1, time.time()
+        while True:
+            count = _request(args.settle_url)["count"]
+            if count != last:
+                last, stable_since = count, time.time()
+            elif count > 0 and time.time() - stable_since >= 30:
+                break
+            if time.time() - started > args.timeout:
+                sys.exit(f"timeout: index still changing ({count} chunks)")
+            time.sleep(3)
+        print(f"index settled at {last} chunks")
     failed = [r for r in rows if r["status"] != "success"]
     print(f"\nparsed {len(rows) - len(failed)}/{len(rows)} in {time.time() - started:.0f}s")
     for r in failed:
@@ -150,6 +164,9 @@ def main():
     up.add_argument("--timeout", type=int, default=7200)
     up.add_argument("--sequential", action="store_true",
                     help="한 문서씩 파싱 완료를 기다리며 올린다(측정 조건을 같게 맞출 때)")
+    up.add_argument("--settle-url",
+                    help="검색 엔진 청크 수 URL(예: http://localhost:9200/<index>/_count). "
+                         "주면 색인이 끝날 때까지 기다린다")
     qu = sub.add_parser("query")
     qu.add_argument("--base", required=True)
     qu.add_argument("--queries", required=True)

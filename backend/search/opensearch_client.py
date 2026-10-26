@@ -21,7 +21,8 @@ import os
 
 SEARCH_URL = os.environ.get("OPENSEARCH_URL", "http://localhost:9200")
 SEARCH_INDEX = os.environ.get("OPENSEARCH_INDEX", "knowledge_hub_chunks")
-EMBED_DIM = int(os.environ.get("EMBED_DIM", "384"))
+# 임베딩 모델(search/embedder.py, 기본 KURE-v1)의 벡터 차원과 같아야 한다. 다르면 embedder가 시작할 때 알린다.
+EMBED_DIM = int(os.environ.get("EMBED_DIM", "1024"))
 
 _client = None
 _index_ready = False

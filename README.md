@@ -22,21 +22,24 @@ HWP·PPT·스캔 PDF 등 포맷이 섞이고 파일명 규칙이 없는 R&D 중�
 
 ## 주요 기능
 
-- PDF·DOCX·PPTX·XLSX·TXT·MD를 올리면 백그라운드에서 파싱해 표와 스캔 페이지(OCR)까지 텍스트로 뽑고, 페이지 단위로 저장한다. 파일 하나에 최대 500MB, PDF는 3,000쪽까지 받는다.
+- PDF·DOCX·PPTX·XLSX·HWP·HWPX·TXT·MD를 올리면 백그라운드에서 파싱해 표와 스캔 페이지(한국어 OCR)까지 텍스트로 뽑고, 페이지 단위로 저장한다. 파일 하나에 최대 500MB, PDF는 3,000쪽까지 받는다.
 - 검색은 파일명 검색이 기본이고, 유사 검색으로 바꾸면 내용으로 찾는다. 질문과 뜻이 가까운 페이지를 찾아 원본 파일의 몇 쪽인지까지 보여주고, 한국어로 물어도 영어 문서를 찾는다.
 - Google 계정으로 로그인한다. 문서는 업로드한 사람의 부서를 따라가서 같은 부서만 볼 수 있고, 관리자가 문서별로 예외를 줄 수 있다.
 - 관리자 화면에서 문서·계정·부서·카테고리를 관리한다. 파싱에 실패했거나 OCR 품질이 낮은 문서는 "확인 필요 문서" 탭에 모이고, 문서를 지우면 누가 왜 지웠는지 "삭제 보고서"에 남는다. 업로드·검색 통계도 여기서 본다.
 - 북마크, 문서 댓글, 알림이 있다. 같은 파일명을 다시 올리면 덮어쓰지 않고 새 버전으로 추가하며, DB와 파일은 자동으로 백업한다.
 
+HWP 지원에 대해: 본 제품은 한글과컴퓨터의 한글 문서 파일(.hwp) 공개 문서를 참고하여 개발하였습니다.
+
 ## 폴더 구조
 
 ```
 backend/
-  main.py              API 전체, 업로드·파싱·검색 흐름, 백그라운드 작업(백업, ES 자동 복구)
-  core/                문서 파싱 (docling_parser.py, parser.py, office_adapter.py)
-  search/es_client.py  Elasticsearch 색인과 하이브리드 검색
-  elasticsearch/       nori가 들어간 ES 이미지 Dockerfile
-  scripts/es_backfill.py  DB에 있는 청크를 ES에 다시 색인
+  main.py              API 전체, 업로드·파싱·검색 흐름, 백그라운드 작업(백업, 검색 인덱스 자동 복구)
+  core/                문서 파싱 (docling_parser.py, hwp_parser.py, parser.py, office_adapter.py)
+  search/              OpenSearch 색인·하이브리드 검색(opensearch_client.py), 임베딩 모델(embedder.py)
+  opensearch/          nori가 들어간 OpenSearch 이미지 Dockerfile과 docker-compose.yml
+  scripts/search_backfill.py  DB에 있는 청크를 검색 인덱스에 다시 색인(--reembed: 모델을 바꿨을 때)
+eval/run_eval.py       검색 품질 측정(업로드 후 질문 세트를 유사 검색으로 채점)
 frontend/src/          검색·업로드·관리자·내 정보 화면
 parser/                초기 PDF 파서 원본 (팀원 작업 보존용, 지금 서비스에서는 쓰지 않음)
 docs/오류보고서/        겪은 문제와 원인 조사 기록
@@ -169,18 +172,13 @@ SESSION_SECRET=<임의의 긴 문자열>
 ADMIN_EMAILS=<관리자 이메일, 쉼표로 구분>
 ```
 
-**2. Elasticsearch**
+**2. OpenSearch**
 
-코드가 nori 분석기를 쓰기 때문에 nori가 들어간 이미지를 빌드해서 띄운다. `backend/elasticsearch/docker-compose.yml`은 nori가 없는 기본 이미지를 쓰고 있어서 지금 코드와 맞지 않는다.
+nori 플러그인을 넣은 이미지를 빌드해서 띄운다. 보안 플러그인을 끈 로컬 전용 설정이라 포트는 이 PC(127.0.0.1)에만 열린다.
 
 ```bash
-cd backend/elasticsearch
-docker build -t knowledge-hub-es-nori:8.15.0 .
-docker run -d --name project_knowledge_hub_es -p 9200:9200 \
-  -e discovery.type=single-node -e xpack.security.enabled=false \
-  -e "ES_JAVA_OPTS=-Xms1g -Xmx1g" \
-  -v project_knowledge_hub_es_data:/usr/share/elasticsearch/data \
-  knowledge-hub-es-nori:8.15.0
+cd backend/opensearch
+docker compose up -d --build
 ```
 
 **3. 백엔드**
@@ -192,7 +190,7 @@ python -m venv .venv
 PYTHONUTF8=1 HF_HUB_DISABLE_SYMLINKS=1 .venv/Scripts/python -m uvicorn main:app --port 8000
 ```
 
-Windows에서는 `HF_HUB_DISABLE_SYMLINKS=1`이 없으면 Docling 모델을 받을 때 권한 오류가 난다. 첫 업로드 때 파싱·임베딩 모델을 내려받느라 몇 분 걸린다.
+Windows에서는 `HF_HUB_DISABLE_SYMLINKS=1`이 없으면 Docling 모델을 받을 때 권한 오류가 난다. 처음 실행할 때 파싱 모델과 임베딩 모델(KURE-v1, 약 2.3GB)을 내려받느라 시간이 걸린다. 임베딩 모델은 서버가 뜬 직후 백그라운드에서 미리 올린다.
 
 **4. 프론트엔드**
 
@@ -204,7 +202,7 @@ VITE_API_URL=http://localhost:8000 npx vite --port 5173
 
 브라우저에서 `http://localhost:5173`으로 연다. Google 로그인을 쓰려면 Google Cloud Console의 OAuth 클라이언트에 `http://localhost:5173`이 승인된 JavaScript 원본으로 등록돼 있어야 한다.
 
-기존 문서를 Elasticsearch에 다시 넣어야 할 때는 `backend/`에서 `python scripts/es_backfill.py`를 실행한다.
+기존 문서를 검색 인덱스에 다시 넣어야 할 때는 `backend/`에서 `python scripts/search_backfill.py`를 실행한다. 임베딩 모델을 바꿨다면 `--reembed`를 붙여 벡터부터 다시 만든다(이때 `EMBED_MODEL`, `EMBED_DIM` 환경변수를 새 모델에 맞추고 `OPENSEARCH_INDEX`도 새 이름으로 준다).
 
 배포용 단일 이미지 빌드 방법은 [`DEPLOY.md`](DEPLOY.md)에 있다.
 
@@ -212,19 +210,46 @@ VITE_API_URL=http://localhost:8000 npx vite --port 5173
 
 ## AX 이후 진행 상황
 
-AX 기간에 쓰던 Railway 배포는 지금 내려가 있다. 2026년 10월에 로컬에서 로그인, 업로드·파싱, 파일명 검색, 유사 검색이 모두 동작하는 것을 확인했다.
-
-여기서부터는 서버와 배포를 다른 구성으로 바꿔 가며 개발을 이어 간다.
+AX 기간에 쓰던 Railway 배포는 지금 내려가 있다. 여기서부터는 서버와 배포를 다른 구성으로 바꿔 가며 개발을 이어 간다.
 
 - [ ] 서버·배포 구성: *(작성 예정)*
-- [ ] 사용할 모델: *(작성 예정)*
+- [x] 사용할 모델: 임베딩 KURE-v1, OCR RapidOCR 한국어 모델 (2026년 10월 25일, 아래 측정 결과로 결정)
 
-AX 기간에 남겨 둔 과제는 다음과 같다.
+### 2026년 10월 24~25일: 라이선스 정리, HWP 재지원, 모델 결정
 
-- 7월 28일에 들여온 Elasticsearch 8.15는 Apache 2.0이 아니라 Elastic License 2.0 / SSPL 라이선스다. 처음 정한 라이선스 기준에 맞는지 다시 검토해야 한다.
-- `docker-compose.yml`을 nori 이미지(`build: .`)로 맞추기
-- OCR 언어 설정이 기본값(영어 위주)이라 한국어 스캔본 인식 보강
-- 문서 수를 늘려서 "검색 결과 상위 5개 안에 원하는 문서가 들어오는 비율 80%" 목표 측정
+처음 정한 라이선스 기준(상업적 이용이 자유로운 허용형 오픈소스만)을 최우선으로 두고 다시 정리했다.
+
+- **검색 엔진**: Elasticsearch 8.15 배포판의 라이선스가 Elastic License 2.0이라(이미지 안 `LICENSE.txt`로 확인) 기준에 맞지 않았다. OpenSearch 3.9.0(Apache-2.0)과 nori 플러그인(Apache-2.0)으로 바꿨다. 검색 방식(BM25와 벡터를 따로 찾아 파이썬에서 RRF로 합치는 구조)은 그대로다.
+- **OCR**: EasyOCR가 끌어오는 python-bidi가 LGPL이었다. Docling이 지원하는 RapidOCR(Apache-2.0)로 바꾸고 한국어 인식 모델을 지정했다. 이전 설정은 한국어를 전혀 읽지 못했는데(스캔본 한국어 재현율 0%), 지금은 59.5%를 읽는다.
+- **HWP·HWPX**: 한컴이 공개한 「한글 문서 파일 형식 5.0」 명세를 보고 `core/hwp_parser.py`에 직접 구현했다. 외부 프로그램이나 GPL 계열 확장 없이 파이썬(olefile, lxml)만 쓴다. 이 PC에 있던 HWP·HWPX 35개를 모두 읽었고, 같은 문서를 한컴이 내보낸 PDF와 대조했을 때 본문 글자의 97.8%가 일치했다(빠진 부분은 쪽 번호와 반복 머리말). HWP는 쪽이 파일에 고정돼 있지 않아 DOCX처럼 쪽 번호를 따로 보여주지 않는다.
+- **임베딩 모델**: 아래 측정에서 가장 높게 나온 KURE-v1(MIT)로 바꿨다.
+
+라이선스 점검 결과 지금 백엔드 패키지 142개 중 허용형이 아닌 것은 certifi와 tqdm(둘 다 MPL-2.0)뿐이다. 둘 다 requests·huggingface_hub 같은 필수 라이브러리가 요구해서 뺄 수 없다. 수정하지 않고 쓰는 경우 MPL-2.0은 상업적 이용을 막지 않는다.
+
+### 검색 품질 측정
+
+`eval/run_eval.py`로 실제 API에 문서 23개(PDF, 스캔 PDF, DOCX, PPTX, XLSX, HWP, HWPX, MD, TXT)를 올리고, 질문 47개를 유사 검색으로 돌려 정답 문서가 몇 위에 나오는지 쟀다. 측정용 문서와 질문은 팀원·학교 문서가 섞여 있어서 저장소에 올리지 않았다.
+
+| 구성 | 1위 적중 | 5위 안 적중 | MRR |
+|---|---|---|---|
+| 정리 전 (Elasticsearch + MiniLM) | 27.7% | 51.1% | 0.366 |
+| 정리 후 + MiniLM | 61.7% | 93.6% | 0.721 |
+| 정리 후 + multilingual-e5-small | 78.7% | 93.6% | 0.859 |
+| 정리 후 + multilingual-e5-base | 74.5% | 97.9% | 0.840 |
+| 정리 후 + bge-m3 | 85.1% | 100% | 0.915 |
+| **정리 후 + KURE-v1 (현재)** | **89.4%** | **100%** | **0.941** |
+
+"5위 안 적중"이 PRD 목표 지표(상위 5개 안에 원하는 문서가 들어오는 비율 80%)다. 정리 전 51.1%의 원인은 측정하면서 찾았다. HWP를 받지 못했고, 스캔본 한국어를 읽지 못했고, 일부 PDF는 Docling이 글자를 깨뜨려 읽는 바람에 문서 전체가 "확인 필요"로 빠져 검색 대상이 아니었다. 셋 다 고쳤다.
+
+KURE-v1의 대가는 속도다. 이 노트북 CPU에서 청크 1,512개를 임베딩하는 데 MiniLM은 42초, KURE-v1은 471초가 걸렸다. 검색 한 번은 평균 0.18초다. 더 가벼운 구성이 필요하면 `EMBED_MODEL=intfloat/multilingual-e5-small`, `EMBED_DIM=384`로 바꾸면 된다.
+
+질문은 문서를 읽고 직접 만들었기 때문에 실제 사용자 질문보다 쉬울 수 있다. 같은 질문으로 구성만 바꿔 비교하는 용도로 봐야 한다.
+
+### 남은 과제
+
+- 서버·배포 구성 정하기 (KURE-v1을 쓰면 임베딩 모델만 메모리 약 2.3GB를 쓴다)
+- 큰 문서는 상태가 "완료"로 바뀐 뒤에도 색인이 끝날 때까지 몇십 초 동안 유사 검색에 잡히지 않는다. 화면에 "색인 중"을 따로 보여줄지 정해야 한다.
+- 스캔본 OCR은 한국어 재현율 59.5%로, 흐린 이미지나 작은 글씨는 아직 놓친다.
 
 ## 참고 문서
 
@@ -250,16 +275,17 @@ AX 기간에 남겨 둔 과제는 다음과 같다.
 
 | 항목 | 처음 계획 | 바뀐 과정 | 지금 |
 |---|---|---|---|
-| PDF 파싱 | PyMuPDF + EasyOCR | PyMuPDF가 AGPL이라 pdfplumber + camelot + img2table + EasyOCR로 교체(7월 3일) | Docling + EasyOCR (7월 28일) |
-| HWP 파싱 | pyhwp + LibreOffice | pyhwp가 AGPL이라 LibreOffice만 사용(7월 4일), 배포 서버용 H2Orestart 추가(7월 24일) | 지원 중단. Docling이 HWP를 지원하지 않음 |
-| 키워드 검색 | rank-bm25 + kiwipiepy | 검색할 때마다 BM25 인덱스를 새로 만드는 방식 | Elasticsearch BM25 + nori |
-| 벡터 저장 | 미정 | turbovec(메모리 인덱스)로 시작 | Elasticsearch kNN |
+| PDF 파싱 | PyMuPDF + EasyOCR | PyMuPDF가 AGPL이라 pdfplumber + camelot + img2table + EasyOCR로 교체(7월 3일), Docling + EasyOCR로 통합(7월 28일) | Docling + RapidOCR 한국어 모델 (10월 24일) |
+| HWP 파싱 | pyhwp + LibreOffice | pyhwp가 AGPL이라 LibreOffice만 사용(7월 4일), Docling 통합 때 지원 중단(7월 28일) | 한컴 공개 명세 기반 자체 파서 (10월 24일) |
+| 키워드 검색 | rank-bm25 + kiwipiepy | 검색할 때마다 BM25 인덱스를 새로 만드는 방식, Elasticsearch BM25 + nori(7월 28일) | OpenSearch BM25 + nori (10월 24일) |
+| 벡터 저장 | 미정 | turbovec(메모리 인덱스), Elasticsearch kNN(7월 28일) | OpenSearch kNN (10월 24일) |
+| 임베딩 | MiniLM | | KURE-v1 (10월 25일) |
 | 결합 방식 | 하이브리드 | 3단계 점수 섞기에서 유사도 후보 안 BM25 재정렬로 변경(7월 23일) | BM25와 kNN을 따로 질의해 파이썬에서 RRF 결합 |
 | DB | SQLite | 배포하면서 PostgreSQL 추가 | PostgreSQL(배포) / SQLite(로컬) 자동 전환 |
 | 화면 | React | | React + Vite + Ant Design + TanStack Query |
 | 요약 | Ollama + Gemma 3 4B (미정) | Qwen2.5로 바꿔 붙였다가 하루 만에 제거(7월 21일) | 없음 |
 | 실행 환경 | CPU 전용, 외부 API 없음 | 유지 | 유지 |
-| 라이선스 | MIT / Apache 2.0만 | 유지 | Elasticsearch(Elastic License 2.0 / SSPL)는 재검토 필요 |
+| 라이선스 | MIT / Apache 2.0만 | Elasticsearch(Elastic License 2.0)와 python-bidi(LGPL)가 들어와 있었음 | 둘 다 제거. 남은 예외는 필수 의존성인 certifi·tqdm(MPL-2.0) |
 
 AX 이후에는 이 표의 "지금" 칸에서 출발해 다시 바꿔 가며 써 보고 있다. 바뀌는 내용은 위 "AX 이후 진행 상황"에 이어서 적는다.
 
@@ -272,10 +298,10 @@ AX 이후에는 이 표의 "지금" 칸에서 출발해 다시 바꿔 가며 써
 | 백엔드 | FastAPI, Uvicorn, SQLAlchemy(async) | 대용량 업로드를 받으면서 파싱을 백그라운드로 돌리려고 비동기로 만들었다 |
 | 프론트엔드 | React 19, Vite, Ant Design, TanStack Query, Axios | 검색·업로드·관리자·내 정보 화면. 서버 데이터는 TanStack Query로 관리한다 |
 | DB | PostgreSQL(배포), SQLite(로컬) | `DATABASE_URL`이 있으면 PostgreSQL, 없으면 SQLite를 써서 코드를 고치지 않고 환경만 바꿔 옮길 수 있다 |
-| 문서 파싱 | Docling(레이아웃·표 인식) + EasyOCR | 여러 형식을 한 파이프라인으로 처리하고, LibreOffice 같은 외부 프로그램이 필요 없다 |
-| 검색 | Elasticsearch 8.15 + nori, BM25 + 벡터 kNN, RRF는 파이썬에서 직접 결합 | 키워드 검색과 의미 검색을 같이 쓰면서, 무료 버전에서 막힌 RRF 기능은 직접 계산했다 |
-| 임베딩 | `paraphrase-multilingual-MiniLM-L12-v2` (384차원) | 한국어로 물어서 영어 문서를 찾을 수 있고 CPU에서도 빠르다 |
+| 문서 파싱 | Docling(레이아웃·표 인식) + RapidOCR 한국어 모델, HWP·HWPX는 자체 파서 | 여러 형식을 외부 프로그램 없이 처리한다. HWP는 Docling이 지원하지 않아 한컴 공개 명세로 직접 구현했다 |
+| 검색 | OpenSearch 3.9 + nori, BM25 + 벡터 kNN, RRF는 파이썬에서 직접 결합 | Apache-2.0이라 라이선스 기준에 맞고, 키워드 검색과 의미 검색을 같이 쓸 수 있다 |
+| 임베딩 | `nlpai-lab/KURE-v1` (1024차원, MIT) | 측정한 6개 모델 중 정답 1위 비율이 가장 높았다(89.4%). 한국어 질문으로 영어 문서도 찾는다 |
 | 인증 | Google OAuth ID 토큰 검증 + 서명된 세션 쿠키 | 클라이언트 시크릿 없이 ID 토큰 검증만으로 로그인을 붙일 수 있었다 |
 | 배포(AX 기간) | Docker 단일 이미지, Railway | 프론트 빌드 결과를 백엔드가 같이 서빙해서 서비스 하나로 운영했다 |
 
-문서를 올리면 Docling이 페이지 단위 텍스트로 바꾸고, MiniLM이 페이지마다 384차원 벡터를 만든다. 이 벡터는 텍스트와 함께 DB에 저장되고 Elasticsearch에 색인된다. 검색할 때는 같은 질문으로 BM25 검색과 벡터 검색을 따로 돌려 RRF로 순위를 합치고, 부서 권한으로 한 번 더 거른 뒤 원본 파일의 해당 페이지와 함께 돌려준다. 이 과정 전체가 GPU와 외부 API 없이 CPU만으로 돌아간다.
+문서를 올리면 Docling(HWP·HWPX는 자체 파서)이 페이지 단위 텍스트로 바꾸고, 400자 단위 조각마다 KURE-v1이 1024차원 벡터를 만든다. 이 벡터는 텍스트와 함께 DB에 저장되고 OpenSearch에 색인된다. 검색할 때는 같은 질문으로 BM25 검색과 벡터 검색을 따로 돌려 RRF로 순위를 합치고, 부서 권한으로 한 번 더 거른 뒤 원본 파일의 해당 페이지와 함께 돌려준다. 이 과정 전체가 GPU와 외부 API 없이 CPU만으로 돌아간다.
