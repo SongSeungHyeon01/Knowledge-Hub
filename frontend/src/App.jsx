@@ -102,10 +102,12 @@ export default function App() {
       queryClient.invalidateQueries({ queryKey: ['notif-unread'] })
       queryClient.invalidateQueries({ queryKey: ['notifications'] })
     }
-    localStorage.setItem('km_launch_query', n.doc_label)
+    // [2026-10-26] 문서 제목으로 검색해서 찾던 방식은 제목과 파일명이 다르면 문서를 못 찾았다 —
+    // 이제 문서 번호(와 댓글 번호)만 넘겨서 검색 화면이 그 문서 팝업을 바로 열고 그 댓글로 스크롤한다.
     localStorage.setItem('km_launch_doc_id', String(n.doc_id))
+    if (n.comment_id) localStorage.setItem('km_launch_comment_id', String(n.comment_id))
     setCurrent('search')
-    setHomeKey(k => k + 1)  // 이미 검색 탭이어도 SearchPage를 새로 마운트해 방금 넣은 검색어를 바로 실행시킨다
+    setHomeKey(k => k + 1)  // 이미 검색 탭이어도 SearchPage를 새로 마운트해 방금 넣은 문서를 바로 열게 한다
     setNotifOpen(false)
   }
   const markAllNotificationsRead = async () => {

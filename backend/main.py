@@ -828,6 +828,59 @@ async def 북마크_삭제(doc_id: int, request: Request, db: AsyncSession = Dep
     return {"doc_id": doc_id, "bookmarked": False}
 
 
+# ── 문서 한 건 요약 — 알림에서 문서로 바로 갈 때 쓴다 ──────────────────────────
+# [2026-10-26] 예전에는 알림을 누르면 문서 제목으로 파일명 검색을 돌려 결과 안에서 문서를 찾았다.
+# 제목과 파일명이 다르면(예: 제목 "주간 연구회의 회의록", 파일명 "회의.txt") 검색에 안 걸려 팝업이
+# 열리지 않았다. 문서 번호로 검색 결과와 같은 모양의 데이터를 바로 돌려준다.
+# 경로를 /documents/{doc_id}로 두지 않은 이유: 먼저 등록된 /documents/statuses 같은 고정 경로와
+# 겹치면 "statuses"가 doc_id 자리에 들어가 422가 난다.
+@app.get("/documents/{doc_id}/summary")
+async def 문서_요약(doc_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    doc = (await db.execute(select(Document).where(Document.id == doc_id))).scalar_one_or_none()
+    if doc is None:
+        raise HTTPException(status_code=404, detail="문서가 삭제됐거나 찾을 수 없습니다")
+    if not await _can_read_doc(db, doc_id, _current_user_email(request)):
+        raise HTTPException(status_code=403, detail="이 문서를 읽을 권한이 없습니다")
+    names = await _resolve_names(db, [doc.uploaded_by])
+    preview = _get_doc_text(doc.id)["full_text"][:150].strip()
+    return {
+        "doc_id":           doc.id,
+        "filename":         doc.filename,
+        "title":            doc.title,
+        "category":         doc.category,
+        "file_type":        doc.file_type,
+        "pages":            doc.page_count,
+        "memo":             doc.memo,
+        "snippet":          doc.title or doc.filename,
+        "content_preview":  preview,
+        "page_num":         0,
+        "score":            0,
+        "view_count":       doc.view_count,
+        "uploaded_by":      doc.uploaded_by,
+        "uploaded_by_name": names.get(doc.uploaded_by),
+        "uploaded_at":      str(doc.uploaded_at),
+    }
+
+
+# ── 조회수 — 화면에서 문서 상세를 열 때마다 1 올린다 ──────────────────────────────
+# 읽고 더해서 다시 쓰면(doc.view_count += 1) 두 사람이 동시에 열었을 때 하나가 덮여 사라진다.
+# DB 안에서 한 문장으로 더하고, 더한 값을 그대로 돌려줘서 화면이 다시 조회하지 않고 바로 반영한다.
+@app.post("/documents/{doc_id}/view")
+async def 조회수_증가(doc_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    if not await _can_read_doc(db, doc_id, _current_user_email(request)):
+        raise HTTPException(status_code=403, detail="이 문서를 읽을 권한이 없습니다")
+    new_count = (await db.execute(
+        sa_update(Document)
+        .where(Document.id == doc_id)
+        .values(view_count=func.coalesce(Document.view_count, 0) + 1)
+        .returning(Document.view_count)
+    )).scalar_one_or_none()
+    if new_count is None:
+        raise HTTPException(status_code=404, detail="문서가 삭제됐거나 찾을 수 없습니다")
+    await db.commit()
+    return {"doc_id": doc_id, "view_count": new_count}
+
+
 # ── 문서 상세 팝업의 댓글 — 로그인 켜져 있으면 작성자별, 꺼져 있으면 "anonymous" 공용 ──────
 @app.get("/documents/{doc_id}/comments")
 async def 댓글_목록(doc_id: int, db: AsyncSession = Depends(get_db)):
@@ -922,6 +975,7 @@ async def 알림_목록(request: Request, db: AsyncSession = Depends(get_db)):
         {
             "id": row.Notification.id,
             "doc_id": row.Notification.doc_id,
+            "comment_id": row.Notification.comment_id,  # 알림을 눌렀을 때 그 댓글로 바로 스크롤하는 데 쓴다
             "doc_label": row.title or row.filename,
             "is_read": row.Notification.is_read,
             "created_at": str(row.Notification.created_at),
@@ -1933,9 +1987,9 @@ async def 문서_상세(doc_id: int, db: AsyncSession = Depends(get_db)):
     if doc is None:
         raise HTTPException(status_code=404, detail="해당 문서를 찾을 수 없습니다")
 
-    # 상세보기 조회수 증가
-    doc.view_count = (doc.view_count or 0) + 1
-    await db.commit()
+    # [2026-10-26] 조회수는 여기서 올리지 않는다 — OCR 수정 창도 이 API로 페이지 텍스트를 읽어서
+    # 관리자가 OCR을 고칠 때마다 조회수가 올라갔다. 이제 화면이 문서를 "열었을 때"만
+    # POST /documents/{doc_id}/view 로 따로 올린다.
 
     # 저장된 파싱 결과 JSON을 읽어옵니다
     parsed_path = os.path.join(PARSED_DIR, f"{doc_id}.json")

@@ -123,11 +123,17 @@ export default function SearchPage() {
     return c || null
   })
 
-  // 알림(댓글 등)에서 넘어온 경우 — 검색 결과가 오면 그 문서를 바로 상세 팝업으로 열어준다.
-  // ref로 두는 이유: 한 번 쓰고 나면(useEffect에서 openDetail 호출) 다시 안 열리게 지워야 해서.
+  // 알림(댓글 등)에서 넘어온 경우 — 검색을 거치지 않고 그 문서를 바로 상세 팝업으로 열고,
+  // 댓글 번호가 있으면 그 댓글로 스크롤한다. ref로 두는 이유: 한 번 쓰고 나면 다시 안 열리게
+  // 지워야 하고, StrictMode가 effect를 두 번 돌려도 조회수가 두 번 오르지 않게 하려고.
   const pendingOpenDocIdRef = useRef((() => {
     const id = localStorage.getItem('km_launch_doc_id')
     if (id) localStorage.removeItem('km_launch_doc_id')
+    return id ? Number(id) : null
+  })())
+  const pendingCommentIdRef = useRef((() => {
+    const id = localStorage.getItem('km_launch_comment_id')
+    if (id) localStorage.removeItem('km_launch_comment_id')
     return id ? Number(id) : null
   })())
 
@@ -181,17 +187,42 @@ export default function SearchPage() {
   const [commentsLoading, setCommentsLoading] = useState(false)
   const [newComment,      setNewComment]      = useState('')
   const [commentPosting,  setCommentPosting]  = useState(false)
+  const [focusCommentId,  setFocusCommentId]  = useState(null)  // 알림으로 들어왔을 때 강조할 댓글
 
-  const openDetail = (doc) => {
+  // 조회수가 바뀐 문서를 화면에 떠 있는 목록(검색 결과·둘러보기)과 팝업에서 한꺼번에 고친다 —
+  // 다시 검색하지 않아도 카드의 조회수가 바로 바뀌게 하려는 것.
+  const applyViewCount = (docId, viewCount) => {
+    const patch = (d) => (d.doc_id === docId ? { ...d, view_count: viewCount } : d)
+    setDetailDoc(d => (d ? patch(d) : d))
+    setResults(r => (r?.results ? { ...r, results: r.results.map(patch) } : r))
+    setBrowseDocs(list => list.map(patch))
+  }
+
+  const openDetail = (doc, commentIdToFocus = null) => {
     setDetailDoc(doc)
     setNewComment('')
     setComments([])
+    setFocusCommentId(commentIdToFocus)
     setCommentsLoading(true)
     axios.get(`${API}/documents/${doc.doc_id}/comments`)
       .then(res => setComments(res.data))
       .catch(() => {})
       .finally(() => setCommentsLoading(false))
+    // 상세를 연 것을 조회 1회로 센다. 실패해도(권한·네트워크) 팝업은 그대로 둔다.
+    axios.post(`${API}/documents/${doc.doc_id}/view`)
+      .then(res => applyViewCount(doc.doc_id, res.data.view_count))
+      .catch(() => {})
   }
+
+  // 알림에서 지정한 댓글이 그려지면 그 위치로 스크롤하고, 잠깐 강조했다가 원래대로 돌린다
+  useEffect(() => {
+    if (!focusCommentId || commentsLoading) return
+    const el = document.getElementById(`comment-${focusCommentId}`)
+    if (!el) return
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    const t = setTimeout(() => setFocusCommentId(null), 4000)
+    return () => clearTimeout(t)
+  }, [focusCommentId, commentsLoading, comments])
 
   const postComment = async () => {
     if (!newComment.trim() || !detailDoc) return
@@ -279,6 +310,18 @@ export default function SearchPage() {
     setBrowsePage(1)
     fetchBrowse(true)
   }, [browseCategory]) // eslint-disable-line
+
+  // 알림에서 넘어온 경우 — 문서 번호로 바로 불러와 팝업을 연다(검색 결과에 있는지와 무관)
+  useEffect(() => {
+    const docId = pendingOpenDocIdRef.current
+    const commentId = pendingCommentIdRef.current
+    if (docId == null) return
+    pendingOpenDocIdRef.current = null
+    pendingCommentIdRef.current = null
+    axios.get(`${API}/documents/${docId}/summary`)
+      .then(res => openDetail(res.data, commentId))
+      .catch(err => message.error(err.response?.data?.detail ?? '문서를 열지 못했습니다'))
+  }, []) // eslint-disable-line
 
   // 관리자 검색 기록에서 넘어온 경우 자동 검색
   useEffect(() => {
@@ -379,13 +422,6 @@ export default function SearchPage() {
       setResults(res.data)
       setQuery(q)
       syncUrl(q, categoryOverride)
-
-      // 알림에서 넘어온 경우 — 검색 결과 중 그 문서를 찾아 바로 상세 팝업으로 연다(한 번만).
-      if (pendingOpenDocIdRef.current != null) {
-        const target = (res.data.results ?? []).find(r => r.doc_id === pendingOpenDocIdRef.current)
-        pendingOpenDocIdRef.current = null
-        if (target) openDetail(target)
-      }
 
       if (res.data.total === 0) {
         axios.get(`${API}/stats`)
@@ -1090,6 +1126,9 @@ export default function SearchPage() {
                 {detailDoc.uploaded_at && (
                   <Text type="secondary" style={{ fontSize: 12 }}>{formatDate(detailDoc.uploaded_at)}</Text>
                 )}
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  <EyeOutlined style={{ marginRight: 4 }} />{detailDoc.view_count ?? 0}
+                </Text>
               </Space>
 
               <Space>
@@ -1123,7 +1162,15 @@ export default function SearchPage() {
               ) : (
                 <Space orientation="vertical" style={{ width: '100%' }} size={8}>
                   {comments.map((c) => (
-                    <div key={c.id} style={{ background: '#fafafa', border: '1px solid #f0f0f0', borderRadius: 6, padding: '8px 10px' }}>
+                    <div
+                      key={c.id}
+                      id={`comment-${c.id}`}
+                      style={{
+                        background: c.id === focusCommentId ? '#fffbe6' : '#fafafa',
+                        border: `1px solid ${c.id === focusCommentId ? '#ffd666' : '#f0f0f0'}`,
+                        borderRadius: 6, padding: '8px 10px', transition: 'background 0.6s, border-color 0.6s',
+                      }}
+                    >
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
                         <Text strong style={{ fontSize: 12 }}>{c.user_name}</Text>
                         <Space size={8}>

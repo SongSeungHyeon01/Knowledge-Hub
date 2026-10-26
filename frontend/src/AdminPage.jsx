@@ -261,6 +261,15 @@ export default function AdminPage({ onNavigate }) {
       const res = await axios.get(`${API}/admin/documents/${doc.id}/detail`)
       setDetailData(res.data)
       loadPermissions(doc.id)
+      // 상세를 연 것만 조회 1회로 센다(OCR 수정 창도 같은 상세 API를 읽지만 그건 조회가 아니다).
+      // 올라간 값으로 상세 화면과 목록 표를 바로 고친다 — 목록 전체를 다시 불러오지 않는다.
+      axios.post(`${API}/documents/${doc.id}/view`)
+        .then(({ data }) => {
+          setDetailData(d => (d && d.id === doc.id ? { ...d, view_count: data.view_count } : d))
+          queryClient.setQueryData(['documents'], list =>
+            Array.isArray(list) ? list.map(d => (d.id === doc.id ? { ...d, view_count: data.view_count } : d)) : list)
+        })
+        .catch(() => {})
     } catch {
       message.error('상세 데이터를 불러오지 못했습니다')
       setDrawerOpen(false)
