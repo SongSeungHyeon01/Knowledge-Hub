@@ -267,6 +267,6 @@ main
 | 팀원 | 역할 | 주요 기여 |
 |---|---|---|
 | **송승현** (팀장·조장) | HWP 처리 | HWP 처리와 마크다운 후처리 |
-| **윤준서** | PDF 파싱 / 배포 | PDF 파싱(pdfplumber·camelot·EasyOCR), 백엔드 통합, Railway 첫 배포와 배포 환경 안정화 |
+| **윤준서** | PDF 파싱 | PDF 파싱(PyMuPDF + EasyOCR) |
 | **김태훈** | 검색 | 임베딩과 하이브리드 검색엔진(BM25 + 벡터) |
 | **김기빈** | Backend / Frontend | FastAPI 업로드 처리와 React 화면 초기 구현 |
