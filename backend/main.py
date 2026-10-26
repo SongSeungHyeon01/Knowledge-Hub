@@ -11,7 +11,6 @@ import shutil
 import subprocess
 import tarfile
 import time
-import numpy as np
 from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, Query, Body, BackgroundTasks, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware  # CORS 설정용
@@ -36,10 +35,11 @@ from core.office_adapter import parse_non_pdf       # 비-PDF 입구: Docling(DO
 load_dotenv()
 
 # ③ 김태훈 검색 정본 (backend/search/search.py) — 섹션 헤더 우선 청킹만 가져다 쓴다.
-#   나머지(BM25 토크나이저·비대칭 RRF k·영↔한 동의어 보강)는 Elasticsearch로 넘어가면서
-#   ES 내장 Lucene BM25 + es_client.hybrid_search()가 담당하게 됐다.
-#   저장은 설계도 C5 규칙(PostgreSQL CHUNKS PK = 검색 인덱스 청크 ID 1:1, 2026-07-28부터
-#   Elasticsearch _id로 사용)대로 이 파일이 담당.
+#   나머지(BM25 토크나이저·비대칭 RRF k·영↔한 동의어 보강)는 검색 엔진으로 넘어가면서
+#   엔진 내장 Lucene BM25 + opensearch_client.hybrid_search()가 담당하게 됐다
+#   (2026-07-28 Elasticsearch, 2026-10-24 OpenSearch로 교체).
+#   저장은 설계도 C5 규칙(PostgreSQL CHUNKS PK = 검색 인덱스 청크 ID 1:1, 검색 인덱스 _id로 사용)대로
+#   이 파일이 담당.
 from search.search import (
     chunk_text as _sb_chunk_text,        # 섹션 헤더 우선 청킹 (PRD 기준)
 )
@@ -87,8 +87,10 @@ os.makedirs(MIRROR_TRASH_PARSED_DIR, exist_ok=True)
 # 실제 배포 이미지엔 LibreOffice가 없어서, 이 두 형식은 프로덕션에서 100% 실패한다
 # — 그래서 HWP/HWPX와 같은 이유로 지원을 포기한다. 기존에 업로드된 .ppt/.xls
 # 문서는 DB에 남아 열람만 가능(신규 업로드만 거부).
+# [2026-10-24] HWP/HWPX 업로드 재허용 — core/hwp_parser.py(한컴 공개 명세 기반 자체 구현,
+# 외부 프로그램 없음)로 처리한다. .ppt/.xls는 여전히 미지원.
 SUPPORTED_EXTENSIONS = {
-    '.pdf', '.docx', '.pptx', '.xlsx', '.txt', '.md',
+    '.pdf', '.docx', '.pptx', '.xlsx', '.hwp', '.hwpx', '.txt', '.md',
 }
 
 # 파일 크기 상한 (500MB — OOM 방지 1MB 스트리밍)
@@ -372,60 +374,49 @@ async def _scheduled_backup_task():
             print(f"[backup] 자동 백업 실패: {e}")
 
 
-# ── Elasticsearch 자동 복구 (2026-07-31) ─────────────────────────────────────
-# Railway 배포 환경에서 ES에 영속 볼륨을 못 붙이는 문제(컨테이너 실행 권한 문제,
-# docs/오류보고서 참고)가 있어 ES가 재시작될 때마다 인덱스가 통째로 비워진다.
-# Postgres의 Chunk.embedding이 원본을 그대로 보관하고 있으므로, 주기적으로
-# "ES 청크 수가 Postgres보다 눈에 띄게 적다"를 감지해서 자동으로 재색인한다 —
-# 사람이 매번 scripts/es_backfill.py를 수동으로 돌리지 않아도 되게 하는 안전망.
-_ES_SELFHEAL_INTERVAL_SEC = int(os.environ.get("ES_SELFHEAL_INTERVAL_SEC", str(10 * 60)))  # 10분마다
-_ES_SELFHEAL_RATIO = 0.9  # ES 청크 수가 Postgres의 이 비율 밑으로 떨어지면 재색인 트리거
+# ── 검색 엔진 자동 복구 (2026-07-31, 2026-10-24 OpenSearch로 교체) ────────────────
+# Railway 배포 환경에서 검색 엔진에 영속 볼륨을 못 붙이는 문제(컨테이너 실행 권한 문제,
+# docs/오류보고서 참고)가 있어 재시작될 때마다 인덱스가 통째로 비워질 수 있다.
+# DB의 Chunk.embedding이 원본을 그대로 보관하고 있으므로, 주기적으로
+# "검색 엔진 청크 수가 DB보다 눈에 띄게 적다"를 감지해서 자동으로 재색인한다 —
+# 사람이 매번 scripts/search_backfill.py를 수동으로 돌리지 않아도 되게 하는 안전망.
+_SEARCH_SELFHEAL_INTERVAL_SEC = int(os.environ.get("SEARCH_SELFHEAL_INTERVAL_SEC", str(10 * 60)))  # 10분마다
+_SEARCH_SELFHEAL_RATIO = 0.9  # 검색 엔진 청크 수가 DB의 이 비율 밑으로 떨어지면 재색인 트리거
 
 
-async def _es_selfheal_once():
-    """ES 인덱스 상태를 한 번 점검하고, 유실된 것으로 보이면 재색인한다."""
-    from search import es_client as _es
+async def _search_selfheal_once():
+    """검색 인덱스 상태를 한 번 점검하고, 유실된 것으로 보이면 재색인한다."""
+    from search import opensearch_client as _search
 
-    client = await asyncio.to_thread(_es.get_es_client)
-    if client is None:
-        print("[es-selfheal] ES에 연결할 수 없음 — 다음 주기에 재시도")
-        return
-
-    if not await asyncio.to_thread(_es.ensure_index):
-        return
-
-    try:
-        res = await asyncio.to_thread(client.count, index=_es.ES_INDEX)
-        es_count = res.body["count"]
-    except Exception as e:
-        print(f"[es-selfheal] ES 청크 수 조회 실패: {e}")
+    index_count = await asyncio.to_thread(_search.count_chunks)
+    if index_count is None:
+        print("[search-selfheal] 검색 엔진에 연결할 수 없음 — 다음 주기에 재시도")
         return
 
     async with AsyncSessionLocal() as sess:
-        pg_count = (await sess.execute(select(func.count()).select_from(Chunk))).scalar()
+        db_count = (await sess.execute(select(func.count()).select_from(Chunk))).scalar()
 
-    if pg_count == 0:
+    if db_count == 0:
         return  # 문서가 아예 없으면 비교 대상 자체가 없음
 
-    if es_count < pg_count * _ES_SELFHEAL_RATIO:
-        print(f"[es-selfheal] ES 청크 수({es_count})가 Postgres({pg_count})보다 적음 — 자동 재색인 시작")
-        from scripts.es_backfill import run_backfill
+    if index_count < db_count * _SEARCH_SELFHEAL_RATIO:
+        print(f"[search-selfheal] 검색 엔진 청크 수({index_count})가 DB({db_count})보다 적음 — 자동 재색인 시작")
+        from scripts.search_backfill import run_backfill
         ok, failed = await run_backfill()
-        print(f"[es-selfheal] 자동 재색인 완료 — 성공 {ok}건 / 실패 {failed}건")
+        print(f"[search-selfheal] 자동 재색인 완료 — 성공 {ok}건 / 실패 {failed}건")
 
 
-async def _scheduled_es_selfheal_task():
-    # 서버가 막 재시작됐는데 그 사이 ES가 이미 비어있던 경우를 빨리 잡기 위해
-    # 첫 점검은 대기 없이 바로 한다(다른 스윕 태스크들은 매번 sleep부터 하지만,
-    # 이건 "재시작 후 ES 유실 여부"가 핵심 시나리오라 즉시 확인이 더 유용하다).
+async def _scheduled_search_selfheal_task():
+    # 서버가 막 재시작됐는데 그 사이 인덱스가 이미 비어있던 경우를 빨리 잡기 위해
+    # 첫 점검은 대기 없이 바로 한다.
     while True:
         try:
-            await _es_selfheal_once()
+            await _search_selfheal_once()
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            print(f"[es-selfheal] 점검 중 오류: {e}")
-        await asyncio.sleep(_ES_SELFHEAL_INTERVAL_SEC)
+            print(f"[search-selfheal] 점검 중 오류: {e}")
+        await asyncio.sleep(_SEARCH_SELFHEAL_INTERVAL_SEC)
 
 
 @asynccontextmanager
@@ -487,14 +478,12 @@ async def lifespan(_):
             await sess.commit()
             print(f"[startup] 중단된 parsing 문서 {len(stuck)}건을 failed로 정리")
 
-    # Elasticsearch 인덱스 확인/생성 — ES는 자체 저장소라 turbovec처럼 매 재시작마다
-    # PostgreSQL에서 벡터를 다시 부어줄 필요가 없다. 인덱스가 없을 때만 매핑과 함께
-    # 새로 만든다(ensure_index()가 idempotent).
-    from search import es_client as _es
-    if _es.ensure_index():
-        print("[startup] Elasticsearch 인덱스 확인 완료")
+    # 검색 인덱스 확인/생성 — 인덱스가 없을 때만 매핑과 함께 새로 만든다(ensure_index()가 idempotent).
+    from search import opensearch_client as _search
+    if _search.ensure_index():
+        print("[startup] OpenSearch 인덱스 확인 완료")
     else:
-        print("[startup] Elasticsearch 연결 실패 — 유사 검색이 동작하지 않을 수 있습니다")
+        print("[startup] OpenSearch 연결 실패 — 유사 검색이 동작하지 않을 수 있습니다")
 
     sweep_task = asyncio.create_task(_sweep_stale_parsing())
     print(f"[startup] 정체 문서 스윕 태스크 시작 (주기 {_SWEEP_INTERVAL_SEC}s, 기준 {_SWEEP_STALE_MINUTES}분)")
@@ -511,8 +500,8 @@ async def lifespan(_):
     revoked_session_sweep_task = asyncio.create_task(_scheduled_revoked_session_sweep_task())
     print(f"[startup] 세션 블랙리스트 정리 태스크 시작 (주기 {_REVOKED_SESSION_SWEEP_INTERVAL_SEC}s)")
 
-    es_selfheal_task = asyncio.create_task(_scheduled_es_selfheal_task())
-    print(f"[startup] Elasticsearch 자동 복구 태스크 시작 (주기 {_ES_SELFHEAL_INTERVAL_SEC}s)")
+    search_selfheal_task = asyncio.create_task(_scheduled_search_selfheal_task())
+    print(f"[startup] 검색 인덱스 자동 복구 태스크 시작 (주기 {_SEARCH_SELFHEAL_INTERVAL_SEC}s)")
 
     yield
 
@@ -521,8 +510,8 @@ async def lifespan(_):
     mirror_trash_task.cancel()
     deletion_log_sweep_task.cancel()
     revoked_session_sweep_task.cancel()
-    es_selfheal_task.cancel()
-    for t in (sweep_task, backup_task, mirror_trash_task, deletion_log_sweep_task, revoked_session_sweep_task, es_selfheal_task):
+    search_selfheal_task.cancel()
+    for t in (sweep_task, backup_task, mirror_trash_task, deletion_log_sweep_task, revoked_session_sweep_task, search_selfheal_task):
         try:
             await t
         except asyncio.CancelledError:
@@ -1146,20 +1135,8 @@ def _extract_title(pages: list) -> str:
 
 
 # ── 임베딩 설정 ────────────────────────────────────────────────────────────
-_embed_model  = None
-
-def _get_embed_model():
-    """paraphrase-multilingual-MiniLM-L12-v2 지연 로딩 (한국어 ↔ 영어 교차 검색 지원)."""
-    global _embed_model
-    if _embed_model is None:
-        try:
-            from sentence_transformers import SentenceTransformer
-            print("[embed] MiniLM 로딩 중 (첫 실행 시 ~470MB 다운로드)...")
-            _embed_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
-            print("[embed] 로딩 완료")
-        except Exception as e:
-            print(f"[embed] 로드 실패: {e}")
-    return _embed_model
+# 모델 로딩·접두어·차원 검사는 search/embedder.py 한 곳에서 맡는다 — 재색인 스크립트와
+# 반드시 같은 모델을 쓰게 하려는 것(EMBED_MODEL 환경변수로 교체).
 
 
 
@@ -1230,28 +1207,20 @@ def _build_chunks(pages: list) -> tuple:
 
 
 async def _ingest_chunks_to_db(doc_id: int, pages: list):
-    """청크 분할 → MiniLM 임베딩 → CHUNKS 테이블 저장 → Elasticsearch 색인.
+    """청크 분할 → 임베딩(search/embedder.py) → CHUNKS 테이블 저장 → 검색 인덱스 색인.
 
-    [수정 2026-07-28] turbovec 인메모리 인덱스 + npz fallback을 Elasticsearch로
-    교체했다. 임베딩을 "만드는" 부분(MiniLM 호출)은 그대로다 — 바뀐 건 그 결과를
-    보관하는 곳뿐이다. PostgreSQL의 Chunk.embedding 컬럼은 원본 보관용으로 그대로
-    유지한다(ES가 죽거나 인덱스가 꼬여도 여기서 다시 색인할 수 있게 하는 안전장치 —
-    scripts/es_backfill.py 참고).
+    [수정 2026-07-28] turbovec 인메모리 인덱스 + npz fallback을 검색 엔진으로 교체했다
+    (2026-10-24 Elasticsearch → OpenSearch). DB의 Chunk.embedding 컬럼은 원본 보관용으로
+    유지한다(검색 엔진이 죽거나 인덱스가 꼬여도 여기서 다시 색인할 수 있게 하는 안전장치 —
+    scripts/search_backfill.py 참고).
     """
-    model = _get_embed_model()
+    from search import embedder
     chunks, pnums = _build_chunks(pages)
     if not chunks:
         return
 
-    # 임베딩 생성
-    if model is not None:
-        embs = await asyncio.to_thread(
-            model.encode, chunks,
-            batch_size=32, normalize_embeddings=True, show_progress_bar=False
-        )
-        embs = embs.astype(np.float32)
-    else:
-        embs = None
+    # 임베딩 생성 (모델이 없으면 None — BM25로만 검색된다)
+    embs = await asyncio.to_thread(embedder.encode_passages, chunks)
 
     # DB에 Chunk 저장 + Elasticsearch 색인
     # [수정 2026-07-06] 이 시점은 이미 doc.status="success"로 커밋된 뒤일 수 있으므로
@@ -1265,8 +1234,8 @@ async def _ingest_chunks_to_db(doc_id: int, pages: list):
             )).first()
             # 기존 청크 삭제 (재시도 시) — ES에서도 함께 제거해야 한다. 안 그러면 삭제된
             # id의 "유령 청크"가 인덱스에 남아 검색 결과를 오염시킨다.
-            from search import es_client as _es
-            await asyncio.to_thread(_es.delete_doc_chunks, doc_id)
+            from search import opensearch_client as _search
+            await asyncio.to_thread(_search.delete_doc_chunks, doc_id)
             await sess.execute(
                 sa_delete(Chunk).where(Chunk.doc_id == doc_id)
             )
@@ -1293,7 +1262,7 @@ async def _ingest_chunks_to_db(doc_id: int, pages: list):
                 }
                 for i, row in enumerate(refreshed)
             ]
-            indexed, failed = await asyncio.to_thread(_es.bulk_index_chunks, rows)
+            indexed, failed = await asyncio.to_thread(_search.bulk_index_chunks, rows)
             if failed:
                 print(f"[ingest] doc_id={doc_id}: ES 색인 {failed}청크 실패(검색 누락) / {indexed}청크 성공")
         print(f"[ingest] doc_id={doc_id}: {len(chunks)}청크 저장 완료")
@@ -1445,7 +1414,10 @@ async def 파일_업로드(
     category: str | None = Form(None),
     original_path: str = Form(None),   # 폴더 업로드 시 상대 경로 (없으면 None)
     memo: str = Form(None),            # 업로드 시점에 바로 남기는 특이사항 — 검색 결과에 그대로 노출됨
-    db: AsyncSession = Depends(get_db),
+    # [2026-10-24] scope="function": 기본(request) 범위면 DB 세션이 응답 이후 백그라운드 파싱이
+    # 끝날 때까지 반납되지 않는다. 파싱은 한 번에 하나라 대기열에 선 업로드마다 연결을 하나씩
+    # 붙잡고, 16번째 업로드에서 풀(5+10)이 바닥났다(docs/오류보고서/2026-10-24_* 참고).
+    db: AsyncSession = Depends(get_db, scope="function"),
 ):
     # 카테고리는 고정 5종(spec/research/presentation/report/other) 외에도 클라이언트가
     # 자유롭게 새 이름을 입력해 만들 수 있다 — category는 단순 문자열 컬럼이라
@@ -1725,10 +1697,10 @@ async def _문서_완전삭제(doc: Document, db: AsyncSession):
 # ES 삭제 실패는 커밋을 되돌리지 않는다(이미 확정됨). 대신 로그를 남겨 "검색에는 남아있는
 # 유령 청크"를 사람이 나중에 식별할 수 있게 한다.
 async def _es_문서청크_삭제(doc_ids: list[int]):
-    from search import es_client as _es
+    from search import opensearch_client as _search
     for doc_id in doc_ids:
         try:
-            await asyncio.to_thread(_es.delete_doc_chunks, doc_id)
+            await asyncio.to_thread(_search.delete_doc_chunks, doc_id)
         except Exception as e:
             print(f"[es] doc_id={doc_id}: 청크 삭제 실패(검색에 잔존 가능) — {e}")
 
@@ -1908,7 +1880,8 @@ async def 문서_목록(db: AsyncSession = Depends(get_db)):
 
 # POST /admin/documents/{doc_id}/retry — 파싱 실패 문서를 다시 파싱합니다
 @app.post("/admin/documents/{doc_id}/retry")
-async def 문서_재시도(doc_id: int, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
+async def 문서_재시도(doc_id: int, background_tasks: BackgroundTasks,
+                   db: AsyncSession = Depends(get_db, scope="function")):   # 업로드와 같은 이유(백그라운드 파싱)
     result = await db.execute(select(Document).where(Document.id == doc_id))
     doc = result.scalar_one_or_none()
 
@@ -2014,7 +1987,7 @@ async def 실제_검색_실행(q: str, mode: str, category, db: AsyncSession, up
     """두 모드로 나뉜 검색.
     - mode="filename": 파일명에 검색어가 그대로 포함된 문서만 찾는다(문서 내용은 보지 않음).
     - mode="semantic": Elasticsearch 하이브리드(BM25 + kNN, 파이썬에서 RRF로 융합)로
-      문서 "내용"을 찾는다(es_client.hybrid_search). 코퍼스 안에 실제 키워드 매치가
+      문서 "내용"을 찾는다(opensearch_client.hybrid_search). 코퍼스 안에 실제 키워드 매치가
       하나라도 있으면 키워드 없는 순수 의미 유사도 문서는 제외한다 — 짧은 단어 하나만
       검색해도(예: "점주") 무관한 문서가 함께 나오지 않도록 하기 위함이다.
     검색어가 비어 있으면(카테고리 등 필터만으로 "둘러보기") 모드와 무관하게 최신순으로
@@ -2105,19 +2078,16 @@ async def 실제_검색_실행(q: str, mode: str, category, db: AsyncSession, up
     #
     # "점주" 버그(2026-07-25 2차 수정)의 우선순위 로직 — 코퍼스 안에 실제 키워드
     # 매치(BM25)가 하나라도 있으면 키워드 없는 순수 의미 유사도 문서는 제외 — 는
-    # es_client.hybrid_search() 안으로 그대로 옮겨졌다.
+    # opensearch_client.hybrid_search() 안으로 그대로 옮겨졌다.
     tokens = [t.lower() for t in re.split(r"[\s\W]+", q_stripped) if len(t) >= 2]  # 스니펫 위치 찾기용
     docs_by_id = {d.id: d for d in docs}
-    model = _get_embed_model()
-    q_vec = None
-    if model is not None:
-        q_vec = (await asyncio.to_thread(
-            model.encode, [q_stripped], normalize_embeddings=True, show_progress_bar=False
-        ))[0].tolist()
+    from search import embedder
+    q_vecs = await asyncio.to_thread(embedder.encode_queries, [q_stripped])
+    q_vec = q_vecs[0].tolist() if q_vecs is not None else None
 
-    from search import es_client as _es
+    from search import opensearch_client as _search
     hybrid = await asyncio.to_thread(
-        _es.hybrid_search, q_stripped, q_vec, list(docs_by_id.keys()), 50
+        _search.hybrid_search, q_stripped, q_vec, list(docs_by_id.keys()), 50
     )
     candidate_ids = [did for did in hybrid["doc_ids"] if did in docs_by_id]
     # engine_down=True면 "검색 결과가 없는 것"이 아니라 "ES에 연결 자체가 안 되는 것" —
@@ -2131,7 +2101,7 @@ async def 실제_검색_실행(q: str, mode: str, category, db: AsyncSession, up
     results = []
     for did in candidate_ids:
         doc = docs_by_id[did]
-        # best_chunk는 hybrid_search가 candidate_ids 전체를 채워서 돌려준다(es_client.py 참고)
+        # best_chunk는 hybrid_search가 candidate_ids 전체를 채워서 돌려준다(opensearch_client.py 참고)
         # — 그래서 여기서 파싱 JSON을 다시 읽는 폴백 분기는 도달 불가라 제거했다.
         chunk_info = best_chunk[did]
         snippet  = _extract_snippet_multi(chunk_info["text"], tokens)
@@ -2299,7 +2269,7 @@ async def 페이지_텍스트_수정(
     page_num: int,
     background_tasks: BackgroundTasks,
     text: str = Body(..., embed=True),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),   # 업로드와 같은 이유(백그라운드 재색인)
 ):
     parsed_path = os.path.join(PARSED_DIR, f"{doc_id}.json")
     if not os.path.exists(parsed_path):

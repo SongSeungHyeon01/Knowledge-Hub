@@ -268,7 +268,8 @@ export default function UploadPage({ onNavigate }) {
   // 되는데 업로드는 거부되는 상태가 된다(png/jpg/jpeg가 그 상태였고 2026-07-30에 제거함).
   // [2026-08-01] .ppt/.xls도 같은 이유로 제거 — 실제 업로드 테스트 결과 Docling이
   // 이 두 형식을 LibreOffice 서브프로세스 없이는 못 열어서 전부 파싱 실패로 확인됨.
-  const SUPPORTED_EXT = ['.pdf','.docx','.pptx','.xlsx','.txt','.md']
+  // [2026-10-24] HWP/HWPX 재허용 — 백엔드 core/hwp_parser.py(한컴 공개 명세 기반)로 처리.
+  const SUPPORTED_EXT = ['.pdf','.docx','.pptx','.xlsx','.hwp','.hwpx','.txt','.md']
   const ACCEPT_ATTR   = SUPPORTED_EXT.join(',')
   const MAX_SIZE_MB   = 500  // 2026-07-11: 백엔드 MAX_UPLOAD_SIZE(500MB)와 통일 — 이전엔 200MB로 따로 남아있었음
 
@@ -618,9 +619,15 @@ export default function UploadPage({ onNavigate }) {
                   {isUploading ? '업로드 중...' : '파일을 드래그하거나 클릭해서 업로드'}
                 </p>
                 <p className="ant-upload-hint">
-                  지원 형식: PDF · DOCX · PPTX · XLSX · TXT · MD (파일당 최대 {MAX_SIZE_MB}MB)
+                  지원 형식: PDF · DOCX · PPTX · XLSX · HWP · HWPX · TXT · MD (파일당 최대 {MAX_SIZE_MB}MB)
                 </p>
               </Dragger>
+
+              {/* 한컴 공개 명세 '저작권' 항목이 UI·매뉴얼·소스에 이 문구를 적도록 요구한다
+                  (backend/core/hwp_parser.py 머리말 참고). */}
+              <p style={{ textAlign: 'center', fontSize: 11.5, color: '#8c8c8c', margin: '-4px 0 12px' }}>
+                본 제품은 한글과컴퓨터의 한글 문서 파일(.hwp) 공개 문서를 참고하여 개발하였습니다.
+              </p>
 
               {/* [2026-07-24] 예전엔 이 버튼이 위 Dragger 안에 중첩된 <Upload>였다 — Upload를
                   Upload(Dragger 포함) 안에 중첩시키면 클릭 이벤트가 겹쳐서 파일 선택창·확인

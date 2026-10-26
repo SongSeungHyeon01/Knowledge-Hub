@@ -1,0 +1,17 @@
+# 로컬 검색 엔진: cd backend/opensearch && docker compose up -d --build
+# 백엔드는 OPENSEARCH_URL(기본 http://localhost:9200)로 붙는다.
+services:
+  opensearch:
+    build: .
+    image: knowledge-hub-opensearch:3.9.0
+    container_name: knowledge_hub_opensearch
+    environment:
+      - OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g
+    ports:
+      - "127.0.0.1:9200:9200"   # 보안 플러그인을 끈 상태라 이 PC에서만 접근하게 한다
+    volumes:
+      - knowledge_hub_opensearch_data:/usr/share/opensearch/data
+    restart: unless-stopped
+
+volumes:
+  knowledge_hub_opensearch_data:

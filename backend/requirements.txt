@@ -16,10 +16,11 @@ python-dotenv>=1.0.0  # backend/.env(git 미추적)에서 GOOGLE_CLIENT_ID 등 �
 # alembic은 설계도의 "Lifespan 7단계(alembic→…)" 도입 시 다시 추가할 것.
 
 # ── 검색 / 임베딩 ────────────────────────────────────────────────────────────
-sentence-transformers>=2.7.0
-elasticsearch>=8.15.0,<9.0.0   # 2026-07-28: turbovec+즉석 BM25+손으로 짠 RRF를 대체
-# rank-bm25·kiwipiepy는 제거(2026-07-30) — search.py의 BM25Indexer가 호출부 없는 죽은
-# 코드라 함께 삭제했다. BM25는 ES 내장 Lucene BM25가 담당한다.
+sentence-transformers>=2.7.0   # Apache-2.0
+# [2026-10-24] elasticsearch 클라이언트 → opensearch-py 교체. Elasticsearch 배포판이
+# Elastic License 2.0이라 라이선스 기준(허용형만)에 맞지 않아 OpenSearch(Apache-2.0)로 옮겼다.
+opensearch-py==3.2.0           # Apache-2.0
+# rank-bm25·kiwipiepy는 제거(2026-07-30) — BM25는 검색 엔진 내장 Lucene BM25가 담당한다.
 
 # ── 문서 파서 (core/parser.py, core/office_adapter.py, core/docling_parser.py) ──
 # [설치 방법] torch CPU 버전은 아래 명령어로 설치하세요 (일반 pip install 하면 GPU 버전이 깔릴 수 있음):
@@ -29,11 +30,17 @@ torch==2.12.1+cpu
 
 # [2026-07-28 교체] pdfplumber+camelot-py+img2table+tabulate(PDF)와
 # python-docx+openpyxl+xlrd+lxml+LibreOffice(DOCX/PPTX/XLSX/HWP/HWPX)를
-# Docling 하나로 통합했다. HWP/HWPX는 Docling이 지원하지 않아 지원을 포기했다.
-# Docling은 PDF·DOCX·PPTX·XLSX(+ 구형 DOC/XLS/PPT)를 전부 자체 처리하며
+# Docling 하나로 통합했다. Docling은 PDF·DOCX·PPTX·XLSX를 자체 처리하며
 # LibreOffice·Poppler 등 외부 시스템 바이너리가 필요 없다.
-docling[easyocr]>=2.115.0  # MIT — 통합 파서 + OCR(EasyOCR 백엔드, 기존과 동일 엔진)
+# [2026-10-24] OCR 엔진을 EasyOCR → RapidOCR로 교체. EasyOCR가 필수로 끌어오는 python-bidi가
+# LGPL이라 라이선스 기준에 맞지 않았다. RapidOCR(Apache-2.0)는 onnxruntime(MIT)으로 돌고,
+# PP-OCR 모델(원본 PaddleOCR, Apache-2.0)을 쓴다. Docling의 자동 OCR 선택이 RapidOCR를 고른다.
+docling[rapidocr]>=2.115.0 # MIT — 통합 파서 + OCR(RapidOCR + onnxruntime)
 pypdfium2>=4.0.0           # BSD — count_pdf_pages() 사전 페이지수 체크 (Docling도 내부적으로 씀)
+
+# [2026-10-24] HWP/HWPX — core/hwp_parser.py(한컴 공개 명세 기반 자체 구현)가 직접 쓴다.
+olefile>=0.47              # BSD-2-Clause — HWP 5.0 복합 파일(OLE) 컨테이너 읽기
+lxml>=5.0                  # BSD-3-Clause — HWPX 본문 XML 파싱
 
 # ↓ Docling의 전이 의존성 — 우리 코드가 직접 import하지는 않지만(core/parser.py가 직접
 #   쓰는 건 pypdfium2뿐이다) Docling 내부에서 쓰이므로 버전을 고정해 재현성을 확보한다.
