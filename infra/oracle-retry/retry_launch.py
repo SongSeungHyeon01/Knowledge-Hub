@@ -5,14 +5,16 @@
 퍼블릭 IP를 출력하고 종료한다.
 """
 
+import os
 import sys
 import time
 
 import oci
 
 COMPARTMENT_ID = None  # None이면 tenancy(root) 사용
-AVAILABILITY_DOMAIN = "Xjyc:AP-SINGAPORE-1-AD-1"
-SUBNET_ID = "ocid1.subnet.oc1.ap-singapore-1.aaaaaaaawsistjqpvh5jhyu233sbmkdpcqizjgmoethgl5ox3scgxg73qnga"  # knowledge-hub-subnet
+# [2026-10-26] 서브넷 OCID·가용 도메인 이름(테넌시마다 앞부분이 다름)을 코드에 적지 않는다.
+# 계정 식별 정보가 공개 리포에 남지 않도록, 실행할 때 이름으로 찾는다.
+SUBNET_NAME = "knowledge-hub-subnet"
 # [2026-10-25] Oracle Linux → Ubuntu 24.04로 변경. deploy/setup-ubuntu.sh가 apt 기반이라서다.
 # 이미지 OCID는 주기적으로 새 빌드가 나오므로 고정하지 않고 실행 시 최신 것을 찾는다.
 IMAGE_OS = "Canonical Ubuntu"
@@ -25,7 +27,7 @@ MEMORY_GBS = 12
 # 4 OCPU/24GB에서 2 OCPU/12GB로 축소했다는 보도가 있어(InfoQ) 우선 이 값으로 낮춰
 # 시도한다. Pay As You Go로 업그레이드하면 4/24가 복구될 수 있다는 정보도 있음.
 DISPLAY_NAME = "Knowledge-Hub-Server"
-SSH_PUBLIC_KEY_PATH = r"C:\Users\ssh96\.ssh\oracle_knowledge_hub.pub"
+SSH_PUBLIC_KEY_PATH = os.path.expanduser("~/.ssh/oracle_knowledge_hub.pub")
 
 RETRY_INTERVAL_SEC = 75  # 45초는 절반이 rate limit로 낭비돼서 늘림
 
@@ -46,6 +48,14 @@ def main():
     with open(SSH_PUBLIC_KEY_PATH, "r") as f:
         ssh_key = f.read().strip()
 
+    network = oci.core.VirtualNetworkClient(config)
+    subnets = network.list_subnets(compartment_id, display_name=SUBNET_NAME).data
+    if not subnets:
+        print(f"서브넷 {SUBNET_NAME}을(를) 찾지 못했습니다.")
+        sys.exit(1)
+    subnet_id = subnets[0].id
+    availability_domain = oci.identity.IdentityClient(config).list_availability_domains(compartment_id).data[0].name
+
     images = compute.list_images(
         compartment_id,
         operating_system=IMAGE_OS,
@@ -62,7 +72,7 @@ def main():
 
     details = oci.core.models.LaunchInstanceDetails(
         compartment_id=compartment_id,
-        availability_domain=AVAILABILITY_DOMAIN,
+        availability_domain=availability_domain,
         display_name=DISPLAY_NAME,
         shape=SHAPE,
         shape_config=oci.core.models.LaunchInstanceShapeConfigDetails(
@@ -74,7 +84,7 @@ def main():
             boot_volume_size_in_gbs=BOOT_VOLUME_GBS,
         ),
         create_vnic_details=oci.core.models.CreateVnicDetails(
-            subnet_id=SUBNET_ID,
+            subnet_id=subnet_id,
             assign_public_ip=True,  # 콘솔 위저드에서 안 켜지던 그 옵션 — API로는 직접 지정 가능
         ),
         metadata={"ssh_authorized_keys": ssh_key},
