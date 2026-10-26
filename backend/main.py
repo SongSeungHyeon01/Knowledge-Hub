@@ -1603,6 +1603,11 @@ async def 문서_상태_배치(ids: str, db: AsyncSession = Depends(get_db)):
     docs = (await db.execute(
         select(Document).where(Document.id.in_(id_list))
     )).scalars().all()
+    # [2026-10-25] status는 파싱이 끝나면 success가 되고, 임베딩·색인은 그 뒤에 이어서 돈다.
+    # chunk_count가 0이면 "파싱은 끝났지만 아직 검색에 안 잡히는" 상태다(큰 문서는 수십 초~수 분).
+    chunk_counts = dict((await db.execute(
+        select(Chunk.doc_id, func.count()).where(Chunk.doc_id.in_(id_list)).group_by(Chunk.doc_id)
+    )).all())
     return [
         {
             "id":          d.id,
@@ -1612,6 +1617,7 @@ async def 문서_상태_배치(ids: str, db: AsyncSession = Depends(get_db)):
             "has_flagged": d.has_flagged,
             "error":       d.error,
             "category": d.category,
+            "chunk_count": chunk_counts.get(d.id, 0),
         }
         for d in docs
     ]

@@ -1,0 +1,10 @@
+# DOMAIN에 실제 도메인을 넣으면 Caddy가 Let's Encrypt 인증서를 자동으로 받아 HTTPS로 연다.
+# Google 로그인은 localhost가 아니면 HTTPS 주소에서만 동작하므로 도메인이 필요하다.
+# 업로드 상한(500MB)에 맞춰 요청 본문 크기를 넉넉히 둔다.
+{$DOMAIN} {
+	encode gzip
+	request_body {
+		max_size 520MB
+	}
+	reverse_proxy app:8000
+}

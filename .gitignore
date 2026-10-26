@@ -56,6 +56,7 @@ faiss_index/
 # ===== 환경변수 · 비밀값 (보안) =====
 .env
 .env.*
+!.env.example
 *.key
 secrets.*
 

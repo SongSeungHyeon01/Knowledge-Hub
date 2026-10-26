@@ -4,7 +4,66 @@
 > 임베딩 모델(KURE-v1) 교체에 맞춰 고쳤다. AX 기간에 쓰던 Railway 배포는 지금 내려가 있고, 다음 서버 구성은
 > 아직 정하지 않았다. 아래는 어떤 서버에 올리든 공통으로 필요한 내용이다.
 
-## 구성
+## 운영 구성 (2026-10-25 결정)
+
+**VM 한 대에 `deploy/docker-compose.yml`로 네 서비스를 띄운다.** 밖으로 열리는 포트는 Caddy의 80/443뿐이다.
+
+| 서비스 | 이미지 | 라이선스 |
+|---|---|---|
+| caddy (HTTPS, Let's Encrypt 자동 발급) | `caddy:2.11.7-alpine` | Apache-2.0 |
+| app (화면 + API) | 루트 `Dockerfile` (모델 포함) | 프로젝트 코드 |
+| opensearch | `backend/opensearch/Dockerfile` (3.9.0 + nori) | Apache-2.0 |
+| postgres | `postgres:17.11-alpine` | PostgreSQL License |
+
+Postgres를 17로 둔 이유: 앱 이미지 안의 `pg_dump`가 17.11이고(자동 백업이 사용), `pg_dump`는 자기보다 높은 버전의 서버를
+백업하지 못한다.
+
+```bash
+cp deploy/.env.example deploy/.env      # 도메인, DB 비밀번호, 로그인 값 채우기
+docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
+```
+
+이 PC(Windows, Docker Desktop)에서 `DOMAIN=localhost`로 그대로 띄워 확인했다: HTTP가 HTTPS로 넘어가고, HTTPS로 HWP·HWPX·스캔 PDF를
+올려 Postgres에 저장·OpenSearch에 색인된 뒤 유사 검색에 잡혔고, 관리자 백업(`pg_dump`)이 만들어졌다.
+
+### 서버 사양: 4 vCPU 이상, RAM 16GB, 디스크 100GB 이상
+
+문서 23개를 한꺼번에 올리는 동안 2초 간격으로 컨테이너 자원을 기록한 결과(2026-10-25):
+
+| 구성 요소 | 최대 메모리 | 평소 |
+|---|---|---|
+| app (파싱·임베딩 중) | 4.66 GiB | 약 0.8 GiB |
+| opensearch (힙 1GB) | 2.06 GiB | 약 2.0 GiB |
+| postgres, caddy | 측정 안 함(수백 MB 수준) | |
+
+합계 최대 약 7GiB에 운영체제 몫이 더해지므로 8GB는 빠듯하고 16GB가 안전하다. 파싱은 CPU 코어를 많이 쓴다(16코어에서 23개 348초).
+코어가 적으면 처리만 느려진다. 디스크는 앱 이미지(약 8.6GB, 모델 포함)와 OpenSearch 이미지(약 2.9GB)에 문서·백업이 더해진다.
+
+### 호스팅: Hetzner Cloud CPX42 (싱가포르)
+
+| 후보 | 사양 | 비용 | 판단 |
+|---|---|---|---|
+| **Hetzner CPX42, 싱가포르** | 8 vCPU(AMD x86), 16GB, 320GB NVMe | €93.99/월 | **선택.** 지금 검증한 x86 이미지를 그대로 쓰고, 한국에서 가깝다 |
+| Hetzner CPX42, 유럽 | 같음 | €69.99/월 | 지연이 상관없으면 더 싸다 |
+| Hetzner CX43(8 vCPU, 16GB, €16.49) | | | 2026-10-25 기준 "판매 중지" |
+| Oracle Cloud Always Free | ARM 2 OCPU, 12GB, 200GB | 무료 | 12GB면 실측 최대치는 들어가지만, ARM용 이미지를 따로 빌드해야 하고(미검증), 7일 동안 CPU·네트워크·메모리 사용률이 20% 미만이면 회수될 수 있다고 공식 문서에 적혀 있다. 7월에 "out of host capacity"로 인스턴스 생성도 실패했다 |
+| Railway | 사용량 과금: RAM $10/GB·월, vCPU $20/월 | 평소 사용량 기준 | AX 때 쓰던 곳. 검색 엔진 볼륨 권한 문제가 있었다 |
+
+가격은 각 공식 페이지(2026-10-25 확인)의 부가세 제외 "from" 가격이다. 서버 구매와 도메인 연결은 계정·결제가 필요해 하지 않았다.
+
+### 실제로 올릴 때 순서
+
+1. 서버 생성(Ubuntu), Docker 설치, 저장소 받기
+2. 도메인 DNS A 레코드를 서버 IP로 지정
+3. `deploy/.env` 작성 (`POSTGRES_PASSWORD`, `SESSION_SECRET`은 긴 무작위 값)
+4. Google Cloud Console OAuth 클라이언트에 `https://<도메인>`을 승인된 JavaScript 원본으로 추가
+5. `docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build`
+6. 방화벽은 22(SSH), 80, 443만 연다
+
+사내 폐쇄망으로 옮길 때도 같은 compose를 쓴다. 모델이 이미지 안에 있어서 인터넷이 필요 없고, 이미지는 `docker save` / `docker load`로 반입한다.
+이때 Caddy는 사내 인증서를 쓰도록 Caddyfile을 바꾼다.
+
+## 구성 요소 (공통)
 
 - **앱 서비스 1개**: 루트 `Dockerfile` 하나로 빌드한다. React를 빌드한 뒤 FastAPI가 `/`에서 화면까지 함께 서빙한다.
   프론트는 `VITE_API_URL=""`로 빌드되어 같은 서버의 API를 상대 경로로 부른다(CORS 불필요).
