@@ -60,7 +60,13 @@ export default function App() {
   // 로고 클릭 시 항상 메인(검색) 화면으로 — 이미 검색 탭이어도 검색 결과·필터 등
   // 남아 있는 내부 상태를 지우고 처음 화면으로 되돌리기 위해 key를 바꿔 강제로 다시 마운트한다
   const [homeKey,   setHomeKey]    = useState(0)
-  const goHome = () => { setCurrent('search'); setHomeKey(k => k + 1) }
+  // [2026-10-26] 검색 화면은 주소창의 ?q=…로 검색을 복원한다(새로고침·공유 링크용). 그래서 주소를 그대로
+  // 두고 다시 마운트하면 방금 한 검색이 또 실행돼 첫 화면(전체 문서)으로 돌아가지 않았다 — 쿼리를 지운다.
+  const goHome = () => {
+    if (window.location.pathname !== '/' || window.location.search) window.history.pushState(null, '', '/')
+    setCurrentState('search')
+    setHomeKey(k => k + 1)
+  }
   const queryClient = useQueryClient()
 
   // 로그인 활성화 여부 — 백엔드에 GOOGLE_CLIENT_ID가 설정돼 있어야 true

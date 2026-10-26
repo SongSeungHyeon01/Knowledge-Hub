@@ -2251,14 +2251,22 @@ async def 검색(
         results = [r for r in results if r.get("file_type") == file_type]
 
     # 검색 기록 저장 — 계정에 귀속된 서버측 기록(로그인 꺼져 있으면 "anonymous" 공용)
-    log = SearchLog(query=q, result_count=len(results), user_email=_current_user_email(request))
-    db.add(log)
-    await db.commit()
+    # [2026-10-26] 검색어가 없는 호출(검색 화면 첫 화면의 "전체 문서 둘러보기", 필터만 건 검색)은
+    # 기록하지 않는다 — 화면을 열 때마다 빈 기록이 쌓여 최근 검색어에 빈 줄이 생기고
+    # 관리자 통계의 총 검색 횟수가 부풀었다.
+    if q.strip():
+        db.add(SearchLog(query=q, result_count=len(results), user_email=_current_user_email(request)))
+        await db.commit()
 
     return {"query": q, "mode": mode, "category": category, "file_type": file_type,
             "uploaded_by": uploaded_by, "date_from": date_from, "date_to": date_to,
             "total": len(results), "results": results,
             "engine_down": bucket.get("engine_down", False)}
+
+
+# 검색 기록 조회에서 빈 검색어를 거르는 조건 — 2026-10-26 이전에 쌓인 빈 기록(검색 화면을 열 때마다
+# 생기던 것)이 최근 검색어·인기 검색어·총 검색 횟수에 섞이지 않게 한다.
+_검색어_있음 = func.trim(func.coalesce(SearchLog.query, "")) != ""
 
 
 # GET /uploaders — 검색 화면의 "작성자" 필터 드롭다운용, 실제로 문서를 올린 적 있는
@@ -2414,6 +2422,7 @@ async def 공개_통계(db: AsyncSession = Depends(get_db)):
 
     top_queries = (await db.execute(
         select(SearchLog.query, func.count().label("cnt"))
+        .where(_검색어_있음)
         .group_by(SearchLog.query)
         .order_by(func.count().desc())
         .limit(5)
@@ -2460,6 +2469,7 @@ async def 통계(db: AsyncSession = Depends(get_db)):
     # 인기 검색어 Top 5 (검색 횟수 기준)
     top_queries = (await db.execute(
         select(SearchLog.query, func.count().label("cnt"))
+        .where(_검색어_있음)
         .group_by(SearchLog.query)
         .order_by(func.count().desc())
         .limit(5)
@@ -2467,7 +2477,7 @@ async def 통계(db: AsyncSession = Depends(get_db)):
 
     # 총 검색 횟수
     total_searches = (await db.execute(
-        select(func.count()).select_from(SearchLog)
+        select(func.count()).select_from(SearchLog).where(_검색어_있음)
     )).scalar()
 
     return {
@@ -2586,7 +2596,7 @@ async def 내_검색_기록(request: Request, limit: int = Query(10, ge=1, le=50
     email = _current_user_email(request)
     rows = (await db.execute(
         select(SearchLog.query, func.max(SearchLog.searched_at).label("last_searched_at"))
-        .where(SearchLog.user_email == email)
+        .where(SearchLog.user_email == email, _검색어_있음)
         .group_by(SearchLog.query)
         .order_by(func.max(SearchLog.searched_at).desc())
         .limit(limit)
