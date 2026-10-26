@@ -1,8 +1,8 @@
 # 배포 안내
 
 > 2026-07-04 Railway Pro 기준으로 처음 작성했고, 2026-10-25에 검색 엔진(OpenSearch)·OCR(RapidOCR 한국어)·
-> 임베딩 모델(KURE-v1) 교체에 맞춰 고쳤다. AX 기간에 쓰던 Railway 배포는 지금 내려가 있고, 다음 서버 구성은
-> 아직 정하지 않았다. 아래는 어떤 서버에 올리든 공통으로 필요한 내용이다.
+> 임베딩 모델(KURE-v1) 교체에 맞춰 고쳤다. 2026-10-26부터는 집에 있는 여분 노트북(Ubuntu Server 26.04)에
+> 아래 compose 구성으로 올려 운영한다. Oracle 무료 서버는 계획했지만 용량이 안 잡혀 만들지 못했다.
 
 ## 운영 구성 (2026-10-25 결정)
 
@@ -39,11 +39,23 @@ docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
 합계 최대 약 7GiB에 운영체제 몫이 더해지므로 8GB는 빠듯하고 16GB가 안전하다. 파싱은 CPU 코어를 많이 쓴다(16코어에서 23개 348초).
 코어가 적으면 처리만 느려진다. 디스크는 앱 이미지(약 8.6GB, 모델 포함)와 OpenSearch 이미지(약 2.9GB)에 문서·백업이 더해진다.
 
-### 호스팅: Oracle Cloud Always Free (무료, ARM)
+### 호스팅: 집 노트북 서버 (2026-10-26, 지금 운영 중)
+
+Oracle 무료 서버가 만들어지지 않아서(아래 표) 집에 있던 여분 노트북을 서버로 쓴다.
+
+- 노트북: RAM 8GB(실사용 7.0GiB), NVMe SSD 238GB, Ubuntu Server 26.04 LTS(화면 없음, LVM 없이 디스크 전체 사용)
+- 8GB가 실측 최대치(약 7GiB)에 빠듯해서 스왑을 8GB로 잡았다. 대기 상태에서 3.1GiB를 쓴다.
+- 덮개를 닫아도 꺼지지 않게 `logind`를 설정했다. Docker와 컨테이너 4개는 재부팅하면 자동으로 다시 올라온다.
+- 외부에는 웹용 80·443만 연다. 공유기 UPnP로 포트를 열고, 공유기 재부팅이나 서버 IP 변경에 대비해 15분마다 다시 건다(systemd 타이머).
+- SSH는 집 안에서만 쓰고, 비밀번호 로그인은 막았다(키 전용).
+- 도메인은 `<공인 IP를 대시로>.nip.io`. 가정용 공인 IP는 바뀔 수 있어서, 바뀌면 `deploy/.env`의 `DOMAIN`과 Google OAuth 원본을 함께 고쳐야 한다.
+- Ubuntu 26.04 설치 프로그램이 와이파이 설정에 넣는 `match:` 항목을 networkd가 지원하지 않아 와이파이가 붙지 않았다. netplan 파일에서 `match:`·`set-name:`을 지우고 `dhcp4: true`를 넣어 해결했다.
+
+#### 검토했던 후보 (2026-10-25)
 
 | 후보 | 사양 | 비용 | 판단 |
 |---|---|---|---|
-| **Oracle Cloud Always Free** | ARM(Ampere A1) 2 OCPU, 12GB, 블록 스토리지 200GB | 무료 | **선택.** 12GB에 실측 최대치(약 7GiB)가 들어간다. ARM용 이미지 동작 확인함(아래) |
+| Oracle Cloud Always Free | ARM(Ampere A1) 2 OCPU, 12GB, 블록 스토리지 200GB | 무료 | 처음 고른 곳. ARM 이미지 동작도 확인했지만(아래) 7월·10월 모두 "out of host capacity"로 서버 생성 실패 |
 | Hetzner CPX42, 싱가포르 | 8 vCPU(AMD x86), 16GB, 320GB NVMe | €93.99/월 | 유료 대안. 코어가 많아 업로드 처리가 빠르다 |
 | Hetzner CPX42, 유럽 | 같음 | €69.99/월 | 지연이 상관없을 때 |
 | Hetzner CX43(8 vCPU, 16GB, €16.49) | | | 2026-10-25 기준 "판매 중지" |
@@ -68,10 +80,10 @@ x86 이미지와 같았고(`backend/requirements.lock`), 에뮬레이션으로 �
 
 ### 실제로 올릴 때 순서
 
-1. 서버 생성: Oracle Cloud 콘솔에서 Ampere A1(2 OCPU, 12GB), Ubuntu 24.04, 공개 IP, SSH 공개키 등록
-2. 클라우드 방화벽: 서브넷 보안 목록(또는 NSG)에 TCP 80·443 인바운드 추가(22는 기본으로 열려 있다)
+1. 서버 준비: Ubuntu Server(24.04 또는 26.04) 설치, OpenSSH 서버 켜기. 클라우드라면 공개 IP와 SSH 공개키를 등록한다
+2. 외부 포트: 클라우드는 보안 목록(또는 NSG)에, 집 서버는 공유기 포트포워딩(또는 UPnP)으로 TCP 80·443을 서버로 넘긴다
 3. 코드 복사 후 서버에서 `sudo bash deploy/setup-ubuntu.sh` — Docker 설치와 서버 안 방화벽(iptables) 80·443 개방
-   (Oracle Ubuntu 이미지는 iptables가 22번만 허용한다. 이 스크립트는 같은 모양의 규칙을 만든 Ubuntu 24.04 컨테이너에서 확인했다)
+   (Oracle Ubuntu 이미지는 iptables가 22번만 허용해서 넣은 단계다. 일반 Ubuntu 26.04에서도 그대로 동작하는 것을 확인했다)
 4. `deploy/.env` 작성: `DOMAIN=<IP를 대시로>.nip.io`(또는 자기 도메인), `POSTGRES_PASSWORD`·`SESSION_SECRET`은 긴 무작위 값
 5. Google Cloud Console OAuth 클라이언트에 `https://<DOMAIN>`을 승인된 JavaScript 원본으로 추가
 6. `docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build` (ARM 서버에서는 그 자리에서 ARM 이미지로 빌드된다)
@@ -163,3 +175,6 @@ docker run --rm -p 8000:8000 -v knowledge_hub_data:/data \
   이미지 안 경로에서 불러왔다.
 - 같은 날 `.dockerignore`를 고쳤다. 예전 설정은 `backend/.env`(세션 서명 키), `backend/km.db`(로컬 문서 데이터),
   `backend/.venv`를 이미지에 넣고 있었다. 지금 이미지의 `/app`에는 소스와 빌드된 화면만 있다.
+- 2026-10-26 집 노트북 서버 배포: Ubuntu Server 26.04에서 `setup-ubuntu.sh`로 Docker를 설치하고 compose 4개 서비스를
+  띄웠다. Let's Encrypt 인증서 발급, HTTP→HTTPS 전환, 비로그인 API 401을 외부 주소로 확인했다. 서버 안에서 업로드→파싱→색인→
+  유사 검색→삭제까지 돌려 DB 청크 수와 검색 인덱스 청크 수가 일치하는 것을 확인했다. 대기 메모리 3.1GiB / 7.0GiB.
