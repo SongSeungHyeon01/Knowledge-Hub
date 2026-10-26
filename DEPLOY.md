@@ -39,26 +39,42 @@ docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
 합계 최대 약 7GiB에 운영체제 몫이 더해지므로 8GB는 빠듯하고 16GB가 안전하다. 파싱은 CPU 코어를 많이 쓴다(16코어에서 23개 348초).
 코어가 적으면 처리만 느려진다. 디스크는 앱 이미지(약 8.6GB, 모델 포함)와 OpenSearch 이미지(약 2.9GB)에 문서·백업이 더해진다.
 
-### 호스팅: Hetzner Cloud CPX42 (싱가포르)
+### 호스팅: Oracle Cloud Always Free (무료, ARM)
 
 | 후보 | 사양 | 비용 | 판단 |
 |---|---|---|---|
-| **Hetzner CPX42, 싱가포르** | 8 vCPU(AMD x86), 16GB, 320GB NVMe | €93.99/월 | **선택.** 지금 검증한 x86 이미지를 그대로 쓰고, 한국에서 가깝다 |
-| Hetzner CPX42, 유럽 | 같음 | €69.99/월 | 지연이 상관없으면 더 싸다 |
+| **Oracle Cloud Always Free** | ARM(Ampere A1) 2 OCPU, 12GB, 블록 스토리지 200GB | 무료 | **선택.** 12GB에 실측 최대치(약 7GiB)가 들어간다. ARM용 이미지 동작 확인함(아래) |
+| Hetzner CPX42, 싱가포르 | 8 vCPU(AMD x86), 16GB, 320GB NVMe | €93.99/월 | 유료 대안. 코어가 많아 업로드 처리가 빠르다 |
+| Hetzner CPX42, 유럽 | 같음 | €69.99/월 | 지연이 상관없을 때 |
 | Hetzner CX43(8 vCPU, 16GB, €16.49) | | | 2026-10-25 기준 "판매 중지" |
-| Oracle Cloud Always Free | ARM 2 OCPU, 12GB, 200GB | 무료 | 12GB면 실측 최대치는 들어가지만, ARM용 이미지를 따로 빌드해야 하고(미검증), 7일 동안 CPU·네트워크·메모리 사용률이 20% 미만이면 회수될 수 있다고 공식 문서에 적혀 있다. 7월에 "out of host capacity"로 인스턴스 생성도 실패했다 |
-| Railway | 사용량 과금: RAM $10/GB·월, vCPU $20/월 | 평소 사용량 기준 | AX 때 쓰던 곳. 검색 엔진 볼륨 권한 문제가 있었다 |
+| Hugging Face Spaces 무료 CPU(16GB) | | | Docker Space는 이제 유료 플랜이 필요하다(공식 문서) |
+| AWS·GCP·Azure 상시 무료 | 메모리 1GB 수준 | | 실측 최대치를 감당하지 못한다 |
+| Railway | 사용량 과금: RAM $10/GB·월, vCPU $20/월 | | AX 때 쓰던 곳. 검색 엔진 볼륨 권한 문제가 있었다 |
 
-가격은 각 공식 페이지(2026-10-25 확인)의 부가세 제외 "from" 가격이다. 서버 구매와 도메인 연결은 계정·결제가 필요해 하지 않았다.
+가격·조건은 각 공식 페이지(2026-10-25 확인) 기준이다.
+
+**Oracle 무료 서버에서 알아둘 것** (공식 문서 "Always Free Resources")
+- 회수 조건: 7일 동안 CPU(95분위)·네트워크·메모리 사용률이 **모두** 20% 미만이면 유휴로 보고 회수할 수 있다. 이 구성은 평소에도
+  메모리를 약 3GB(OpenSearch 2.0GiB + 앱 0.8GiB, 12GB의 약 25%) 쓰므로 메모리 조건에 걸리지 않는다.
+- 생성 실패: 홈 리전에 무료 셰이프가 부족하면 "out of host capacity"가 난다. 2026년 7월에 실제로 겪었다. 잠시 뒤 다시 시도하거나 다른 가용 영역을 고른다.
+- 2 OCPU라 문서 파싱·임베딩은 x86 16코어 노트북보다 느리다. 검색 자체는 가볍다.
+
+**ARM 확인 (2026-10-25)**: 같은 `Dockerfile`을 `docker buildx --platform linux/arm64`로 빌드했다. 설치된 파이썬 패키지 134개의 버전이
+x86 이미지와 같았고(`backend/requirements.lock`), 에뮬레이션으로 띄운 ARM 컨테이너에서 스캔 PDF 한국어 OCR → KURE-v1 임베딩(오프라인)
+→ OpenSearch 색인 → 유사 검색까지 동작했다. 기반 이미지(python, node, OpenSearch 3.9.0, Postgres 17.11, Caddy 2.11.7)는 모두 arm64를 제공한다.
+
+**무료 도메인**: `<IP를 대시로>.nip.io`(예: `203-0-113-10.nip.io`, 문서 예시용 IP 대역)가 그 IP로 연결되고 Let's Encrypt 인증서도 받을 수 있다(nip.io 공식 페이지).
+`.io`가 공개 접미사 목록에 있어 Google 로그인 JavaScript 원본 규칙(HTTPS, IP 주소 불가, 공개 접미사 TLD)에도 맞는다.
 
 ### 실제로 올릴 때 순서
 
-1. 서버 생성(Ubuntu), Docker 설치, 저장소 받기
-2. 도메인 DNS A 레코드를 서버 IP로 지정
-3. `deploy/.env` 작성 (`POSTGRES_PASSWORD`, `SESSION_SECRET`은 긴 무작위 값)
-4. Google Cloud Console OAuth 클라이언트에 `https://<도메인>`을 승인된 JavaScript 원본으로 추가
-5. `docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build`
-6. 방화벽은 22(SSH), 80, 443만 연다
+1. 서버 생성: Oracle Cloud 콘솔에서 Ampere A1(2 OCPU, 12GB), Ubuntu 24.04, 공개 IP, SSH 공개키 등록
+2. 클라우드 방화벽: 서브넷 보안 목록(또는 NSG)에 TCP 80·443 인바운드 추가(22는 기본으로 열려 있다)
+3. 코드 복사 후 서버에서 `sudo bash deploy/setup-ubuntu.sh` — Docker 설치와 서버 안 방화벽(iptables) 80·443 개방
+   (Oracle Ubuntu 이미지는 iptables가 22번만 허용한다. 이 스크립트는 같은 모양의 규칙을 만든 Ubuntu 24.04 컨테이너에서 확인했다)
+4. `deploy/.env` 작성: `DOMAIN=<IP를 대시로>.nip.io`(또는 자기 도메인), `POSTGRES_PASSWORD`·`SESSION_SECRET`은 긴 무작위 값
+5. Google Cloud Console OAuth 클라이언트에 `https://<DOMAIN>`을 승인된 JavaScript 원본으로 추가
+6. `docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build` (ARM 서버에서는 그 자리에서 ARM 이미지로 빌드된다)
 
 사내 폐쇄망으로 옮길 때도 같은 compose를 쓴다. 모델이 이미지 안에 있어서 인터넷이 필요 없고, 이미지는 `docker save` / `docker load`로 반입한다.
 이때 Caddy는 사내 인증서를 쓰도록 Caddyfile을 바꾼다.

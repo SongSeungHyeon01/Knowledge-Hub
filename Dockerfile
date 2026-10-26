@@ -40,8 +40,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # 파이썬 의존성 (torch는 반드시 CPU 버전 — extra-index-url 필수)
-COPY backend/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt \
+# requirements.lock: 검증한 정확한 버전. 이게 없으면 빌드할 때마다 그 시점 최신 버전이 깔린다
+# (2026-10-25 실제로 Docling이 측정 때와 다른 버전으로 올라간 것을 확인).
+COPY backend/requirements.txt backend/requirements.lock ./
+RUN pip install --no-cache-dir -r requirements.txt -c requirements.lock \
         --extra-index-url https://download.pytorch.org/whl/cpu
 
 # ── 모델을 이미지 안에 미리 받아둔다 (2026-10-25) ───────────────────────────────
