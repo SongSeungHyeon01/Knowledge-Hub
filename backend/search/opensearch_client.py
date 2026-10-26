@@ -29,18 +29,31 @@ EMBED_DIM = int(os.environ.get("EMBED_DIM", "1024"))
 # ── 관련 없는 결과 거르기 (2026-10-26) ────────────────────────────────────────────
 # 전혀 관련 없는 질문에도 결과가 나오던 문제. 원인은 두 가지였다:
 #  1) 분석기가 조사·어미(은/는/에서/하다/되다…)까지 단어로 쪼개서, 질문과 문서가 조사 하나만
-#     겹쳐도 키워드 일치로 잡혔다 → 질문 쪽만 조사·어미를 빼는 분석기(nori_query)로 찾는다.
+#     겹쳐도 키워드 일치로 잡혔다 → 질문 쪽만 조사·어미·의문사를 빼는 분석기(QUERY_ANALYZER)로 찾는다.
 #  2) 의미 검색은 "가장 가까운 순"으로 무조건 가져와서, 어떤 문서와도 관련 없는 질문에도 덜 먼
 #     문서가 나왔다 → 의미 점수 기준을 둔다.
 # 기준값은 평가 문서 23개·정답이 있는 질문 47개·무관 질문 30개로 정했다(KURE-v1 기준, 점수는
-# (1+코사인)/2). 정답 5위 안 100%→97.9%, 정답 1위 78.7% 그대로, 무관 질문 평균 결과 11.7→0.9개.
+# (1+코사인)/2). 실제 검색 API로 잰 결과: 정답 1위 89.4%·5위 안 100%·MRR 0.941로 바꾸기 전과 같고,
+# 무관 질문 평균 결과 11.7개(최대 22개)→1.0개(최대 4개), 결과가 하나도 없는 질문 0/30→16/30.
 # 임베딩 모델을 바꾸면 점수 분포가 달라지므로 다시 재서 아래 환경변수로 맞춘다.
-QUERY_ANALYZER = "nori_query"
+# v3(2026-10-26): 조사·어미 등(Lucene 기본 품사 제외 목록)에 더해 의문사(얼마·언제·어디…)를 뺀다. v1은
+# "특허 등록하면 보상금 얼마 받아?"에서 "얼마"까지 일치 대상으로 세어 정답 문서를 놓쳤다. 동사까지 빼 본 v2는
+# 정답 성능은 같았지만 질문이 짧아져 무관 질문 평균 결과가 1.2개로 v3(1.0개)보다 많아 쓰지 않는다. 이름을 바꿔야 기존 인덱스에
+# 새 정의로 추가된다(같은 이름이면 이미 있다고 보고 건너뛴다).
+QUERY_ANALYZER = "nori_query_v3"
 BM25_MIN_MATCH = os.environ.get("SEARCH_BM25_MIN_MATCH", "75%")           # 청크가 질문 내용어의 몇 %를 담아야 키워드 일치로 보나
 SEM_MIN_SCORE = float(os.environ.get("SEARCH_SEM_MIN_SCORE", "0.74"))     # 키워드 일치가 없을 때 의미 검색 결과의 최소 점수
 SEM_STRONG_SCORE = float(os.environ.get("SEARCH_SEM_STRONG_SCORE", "0.78"))  # 키워드 일치가 있어도 함께 보여줄 만큼 강한 의미 점수
+# Lucene 기본 품사 제외 목록(조사·어미·부사·관형사 등) — nori_part_of_speech를 이름 없이 쓸 때와 같다
+_POS_STOP_TAGS = ["EP", "EF", "EC", "ETN", "ETM", "IC", "JKS", "JKC", "JKG", "JKO", "JKB", "JKV", "JKQ", "JX", "JC",
+                  "MAG", "MAJ", "MM", "SP", "SSC", "SSO", "SC", "SE", "XPN", "XSA", "XSN", "XSV", "UNA", "NA", "VSV"]
+_QUESTION_WORDS = ["얼마", "언제", "어디", "누구", "무엇", "뭐", "몇", "어느", "무슨", "어떤"]
+_QUERY_FILTERS = {
+    "kh_query_pos": {"type": "nori_part_of_speech", "stoptags": _POS_STOP_TAGS},
+    "kh_question_words": {"type": "stop", "stopwords": _QUESTION_WORDS},
+}
 _QUERY_ANALYZER_DEF = {"type": "custom", "tokenizer": "nori_tokenizer",
-                       "filter": ["nori_part_of_speech", "nori_readingform", "lowercase"]}
+                       "filter": ["kh_query_pos", "nori_readingform", "lowercase", "kh_question_words"]}
 _query_analyzer_ok = False
 
 _client = None
@@ -88,7 +101,8 @@ def ensure_index():
                             "filter": ["nori_readingform", "lowercase"],
                         },
                         QUERY_ANALYZER: _QUERY_ANALYZER_DEF,
-                    }
+                    },
+                    "filter": _QUERY_FILTERS,
                 },
             },
             "mappings": {
@@ -119,7 +133,7 @@ def ensure_index():
 
 
 def _ensure_query_analyzer(client):
-    """기존 인덱스에 질문용 분석기(nori_query)가 없으면 추가한다. 분석기 추가는 인덱스를 잠깐 닫았다
+    """기존 인덱스에 질문용 분석기(QUERY_ANALYZER)가 없으면 추가한다. 분석기 추가는 인덱스를 잠깐 닫았다
     열어야 해서 서버 시작 때 한 번만 한다(색인된 데이터는 그대로 — 질문을 쪼개는 방식만 바뀐다).
     실패하면 예전 분석기(nori)로 검색을 계속한다."""
     global _query_analyzer_ok
@@ -130,7 +144,8 @@ def _ensure_query_analyzer(client):
             client.indices.close(index=SEARCH_INDEX)
             try:
                 client.indices.put_settings(index=SEARCH_INDEX,
-                                            body={"analysis": {"analyzer": {QUERY_ANALYZER: _QUERY_ANALYZER_DEF}}})
+                                            body={"analysis": {"filter": _QUERY_FILTERS,
+                                                               "analyzer": {QUERY_ANALYZER: _QUERY_ANALYZER_DEF}}})
             finally:
                 client.indices.open(index=SEARCH_INDEX)
             print(f"[search] 질문용 분석기({QUERY_ANALYZER}) 추가")
