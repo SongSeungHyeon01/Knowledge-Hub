@@ -10,7 +10,9 @@ Apache-2.0이고(opensearchproject/opensearch:3.9.0 이미지 LICENSE.txt 확인
 검색 동작은 es_client.py 시절과 같게 유지한다:
   - BM25 질의와 kNN 질의를 따로 던지고 파이썬에서 RRF로 합친다(벡터 k=30, BM25 k=60)
   - BM25는 collapse(doc_id)로 문서당 최상위 청크 하나만 후보로 쓴다
-  - 키워드 매치가 하나라도 있으면 키워드 없는 순수 의미 유사도 문서는 뺀다("점주" 버그 2차 수정)
+  - 키워드 매치가 하나라도 있으면 키워드 없는 순수 의미 유사도 문서는 뺀다("점주" 버그 2차 수정).
+    [2026-10-26] 단, 의미 점수가 아주 높은 문서는 함께 둔다. 키워드는 질문의 내용어 75% 이상 일치,
+    키워드가 없을 때 의미 검색 결과는 점수 기준 이상만 쓴다(아래 SEARCH_* 설정 참고).
 바뀐 것은 OpenSearch 문법뿐이다: dense_vector → knn_vector(Lucene HNSW, cosinesimil),
 top-level knn → query.knn, 키워드 인자 → body.
 
@@ -23,6 +25,23 @@ SEARCH_URL = os.environ.get("OPENSEARCH_URL", "http://localhost:9200")
 SEARCH_INDEX = os.environ.get("OPENSEARCH_INDEX", "knowledge_hub_chunks")
 # 임베딩 모델(search/embedder.py, 기본 KURE-v1)의 벡터 차원과 같아야 한다. 다르면 embedder가 시작할 때 알린다.
 EMBED_DIM = int(os.environ.get("EMBED_DIM", "1024"))
+
+# ── 관련 없는 결과 거르기 (2026-10-26) ────────────────────────────────────────────
+# 전혀 관련 없는 질문에도 결과가 나오던 문제. 원인은 두 가지였다:
+#  1) 분석기가 조사·어미(은/는/에서/하다/되다…)까지 단어로 쪼개서, 질문과 문서가 조사 하나만
+#     겹쳐도 키워드 일치로 잡혔다 → 질문 쪽만 조사·어미를 빼는 분석기(nori_query)로 찾는다.
+#  2) 의미 검색은 "가장 가까운 순"으로 무조건 가져와서, 어떤 문서와도 관련 없는 질문에도 덜 먼
+#     문서가 나왔다 → 의미 점수 기준을 둔다.
+# 기준값은 평가 문서 23개·정답이 있는 질문 47개·무관 질문 30개로 정했다(KURE-v1 기준, 점수는
+# (1+코사인)/2). 정답 5위 안 100%→97.9%, 정답 1위 78.7% 그대로, 무관 질문 평균 결과 11.7→0.9개.
+# 임베딩 모델을 바꾸면 점수 분포가 달라지므로 다시 재서 아래 환경변수로 맞춘다.
+QUERY_ANALYZER = "nori_query"
+BM25_MIN_MATCH = os.environ.get("SEARCH_BM25_MIN_MATCH", "75%")           # 청크가 질문 내용어의 몇 %를 담아야 키워드 일치로 보나
+SEM_MIN_SCORE = float(os.environ.get("SEARCH_SEM_MIN_SCORE", "0.74"))     # 키워드 일치가 없을 때 의미 검색 결과의 최소 점수
+SEM_STRONG_SCORE = float(os.environ.get("SEARCH_SEM_STRONG_SCORE", "0.78"))  # 키워드 일치가 있어도 함께 보여줄 만큼 강한 의미 점수
+_QUERY_ANALYZER_DEF = {"type": "custom", "tokenizer": "nori_tokenizer",
+                       "filter": ["nori_part_of_speech", "nori_readingform", "lowercase"]}
+_query_analyzer_ok = False
 
 _client = None
 _index_ready = False
@@ -54,6 +73,7 @@ def ensure_index():
         return False
     try:
         if client.indices.exists(index=SEARCH_INDEX):
+            _ensure_query_analyzer(client)
             _index_ready = True
             return True
         client.indices.create(index=SEARCH_INDEX, body={
@@ -66,7 +86,8 @@ def ensure_index():
                             "type": "custom",
                             "tokenizer": "nori_tokenizer",
                             "filter": ["nori_readingform", "lowercase"],
-                        }
+                        },
+                        QUERY_ANALYZER: _QUERY_ANALYZER_DEF,
                     }
                 },
             },
@@ -88,11 +109,34 @@ def ensure_index():
                 }
             },
         })
+        global _query_analyzer_ok
+        _query_analyzer_ok = True
         _index_ready = True
         return True
     except Exception as e:
         print(f"[search] 인덱스 생성 실패: {e}")
         return False
+
+
+def _ensure_query_analyzer(client):
+    """기존 인덱스에 질문용 분석기(nori_query)가 없으면 추가한다. 분석기 추가는 인덱스를 잠깐 닫았다
+    열어야 해서 서버 시작 때 한 번만 한다(색인된 데이터는 그대로 — 질문을 쪼개는 방식만 바뀐다).
+    실패하면 예전 분석기(nori)로 검색을 계속한다."""
+    global _query_analyzer_ok
+    try:
+        settings = client.indices.get_settings(index=SEARCH_INDEX)
+        analyzers = settings[SEARCH_INDEX]["settings"]["index"].get("analysis", {}).get("analyzer", {})
+        if QUERY_ANALYZER not in analyzers:
+            client.indices.close(index=SEARCH_INDEX)
+            try:
+                client.indices.put_settings(index=SEARCH_INDEX,
+                                            body={"analysis": {"analyzer": {QUERY_ANALYZER: _QUERY_ANALYZER_DEF}}})
+            finally:
+                client.indices.open(index=SEARCH_INDEX)
+            print(f"[search] 질문용 분석기({QUERY_ANALYZER}) 추가")
+        _query_analyzer_ok = True
+    except Exception as e:
+        print(f"[search] 질문용 분석기 추가 실패 — 기존 분석기로 검색: {e}")
 
 
 def count_chunks() -> int | None:
@@ -191,8 +235,11 @@ def bm25_search(query_text: str, doc_ids: list[int] | None, size: int = BM25_CAN
     client = get_client()
     if client is None or not ensure_index():
         return []
-    query = {"bool": {"must": [{"multi_match": {"query": query_text,
-                                                "fields": ["text^2", "title", "filename", "memo"]}}]}}
+    match = {"query": query_text, "fields": ["text^2", "title", "filename", "memo"]}
+    if _query_analyzer_ok:
+        match["analyzer"] = QUERY_ANALYZER
+        match["minimum_should_match"] = BM25_MIN_MATCH
+    query = {"bool": {"must": [{"multi_match": match}]}}
     doc_filter = _doc_id_filter(doc_ids)
     if doc_filter:
         query["bool"]["filter"] = [doc_filter]
@@ -226,9 +273,9 @@ def hybrid_search(query_text: str, query_vector: list[float] | None, doc_ids: li
                   size: int = 50, k_sem: int = 30, k_bm25: int = 60) -> dict:
     """BM25 + kNN을 각각 질의한 뒤 RRF로 합친다.
 
-    코퍼스(필터된 doc_ids 범위) 안에 실제 키워드 매치(BM25)가 하나라도 있으면, 키워드가 전혀
-    없는 문서(순수 의미 유사도만 있는 문서)는 최종 후보에서 뺀다. 키워드가 전혀 없을 때만
-    kNN 후보를 그대로 쓴다.
+    키워드 일치(질문 내용어 BM25_MIN_MATCH 이상)가 있으면 그 문서들과 의미 점수가 SEM_STRONG_SCORE 이상인
+    문서를 후보로, 키워드 일치가 없으면 의미 점수가 SEM_MIN_SCORE 이상인 문서만 후보로 쓴다.
+    관련 없는 질문이면 후보가 없어 결과가 비는 게 정상이다.
 
     반환: {"doc_ids", "final_scores": {doc_id: score}, "best_chunk": {doc_id: {"text","page_num"}},
            "engine_down": bool} — engine_down=True면 결과가 원래 없는 게 아니라 검색 엔진에
@@ -251,7 +298,13 @@ def hybrid_search(query_text: str, query_vector: list[float] | None, doc_ids: li
     bm25_best = _best_per_doc(bm25_hits)
     sem_best = _best_per_doc(knn_hits)
 
-    candidate_ids = list(bm25_best.keys()) if bm25_best else list(sem_best.keys())
+    # 키워드 일치가 있으면 그 문서들 + 의미 점수가 아주 높은 문서(영어로 물어 한국어 문서를 찾는 경우처럼
+    # 단어가 안 겹치는 정답을 살리려고). 키워드 일치가 없으면 의미 점수가 기준 이상인 문서만.
+    if bm25_best:
+        candidate_ids = list(dict.fromkeys(
+            list(bm25_best) + [d for d, h in sem_best.items() if h["score"] >= SEM_STRONG_SCORE]))
+    else:
+        candidate_ids = [d for d, h in sem_best.items() if h["score"] >= SEM_MIN_SCORE]
     if not candidate_ids:
         return {"doc_ids": [], "final_scores": {}, "best_chunk": {}, "engine_down": False}
 

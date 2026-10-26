@@ -92,7 +92,11 @@ export default function MyPage({ me }) {
       render: (_, d) => (
         <Space size={4}>
           <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(d)} />
-          <Popconfirm title="이 문서를 삭제할까요?" okText="삭제" cancelText="취소" onConfirm={() => removeDoc(d.id)}>
+          <Popconfirm
+            title="이 문서를 삭제할까요?"
+            description="삭제한 문서는 30일 동안 관리자가 복원할 수 있고, 그 뒤에는 완전히 지워집니다."
+            okText="삭제" cancelText="취소" onConfirm={() => removeDoc(d.id)}
+          >
             <Button size="small" danger icon={<DeleteOutlined />} />
           </Popconfirm>
         </Space>

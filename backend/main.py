@@ -24,7 +24,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import text
 
 from database import engine, get_db, Base, AsyncSessionLocal
-from models import Document, SearchLog, Chunk, Bookmark, DocumentPermission, User, Comment, AdminEmail, RevokedSession, Notification, DeletionLog
+from models import Document, SearchLog, Chunk, Bookmark, DocumentPermission, User, Comment, AdminEmail, RevokedSession, Notification, DeletionLog, _kst_now
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from core.parser import parse_pdf, count_pdf_pages, HARD_PAGE_LIMIT   # PDF 파서 (Docling 기반, 2026-07-28 통합)
@@ -71,6 +71,10 @@ os.makedirs(MIRROR_UPLOAD_DIR, exist_ok=True)
 os.makedirs(MIRROR_PARSED_DIR, exist_ok=True)
 os.makedirs(MIRROR_TRASH_UPLOAD_DIR, exist_ok=True)
 os.makedirs(MIRROR_TRASH_PARSED_DIR, exist_ok=True)
+# [2026-10-26] 문서 휴지통 — 삭제한 문서를 30일 동안 복원할 수 있게 보관하는 곳(삭제 기록 하나당 폴더 하나).
+# 위 미러 trash(3일)는 백업 사본 정리용이고, 이쪽은 관리자 화면의 "복원" 기능이 쓴다.
+DOC_TRASH_DIR = os.path.join(DATA_DIR, "trash")
+os.makedirs(DOC_TRASH_DIR, exist_ok=True)
 
 # 지원 파일 형식 목록
 # (png/jpg 단독 이미지는 미지원으로 정리 — 2026-07-04 결정. 문서 속 이미지는
@@ -271,6 +275,92 @@ async def _scheduled_deletion_log_sweep_task():
             print(f"[deletion-log] 정리 실패: {e}")
 
 
+# ── 문서 휴지통: 보관·복원·30일 뒤 영구 삭제 (2026-10-26) ──────────────────────
+# 삭제할 때 원본 파일·파싱 JSON·청크(임베딩 포함)는 휴지통 폴더에, 문서 행과 댓글·북마크·열람 권한은
+# 삭제 기록(DeletionLog.snapshot)에 담아 둔 뒤 기존 완전삭제 로직으로 서비스 DB·검색 인덱스에서 뺀다.
+# 서비스 쪽 조회(검색·목록·통계 등)는 그대로 두고 휴지통만 따로 관리하려고 이렇게 나눴다 —
+# "삭제됨" 표시만 하는 방식은 문서를 읽는 모든 곳에 제외 조건을 넣어야 해서 빠뜨릴 위험이 크다.
+_DOC_TRASH_RETENTION_DAYS = int(os.environ.get("DOC_TRASH_RETENTION_DAYS", "30"))
+_DOC_TRASH_SWEEP_INTERVAL_SEC = int(os.environ.get("DOC_TRASH_SWEEP_INTERVAL_SEC", str(6 * 3600)))
+_DOC_FIELDS = ("id", "filename", "title", "saved_path", "file_type", "original_path", "memo", "category", "status",
+               "error", "page_count", "has_flagged", "sha256", "view_count", "download_count", "uploaded_by",
+               "department", "uploaded_at", "updated_at")
+
+
+def _dt_out(v):
+    return v.isoformat() if isinstance(v, datetime) else v
+
+
+def _dt_in(v):
+    return datetime.fromisoformat(v) if isinstance(v, str) else v
+
+
+async def _휴지통_보관(doc: Document, db: AsyncSession, deleted_by: str, reason: str) -> DeletionLog:
+    """삭제 직전에 문서를 휴지통으로 옮겨 둘 내용을 만들고 삭제 기록을 남긴다. 실제 삭제는
+    호출자가 이어서 _문서_완전삭제()로 한다(파일·청크가 여기서 먼저 복사돼 있어야 한다)."""
+    import base64
+    log = DeletionLog(doc_id=doc.id, filename=doc.filename, category=doc.category,
+                      deleted_by=deleted_by, reason=reason, status="trashed")
+    db.add(log)
+    await db.flush()  # 휴지통 폴더 이름에 쓸 log.id 확보
+
+    trash = os.path.join(DOC_TRASH_DIR, str(log.id))
+    os.makedirs(trash, exist_ok=True)
+    if os.path.exists(doc.saved_path):
+        await asyncio.to_thread(shutil.copy2, doc.saved_path, os.path.join(trash, "original"))
+    parsed_path = os.path.join(PARSED_DIR, f"{doc.id}.json")
+    if os.path.exists(parsed_path):
+        await asyncio.to_thread(shutil.copy2, parsed_path, os.path.join(trash, "parsed.json"))
+
+    chunks = (await db.execute(select(Chunk).where(Chunk.doc_id == doc.id).order_by(Chunk.chunk_idx))).scalars().all()
+    chunk_rows = [{"text": c.text, "page_num": c.page_num, "chunk_idx": c.chunk_idx,
+                   "embedding": base64.b64encode(c.embedding).decode() if c.embedding else None} for c in chunks]
+    with open(os.path.join(trash, "chunks.json"), "w", encoding="utf-8") as f:
+        json.dump(chunk_rows, f, ensure_ascii=False)
+
+    comments = (await db.execute(select(Comment).where(Comment.doc_id == doc.id))).scalars().all()
+    bookmarks = (await db.execute(select(Bookmark).where(Bookmark.doc_id == doc.id))).scalars().all()
+    perms = (await db.execute(select(DocumentPermission).where(DocumentPermission.doc_id == doc.id))).scalars().all()
+    log.trash_dir = trash
+    log.snapshot = json.dumps({
+        "document": {k: _dt_out(getattr(doc, k)) for k in _DOC_FIELDS},
+        "comments": [{"user_email": c.user_email, "content": c.content, "created_at": _dt_out(c.created_at)} for c in comments],
+        "bookmarks": [{"user_email": b.user_email, "created_at": _dt_out(b.created_at)} for b in bookmarks],
+        "permissions": [{"user_email": p.user_email, "created_at": _dt_out(p.created_at)} for p in perms],
+    }, ensure_ascii=False)
+    return log
+
+
+async def _휴지통_비우기():
+    """보관 기간이 지난 휴지통을 영구 삭제한다 — 파일 폴더와 DB에 남은 사본(snapshot)을 함께 지운다."""
+    cutoff = _kst_now() - timedelta(days=_DOC_TRASH_RETENTION_DAYS)
+    async with AsyncSessionLocal() as sess:
+        logs = (await sess.execute(
+            select(DeletionLog).where(DeletionLog.status == "trashed", DeletionLog.deleted_at < cutoff)
+        )).scalars().all()
+        for log in logs:
+            if log.trash_dir and os.path.isdir(log.trash_dir):
+                await asyncio.to_thread(shutil.rmtree, log.trash_dir, True)
+            log.snapshot = None
+            log.status = "purged"
+        await sess.commit()
+        return len(logs)
+
+
+async def _scheduled_doc_trash_sweep_task():
+    # 서버가 오래 꺼져 있다가 켜진 경우도 바로 정리하도록 첫 점검은 기다리지 않는다
+    while True:
+        try:
+            purged = await _휴지통_비우기()
+            if purged:
+                print(f"[trash] 보관 {_DOC_TRASH_RETENTION_DAYS}일이 지난 삭제 문서 {purged}건 영구 삭제")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[trash] 휴지통 정리 실패: {e}")
+        await asyncio.sleep(_DOC_TRASH_SWEEP_INTERVAL_SEC)
+
+
 # ── 세션 블랙리스트(RevokedSession) 정리 (2026-07-25) ─────────────────────────
 # [수정] 원래는 lifespan 시작 시 딱 한 번만 청소했다 — 서버를 오래 재시작하지 않으면
 # SESSION_MAX_AGE(7일)가 지나 더 이상 조회할 필요 없는 항목이 계속 쌓이는 문제가 있었다.
@@ -456,6 +546,13 @@ async def lifespan(_):
         "ALTER TABLE documents ADD COLUMN department VARCHAR",
         "ALTER TABLE users ADD COLUMN department VARCHAR",
         "ALTER TABLE search_logs ADD COLUMN user_email VARCHAR",
+        # [2026-10-26] 휴지통·복원 — DATETIME은 PostgreSQL에 없는 타입이라 두 DB 모두 받는 TIMESTAMP를 쓴다
+        "ALTER TABLE deletion_logs ADD COLUMN status VARCHAR",
+        "ALTER TABLE deletion_logs ADD COLUMN trash_dir VARCHAR",
+        "ALTER TABLE deletion_logs ADD COLUMN snapshot TEXT",
+        "ALTER TABLE deletion_logs ADD COLUMN restored_at TIMESTAMP",
+        "ALTER TABLE deletion_logs ADD COLUMN restored_by VARCHAR",
+        "ALTER TABLE deletion_logs ADD COLUMN restored_doc_id INTEGER",
     ]
     for stmt in migrations:
         try:
@@ -498,6 +595,9 @@ async def lifespan(_):
     deletion_log_sweep_task = asyncio.create_task(_scheduled_deletion_log_sweep_task())
     print(f"[startup] 삭제 보고서 정리 태스크 시작 (주기 {_DELETION_LOG_SWEEP_INTERVAL_SEC}s, 보관 {_DELETION_LOG_RETENTION_DAYS}일)")
 
+    doc_trash_sweep_task = asyncio.create_task(_scheduled_doc_trash_sweep_task())
+    print(f"[startup] 문서 휴지통 정리 태스크 시작 (주기 {_DOC_TRASH_SWEEP_INTERVAL_SEC}s, 보관 {_DOC_TRASH_RETENTION_DAYS}일)")
+
     revoked_session_sweep_task = asyncio.create_task(_scheduled_revoked_session_sweep_task())
     print(f"[startup] 세션 블랙리스트 정리 태스크 시작 (주기 {_REVOKED_SESSION_SWEEP_INTERVAL_SEC}s)")
 
@@ -515,9 +615,10 @@ async def lifespan(_):
     backup_task.cancel()
     mirror_trash_task.cancel()
     deletion_log_sweep_task.cancel()
+    doc_trash_sweep_task.cancel()
     revoked_session_sweep_task.cancel()
     search_selfheal_task.cancel()
-    for t in (sweep_task, backup_task, mirror_trash_task, deletion_log_sweep_task, revoked_session_sweep_task, search_selfheal_task):
+    for t in (sweep_task, backup_task, mirror_trash_task, deletion_log_sweep_task, doc_trash_sweep_task, revoked_session_sweep_task, search_selfheal_task):
         try:
             await t
         except asyncio.CancelledError:
@@ -1787,7 +1888,7 @@ async def 문서_일괄_삭제(
         result = await db.execute(select(Document).where(Document.id == doc_id))
         doc = result.scalar_one_or_none()
         if doc:
-            db.add(DeletionLog(doc_id=doc.id, filename=doc.filename, category=doc.category, deleted_by=deleted_by, reason=reason))
+            await _휴지통_보관(doc, db, deleted_by, reason)
             await _문서_완전삭제(doc, db)
             deleted.append(doc_id)
     await db.commit()
@@ -1817,7 +1918,7 @@ async def 문서_삭제(
         raise HTTPException(status_code=404, detail="해당 문서를 찾을 수 없습니다")
 
     filename = doc.filename
-    db.add(DeletionLog(doc_id=doc.id, filename=doc.filename, category=doc.category, deleted_by=_current_user_email(request), reason=reason))
+    await _휴지통_보관(doc, db, _current_user_email(request), reason)
     await _문서_완전삭제(doc, db)
     await db.commit()
     await _es_문서청크_삭제([doc_id])
@@ -1831,18 +1932,133 @@ async def 삭제_보고서_목록(limit: int = Query(200, ge=1, le=1000), db: As
     rows = (await db.execute(
         select(DeletionLog).order_by(DeletionLog.deleted_at.desc()).limit(limit)
     )).scalars().all()
-    return [
-        {
+    names = await _resolve_names(db, [r.deleted_by for r in rows])
+    now = _kst_now()
+
+    def _state(r):
+        # status가 비어 있으면 휴지통 기능 전에 지운 문서라 되살릴 자료가 없다
+        if r.status == "trashed":
+            until = r.deleted_at + timedelta(days=_DOC_TRASH_RETENTION_DAYS)
+            return ("trashed", str(until)) if until > now else ("purged", None)
+        return (r.status or "legacy", None)
+
+    out = []
+    for r in rows:
+        status, until = _state(r)
+        out.append({
             "id": r.id,
             "doc_id": r.doc_id,
             "filename": r.filename,
             "category": r.category,
             "deleted_by": r.deleted_by,
+            "deleted_by_name": names.get(r.deleted_by),
             "reason": r.reason,
             "deleted_at": str(r.deleted_at),
-        }
-        for r in rows
-    ]
+            "status": status,                 # trashed | restored | purged | legacy
+            "restorable_until": until,        # trashed일 때만
+            "restored_at": str(r.restored_at) if r.restored_at else None,
+            "restored_by": r.restored_by,
+            "restored_doc_id": r.restored_doc_id,
+        })
+    return out
+
+
+# POST /admin/deletion-logs/{id}/restore — 휴지통에 있는 문서를 되살린다(삭제 후 30일 안)
+# 원래 문서 번호가 비어 있으면 그 번호로, 이미 다른 문서가 쓰고 있으면 새 번호로 되살린다. 원본 파일 경로에
+# 그 사이 같은 이름의 파일이 생겼으면 이름 뒤에 _restored_<기록번호>를 붙인다. 청크는 보관해 둔 임베딩을
+# 그대로 쓰므로 OCR·임베딩을 다시 돌리지 않는다.
+@app.post("/admin/deletion-logs/{log_id}/restore")
+async def 삭제_문서_복원(log_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    import base64
+    from array import array
+    log = (await db.execute(select(DeletionLog).where(DeletionLog.id == log_id))).scalar_one_or_none()
+    if log is None:
+        raise HTTPException(status_code=404, detail="해당 삭제 기록을 찾을 수 없습니다")
+    if log.status == "restored":
+        raise HTTPException(status_code=409, detail="이미 복원된 문서입니다")
+    if log.status != "trashed" or not log.snapshot or not log.trash_dir or not os.path.isdir(log.trash_dir):
+        raise HTTPException(status_code=410, detail="복원할 자료가 없습니다(보관 기간이 지났거나 이 기능 전에 삭제된 문서)")
+    if log.deleted_at + timedelta(days=_DOC_TRASH_RETENTION_DAYS) <= _kst_now():
+        raise HTTPException(status_code=410, detail=f"삭제 후 {_DOC_TRASH_RETENTION_DAYS}일이 지나 복원할 수 없습니다")
+
+    snap = json.loads(log.snapshot)
+    fields = {k: _dt_in(v) if k in ("uploaded_at", "updated_at") else v for k, v in snap["document"].items()}
+    taken = (await db.execute(select(Document.id).where(Document.id == fields["id"]))).scalar_one_or_none()
+    if taken is not None:
+        fields.pop("id")   # 원래 번호를 다른 문서가 쓰고 있으면 새 번호를 받는다
+
+    # 원본 파일 자리 — 그 사이 같은 경로에 다른 파일이 생겼으면 겹치지 않는 이름으로
+    target = fields["saved_path"]
+    if os.path.exists(target):
+        stem, ext = os.path.splitext(target)
+        target = f"{stem}_restored_{log.id}{ext}"
+    fields["saved_path"] = target
+    original_src = os.path.join(log.trash_dir, "original")
+    if not os.path.exists(original_src):
+        raise HTTPException(status_code=410, detail="휴지통에 원본 파일이 없어 복원할 수 없습니다")
+
+    doc = Document(**fields)
+    db.add(doc)
+    await db.flush()   # 새 번호 확보
+    new_id = doc.id
+
+    # 같은 번호로 남아 있던 잔재 정리 — SQLite는 외래키 연쇄 삭제가 꺼져 있어 문서를 지워도 댓글·북마크·
+    # 권한·알림 행이 남는다(PostgreSQL은 함께 지워진다). 그대로 두면 북마크 중복 제약에 걸려 복원이 실패했다.
+    for model in (Notification, Comment, Bookmark, DocumentPermission):
+        await db.execute(sa_delete(model).where(model.doc_id == new_id))
+
+    with open(os.path.join(log.trash_dir, "chunks.json"), encoding="utf-8") as f:
+        chunk_rows = json.load(f)
+    for c in chunk_rows:
+        emb = base64.b64decode(c["embedding"]) if c.get("embedding") else None
+        db.add(Chunk(doc_id=new_id, text=c["text"], page_num=c["page_num"], chunk_idx=c["chunk_idx"], embedding=emb))
+    for c in snap.get("comments", []):
+        db.add(Comment(doc_id=new_id, user_email=c["user_email"], content=c["content"], created_at=_dt_in(c["created_at"])))
+    for b in snap.get("bookmarks", []):
+        db.add(Bookmark(doc_id=new_id, user_email=b["user_email"], created_at=_dt_in(b["created_at"])))
+    for p in snap.get("permissions", []):
+        db.add(DocumentPermission(doc_id=new_id, user_email=p["user_email"], created_at=_dt_in(p["created_at"])))
+
+    # 파일은 DB 커밋 전에 제자리로 복사한다 — 커밋이 실패하면 복사본만 지우면 되고, 휴지통 원본은 그대로 남는다
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    await asyncio.to_thread(shutil.copy2, original_src, target)
+    parsed_src = os.path.join(log.trash_dir, "parsed.json")
+    parsed_dst = os.path.join(PARSED_DIR, f"{new_id}.json")
+    if os.path.exists(parsed_src):
+        await asyncio.to_thread(shutil.copy2, parsed_src, parsed_dst)
+
+    log.status = "restored"
+    log.restored_at = _kst_now()
+    log.restored_by = _current_user_email(request)
+    log.restored_doc_id = new_id
+    log.snapshot = None
+    try:
+        await db.commit()
+    except Exception:
+        for path in (target, parsed_dst):
+            if os.path.exists(path):
+                os.remove(path)
+        raise
+
+    # 커밋된 뒤 검색 인덱스에 다시 넣는다(실패해도 10분마다 도는 자동 복구가 DB 청크로 다시 색인한다)
+    from search import opensearch_client as _search
+    saved = (await db.execute(select(Chunk).where(Chunk.doc_id == new_id).order_by(Chunk.chunk_idx))).scalars().all()
+    rows = [{"chunk_id": int(c.id), "doc_id": new_id, "filename": fields["filename"], "title": fields.get("title") or "",
+             "memo": fields.get("memo") or "", "text": c.text, "page_num": c.page_num, "chunk_idx": c.chunk_idx,
+             "embedding": array("f", c.embedding).tolist() if c.embedding else None} for c in saved]
+    indexed, failed = await asyncio.to_thread(_search.bulk_index_chunks, rows)
+    if failed:
+        print(f"[restore] doc_id={new_id}: 검색 색인 {failed}청크 실패 / {indexed}청크 성공")
+    _invalidate_doc_text(new_id)
+    try:
+        await asyncio.to_thread(_mirror_upload, target)
+        await asyncio.to_thread(_mirror_parsed, new_id)
+    except Exception as e:
+        print(f"[restore] doc_id={new_id}: 백업 미러 복사 실패 — {e}")
+    await asyncio.to_thread(shutil.rmtree, log.trash_dir, True)
+
+    return {"log_id": log.id, "doc_id": new_id, "same_id": new_id == log.doc_id,
+            "filename": fields["filename"], "chunks": len(saved), "indexed": indexed}
 
 
 # PATCH /admin/deletion-logs/{id} — 삭제 보고서의 사유를 나중에 수정(예: "재업로드 예정" → 실제 처리 결과로 갱신)
@@ -2568,15 +2784,24 @@ async def 내_문서_수정(
 
 
 # DELETE /me/documents/{doc_id} — 내가 올린 문서 삭제(관리자 단건 삭제와 동일한 정리 로직 사용)
+# [2026-10-26] 본인 삭제도 삭제 보고서에 남기고 휴지통에 30일 보관한다 — 예전에는 기록 없이 바로 지워져서
+# 관리자가 누가 무엇을 지웠는지 알 수 없었고 되살릴 방법도 없었다. 사유는 선택(없으면 기본 문구).
 @app.delete("/me/documents/{doc_id}")
-async def 내_문서_삭제(doc_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+async def 내_문서_삭제(
+    doc_id: int,
+    request: Request,
+    reason: str | None = Body(None, embed=True),
+    db: AsyncSession = Depends(get_db),
+):
     result = await db.execute(select(Document).where(Document.id == doc_id))
     doc = result.scalar_one_or_none()
     if doc is None:
         raise HTTPException(status_code=404, detail="해당 문서를 찾을 수 없습니다")
-    _소유자_또는_관리자(doc, _current_user_email(request))
+    email = _current_user_email(request)
+    _소유자_또는_관리자(doc, email)
 
     filename = doc.filename
+    await _휴지통_보관(doc, db, email, (reason or "").strip()[:300] or "작성자가 직접 삭제")
     await _문서_완전삭제(doc, db)
     await db.commit()
     await _es_문서청크_삭제([doc_id])

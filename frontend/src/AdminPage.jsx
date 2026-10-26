@@ -17,7 +17,7 @@ import {
   DeleteOutlined, WarningOutlined, FileTextOutlined,
   SearchOutlined, ReloadOutlined, SyncOutlined, EditOutlined,
   DownloadOutlined, FolderOutlined, UnorderedListOutlined, AppstoreOutlined,
-  EyeOutlined, UserOutlined, TeamOutlined, SwapOutlined,
+  EyeOutlined, UserOutlined, TeamOutlined, SwapOutlined, RollbackOutlined,
 } from '@ant-design/icons'
 import axios from 'axios'
 import useIsNarrow from './useIsNarrow'
@@ -601,6 +601,18 @@ export default function AdminPage({ onNavigate }) {
     onError: () => message.error('삭제 사유 수정 중 오류가 발생했습니다'),
   })
 
+  // [2026-10-26] 휴지통 복원 — 삭제 후 30일 안의 문서를 되살린다. 원래 번호가 이미 쓰이고 있으면 새 번호로 돌아온다.
+  const restoreMutation = useMutation({
+    mutationFn: (id) => axios.post(`${API}/admin/deletion-logs/${id}/restore`).then(r => r.data),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['deletion-logs'] })
+      queryClient.invalidateQueries({ queryKey: ['documents'] })
+      queryClient.invalidateQueries({ queryKey: ['stats'] })
+      message.success(`'${data.filename}' 문서를 복원했습니다` + (data.same_id ? '' : ` (새 번호 ${data.doc_id})`))
+    },
+    onError: (e) => message.error(e?.response?.data?.detail ?? '복원 중 오류가 발생했습니다'),
+  })
+
   const saveLogReason = (id) => {
     const reason = editingLogReason.trim()
     if (!reason) return
@@ -610,7 +622,12 @@ export default function AdminPage({ onNavigate }) {
   const deletionLogColumns = [
     { title: '파일명',   dataIndex: 'filename',   key: 'filename', ellipsis: true },
     { title: '카테고리', dataIndex: 'category',   key: 'category', width: 110, render: (c) => c ? (CAT_LABEL[c] ?? c) : '-' },
-    { title: '삭제한 관리자', dataIndex: 'deleted_by', key: 'deleted_by', width: 200 },
+    {
+      title: '삭제한 사람', dataIndex: 'deleted_by', key: 'deleted_by', width: 190,
+      render: (email, r) => (
+        <Tooltip title={email}><span>{r.deleted_by_name && r.deleted_by_name !== email ? r.deleted_by_name : email}</span></Tooltip>
+      ),
+    },
     {
       title: '사유', dataIndex: 'reason', key: 'reason',
       render: (reason, record) => editingLogId === record.id ? (
@@ -638,7 +655,39 @@ export default function AdminPage({ onNavigate }) {
         </Space>
       ),
     },
-    { title: '삭제 시각', dataIndex: 'deleted_at', key: 'deleted_at', width: 170, render: (t) => (t || '').slice(0, 16) },
+    { title: '삭제 시각', dataIndex: 'deleted_at', key: 'deleted_at', width: 150, render: (t) => (t || '').slice(0, 16) },
+    {
+      title: '상태', key: 'status', width: 230,
+      render: (_, r) => {
+        if (r.status === 'trashed') {
+          const daysLeft = Math.max(0, Math.ceil((new Date(r.restorable_until.replace(' ', 'T')) - Date.now()) / 86400000))
+          return (
+            <Space size={8}>
+              <Tooltip title={`${(r.restorable_until || '').slice(0, 16)}까지 복원할 수 있고, 그 뒤에는 서버에서 완전히 지워집니다`}>
+                <Tag color="orange" style={{ margin: 0 }}>휴지통 · {daysLeft}일 남음</Tag>
+              </Tooltip>
+              <Popconfirm
+                title="이 문서를 복원할까요?"
+                description="파일·검색 데이터·댓글·북마크·열람 권한을 삭제 전 상태로 되살립니다."
+                okText="복원" cancelText="취소"
+                onConfirm={() => restoreMutation.mutate(r.id)}
+              >
+                <Button size="small" icon={<RollbackOutlined />} loading={restoreMutation.isPending && restoreMutation.variables === r.id}>복원</Button>
+              </Popconfirm>
+            </Space>
+          )
+        }
+        if (r.status === 'restored') {
+          return (
+            <Tooltip title={`${(r.restored_at || '').slice(0, 16)} · ${r.restored_by ?? ''}`}>
+              <Tag color="green" style={{ margin: 0 }}>복원됨{r.restored_doc_id && r.restored_doc_id !== r.doc_id ? ` (새 번호 ${r.restored_doc_id})` : ''}</Tag>
+            </Tooltip>
+          )
+        }
+        if (r.status === 'purged') return <Tag style={{ margin: 0 }}>영구 삭제됨</Tag>
+        return <Tooltip title="휴지통 기능 전에 삭제된 문서라 되살릴 자료가 없습니다"><Tag style={{ margin: 0 }}>복원 불가</Tag></Tooltip>
+      },
+    },
   ]
 
   return (
@@ -749,8 +798,8 @@ export default function AdminPage({ onNavigate }) {
                 type="info"
                 showIcon
                 style={{ marginBottom: 16 }}
-                message="관리자가 삭제한 문서의 감사 기록입니다"
-                description="누가/언제/무엇을/왜 삭제했는지 확인할 수 있습니다. 이 기록은 3개월이 지나면 자동으로 삭제됩니다."
+                message="삭제된 문서의 기록과 휴지통입니다"
+                description="관리자 삭제와 작성자 본인 삭제가 모두 남습니다. 삭제한 문서는 30일 동안 여기서 복원할 수 있고, 30일이 지나면 서버에서 완전히 지워집니다. 기록 자체는 3개월 동안 남습니다."
               />
               <Table columns={deletionLogColumns} dataSource={deletionLogs} rowKey="id" loading={loadingDeletionLogs} pagination={{ pageSize: 20 }} />
             </>

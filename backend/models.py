@@ -179,6 +179,11 @@ class DocumentPermission(Base):
 # documents 행 자체는 삭제되고 나면 사라지므로 doc_id를 FK로 걸지 않고, 삭제 시점의
 # 파일명·카테고리를 그대로 스냅샷해 둔다(나중에 documents를 조인해도 찾을 수 없기 때문).
 # 3개월이 지난 행은 _scheduled_deletion_log_sweep_task가 주기적으로 청소한다(무한 누적 방지).
+#
+# [2026-10-26] 휴지통 — 삭제한 문서를 30일 동안 복원할 수 있게 원본 파일·파싱 결과·청크(임베딩 포함)는
+# trash_dir 폴더에, 문서 행과 댓글·북마크·열람 권한은 snapshot(JSON)에 보관한다. 30일이 지나면
+# 둘 다 지우고 status를 "purged"로 바꾼다(기록 행 자체는 위 3개월 규칙대로 사라진다).
+# 이 기능 전에 지운 문서의 기록은 trash_dir이 비어 있어 복원할 수 없다.
 class DeletionLog(Base):
     __tablename__ = "deletion_logs"
 
@@ -186,6 +191,12 @@ class DeletionLog(Base):
     doc_id     = Column(Integer, nullable=False, index=True)
     filename   = Column(String, nullable=False)
     category   = Column(String, nullable=True)
-    deleted_by = Column(String, nullable=False, index=True)   # 삭제한 관리자 이메일
-    reason     = Column(Text, nullable=False)                 # 삭제 사유 (필수 입력)
+    deleted_by = Column(String, nullable=False, index=True)   # 삭제한 사람 이메일(관리자 또는 본인)
+    reason     = Column(Text, nullable=False)                 # 삭제 사유 (관리자 삭제는 필수, 본인 삭제는 기본 문구)
     deleted_at = Column(DateTime, default=_kst_now, index=True)
+    status          = Column(String, nullable=True)           # trashed(복원 가능) | restored | purged, 비어 있으면 예전 방식 삭제
+    trash_dir       = Column(String, nullable=True)           # 휴지통 폴더 경로
+    snapshot        = Column(Text, nullable=True)             # 문서 행·댓글·북마크·권한 JSON
+    restored_at     = Column(DateTime, nullable=True)
+    restored_by     = Column(String, nullable=True)
+    restored_doc_id = Column(Integer, nullable=True)          # 복원된 문서 번호(원래 번호가 이미 쓰이고 있으면 새 번호)
