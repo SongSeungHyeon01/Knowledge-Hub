@@ -42,6 +42,7 @@ const tabFromPath = (pathname) => PATH_TO_TAB[pathname] ?? 'search'
 
 export default function App() {
   const isNarrow = useIsNarrow()
+  const isTiny = useIsNarrow(600)
   const [current, setCurrentState] = useState(() => tabFromPath(window.location.pathname))
   // 탭을 바꿀 때마다 상태와 주소창 URL을 함께 갱신한다 — 기존 setCurrent(key) 호출부는
   // 그대로 두고 이 함수만 교체했다.
@@ -155,11 +156,15 @@ export default function App() {
   // 검색 탭은 하위 페이지가 자체 좌측 서브메뉴를 갖고 있어서, 상단 내비게이션은 호버
   // 드롭다운 없이 단순 평탭으로만 둔다. 관리자는 이제 이 SPA의 탭이 아니라 완전히 별도
   // 주소(/admin, AdminRoute.jsx)에서 열리는 독립 페이지 — 우측 상단에 링크로만 노출한다.
+  // [2026-10-26] 창 모드에서 탭이 "..."로 접혀 업로드·북마크가 안 보이던 문제 — 탭이 3개뿐이라
+  // 접기(overflow)를 끄고, 아주 좁을 때만 글자를 빼고 아이콘(+툴팁)만 남긴다.
   const menuItems = [
-    { key: 'search', icon: <SearchOutlined />, label: '검색' },
-    { key: 'upload', icon: <UploadOutlined />, label: '업로드' },
-    { key: 'bookmarks', icon: <StarOutlined />, label: '북마크' },
-  ]
+    { key: 'search', icon: <SearchOutlined />, text: '검색' },
+    { key: 'upload', icon: <UploadOutlined />, text: '업로드' },
+    { key: 'bookmarks', icon: <StarOutlined />, text: '북마크' },
+  ].map(({ key, icon, text }) => isTiny
+    ? { key, icon: <Tooltip title={text}>{icon}</Tooltip>, label: null, 'aria-label': text }
+    : { key, icon, label: text })
 
   // 로그인 활성화 여부·세션 확인이 끝나기 전까지는 깜빡임 없이 로딩만 표시
   if (authConfigLoading || (authEnabled && meLoading)) {
@@ -238,6 +243,7 @@ export default function App() {
             selectedKeys={[current]}
             onClick={(e) => setCurrent(e.key)}
             items={menuItems}
+            disabledOverflow
             style={{ border: 'none', minWidth: isNarrow ? 0 : 320, justifyContent: 'center', background: 'transparent' }}
           />
         </div>
@@ -347,8 +353,10 @@ export default function App() {
         {current === 'myinfo' && authEnabled && me && <MyPage me={me} />}
       </Content>
 
-      {/* 좌측 하단: 로그인 상태 표시 — 로그인 기능이 켜져 있을 때만 노출(꺼져 있으면 표시할 상태가 없음) */}
-      {authEnabled && me && (
+      {/* 좌측 하단: 로그인 상태 표시 — 로그인 기능이 켜져 있을 때만 노출(꺼져 있으면 표시할 상태가 없음).
+          좁은 창에서는 본문이 화면 폭을 다 써서 이 고정 카드가 검색창·목록을 덮으므로 숨긴다
+          (같은 기능인 내 정보·로그아웃은 우측 상단 프로필 메뉴에 그대로 있다). */}
+      {authEnabled && me && !isNarrow && (
         <div
           style={{
             position: 'fixed', left: 16, bottom: 16, zIndex: 200,

@@ -11,7 +11,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Table, Button, Tag, message, Popconfirm, Typography, Row, Col,
   Card as ACard, List, Drawer, Collapse, Spin, Alert, Input, Space, Select,
-  Progress, Tooltip, Modal, Radio, Empty, Menu, AutoComplete,
+  Progress, Tooltip, Modal, Radio, Empty, Menu, AutoComplete, Badge,
 } from 'antd'
 import {
   DeleteOutlined, WarningOutlined, FileTextOutlined,
@@ -60,6 +60,7 @@ const adminKeyFromPath = (pathname) => ADMIN_PATH_TO_KEY[pathname] ?? 'docs'
 
 export default function AdminPage({ onNavigate }) {
   const isNarrow = useIsNarrow()
+  const isCompactNav = useIsNarrow(900)
   const queryClient = useQueryClient()
 
   const [navKey, setNavKeyState] = useState(() => adminKeyFromPath(window.location.pathname))  // docs | failed | deletion-log | category | departments | admins
@@ -542,14 +543,29 @@ export default function AdminPage({ onNavigate }) {
     return true
   })
 
+  // [2026-10-26] 창 폭이 900px 아래로 내려가면 뒤쪽 탭(부서 관리·관리자 계정)이 "..."로 숨던 문제 —
+  // 접기를 끄고 그 폭에서는 아이콘만(이름은 툴팁, 확인 필요 개수는 배지) 보여 6개가 한 줄에 다 들어가게 한다.
   const leftMenuItems = [
-    { key: 'docs',           icon: <UnorderedListOutlined />, label: '문서 목록' },
-    { key: 'failed',         icon: <WarningOutlined />,        label: `확인 필요 문서 (${needsReviewDocuments.length})` },
-    { key: 'deletion-log',   icon: <DeleteOutlined />,        label: '삭제 보고서' },
-    { key: 'category',       icon: <FolderOutlined />,        label: '카테고리' },
-    { key: 'departments',    icon: <TeamOutlined />,          label: '부서 관리' },
-    { key: 'admins',         icon: <UserOutlined />,          label: '관리자 계정' },
-  ]
+    { key: 'docs',           icon: <UnorderedListOutlined />, text: '문서 목록' },
+    { key: 'failed',         icon: <WarningOutlined />,        text: '확인 필요 문서', count: needsReviewDocuments.length },
+    { key: 'deletion-log',   icon: <DeleteOutlined />,        text: '삭제 보고서' },
+    { key: 'category',       icon: <FolderOutlined />,        text: '카테고리' },
+    { key: 'departments',    icon: <TeamOutlined />,          text: '부서 관리' },
+    { key: 'admins',         icon: <UserOutlined />,          text: '관리자 계정' },
+  ].map(({ key, icon, text, count }) => isCompactNav
+    ? {
+        key,
+        'aria-label': text,
+        label: null,
+        icon: (
+          <Tooltip title={count === undefined ? text : `${text} (${count})`}>
+            <Badge count={count} size="small" offset={[4, -2]}>
+              <span style={{ color: 'inherit' }}>{icon}</span>
+            </Badge>
+          </Tooltip>
+        ),
+      }
+    : { key, icon, label: count === undefined ? text : `${text} (${count})` })
 
   const NAV_TITLE = {
     docs: '문서 목록', failed: '확인 필요 문서',
@@ -629,7 +645,7 @@ export default function AdminPage({ onNavigate }) {
           selectedKeys={[navKey]}
           onClick={(e) => setNavKey(e.key)}
           items={leftMenuItems}
-          disabledOverflow={!isNarrow}
+          disabledOverflow
           style={{ border: 'none', lineHeight: '62px', whiteSpace: isNarrow ? 'normal' : 'nowrap', maxWidth: '100%', background: 'transparent' }}
         />,
         navSlot

@@ -16,7 +16,9 @@ const API = import.meta.env.VITE_API_URL
 const goHome = () => { window.location.href = '/' }
 
 export default function AdminRoute() {
-  const isNarrow = useIsNarrow()
+  // 관리자 탭 6개(글자 포함 약 740px)를 정중앙에 두면 1260px 아래에서 왼쪽 로고 글자를 덮는다 —
+  // 메인 화면(탭 3개)보다 이른 1280px부터 좁은 배치(로고 글자 숨김 + 남는 공간 안에서 정렬)로 바꾼다.
+  const isNarrow = useIsNarrow(1280)
   const queryClient = useQueryClient()
 
   const { data: authConfig, isLoading: authConfigLoading } = useQuery({
@@ -106,8 +108,8 @@ export default function AdminRoute() {
             — AdminPage가 실제 메뉴 항목·선택 상태를 들고 있고, 이 슬롯으로 포털만 쏴준다.
             넓을 때는 로고·메인으로 버튼 폭이 서로 달라도 항상 화면 정중앙에 오도록 flex
             흐름에서 빼고 절대 위치로 중앙 정렬한다. 창이 좁아지면(탭이 다 안 들어감) 겹치지
-            않게 절대 위치를 끄고 남는 공간 안에서만 정렬 — AdminPage 쪽에서 이 경우
-            disabledOverflow를 꺼서 안 들어가는 탭은 "..." 더보기로 자동 접히게 한다. */}
+            않게 절대 위치를 끄고 남는 공간 안에서만 정렬 — 탭을 "..."로 접으면 뒤쪽 메뉴가
+            숨어 버려서, AdminPage가 900px 아래에서는 아이콘만 보여 한 줄에 다 들어가게 한다. */}
         <div id="admin-nav-slot" style={isNarrow
           ? { flex: 1, display: 'flex', justifyContent: 'center', minWidth: 0, overflow: 'hidden' }
           : { position: 'absolute', left: '50%', transform: 'translateX(-50%)' }}
