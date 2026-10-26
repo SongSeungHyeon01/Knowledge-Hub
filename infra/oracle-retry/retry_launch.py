@@ -13,7 +13,11 @@ import oci
 COMPARTMENT_ID = None  # None이면 tenancy(root) 사용
 AVAILABILITY_DOMAIN = "Xjyc:AP-SINGAPORE-1-AD-1"
 SUBNET_ID = "ocid1.subnet.oc1.ap-singapore-1.aaaaaaaawsistjqpvh5jhyu233sbmkdpcqizjgmoethgl5ox3scgxg73qnga"  # knowledge-hub-subnet
-IMAGE_ID = "ocid1.image.oc1.ap-singapore-1.aaaaaaaakvkfopf4od675z676554btimk4ouzb2jssqygfgsriduz4hcg7na"  # Oracle-Linux-9.8-aarch64
+# [2026-10-25] Oracle Linux → Ubuntu 24.04로 변경. deploy/setup-ubuntu.sh가 apt 기반이라서다.
+# 이미지 OCID는 주기적으로 새 빌드가 나오므로 고정하지 않고 실행 시 최신 것을 찾는다.
+IMAGE_OS = "Canonical Ubuntu"
+IMAGE_OS_VERSION = "24.04"
+BOOT_VOLUME_GBS = 100  # 기본 47GB는 Docker 이미지(모델 포함)+OpenSearch 데이터에 빠듯함. Always Free 합계 200GB 이내
 SHAPE = "VM.Standard.A1.Flex"
 OCPUS = 2
 MEMORY_GBS = 12
@@ -26,6 +30,14 @@ SSH_PUBLIC_KEY_PATH = r"C:\Users\ssh96\.ssh\oracle_knowledge_hub.pub"
 RETRY_INTERVAL_SEC = 75  # 45초는 절반이 rate limit로 낭비돼서 늘림
 
 
+def wait_public_ip(config, compute, compartment_id, instance_id):
+    """인스턴스가 RUNNING이 될 때까지 기다린 뒤 퍼블릭 IP를 돌려준다."""
+    oci.wait_until(compute, compute.get_instance(instance_id), "lifecycle_state", "RUNNING", max_wait_seconds=900)
+    network = oci.core.VirtualNetworkClient(config)
+    attachments = compute.list_vnic_attachments(compartment_id, instance_id=instance_id).data
+    return network.get_vnic(attachments[0].vnic_id).data.public_ip
+
+
 def main():
     config = oci.config.from_file()
     compartment_id = COMPARTMENT_ID or config["tenancy"]
@@ -33,6 +45,20 @@ def main():
 
     with open(SSH_PUBLIC_KEY_PATH, "r") as f:
         ssh_key = f.read().strip()
+
+    images = compute.list_images(
+        compartment_id,
+        operating_system=IMAGE_OS,
+        operating_system_version=IMAGE_OS_VERSION,
+        shape=SHAPE,
+        sort_by="TIMECREATED",
+        sort_order="DESC",
+    ).data
+    if not images:
+        print(f"{IMAGE_OS} {IMAGE_OS_VERSION} 이미지를 찾지 못했습니다.")
+        sys.exit(1)
+    image = images[0]
+    print(f"이미지: {image.display_name}")
 
     details = oci.core.models.LaunchInstanceDetails(
         compartment_id=compartment_id,
@@ -44,7 +70,8 @@ def main():
             memory_in_gbs=MEMORY_GBS,
         ),
         source_details=oci.core.models.InstanceSourceViaImageDetails(
-            image_id=IMAGE_ID,
+            image_id=image.id,
+            boot_volume_size_in_gbs=BOOT_VOLUME_GBS,
         ),
         create_vnic_details=oci.core.models.CreateVnicDetails(
             subnet_id=SUBNET_ID,
@@ -61,8 +88,7 @@ def main():
             resp = compute.launch_instance(details)
             instance = resp.data
             print(f"성공! instance_id={instance.id}")
-            print("퍼블릭 IP는 잠시 후 아래 명령으로 확인 가능:")
-            print(f"  oci compute instance list-vnics --instance-id {instance.id}")
+            print(f"퍼블릭 IP: {wait_public_ip(config, compute, compartment_id, instance.id)}")
             break
         except oci.exceptions.ServiceError as e:
             msg = str(e.message or "")
