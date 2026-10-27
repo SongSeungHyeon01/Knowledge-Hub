@@ -8,7 +8,7 @@
 
 ## 프로젝트 개요
 
-본 프로젝트는 아산 AX 글로벌 인재양성 프로그램(블루문드림, 2026.05.23 ~ 2026.07.25)의 기업 연계 과제로 개발했습니다. R&D 문서를 많이 다루는 외국계 기업 코싸이온을 고객사로 두고 진행했고, 7월 25일 IR Day에서 발표했습니다. 프로그램이 끝난 뒤에도 이 저장소에서 개발을 이어 가고 있습니다.
+본 프로젝트는 아산 AX 글로벌 인재양성 프로그램(블루문드림, 2026.05.23 ~ 2026.07.25)의 기업 연계 과제로 개발했습니다. R&D 문서를 많이 다루는 외국계 기업을 고객사로 두고 진행했고, 7월 25일 IR Day에서 발표했습니다. 프로그램이 끝난 뒤에도 이 저장소에서 개발을 이어 가고 있습니다.
 
 ### 팀 구성 및 역할
 
@@ -102,7 +102,7 @@
 | 검색 | OpenSearch 3.9 + nori, BM25 + 벡터 kNN, RRF는 파이썬에서 직접 결합 |
 | 임베딩 | `nlpai-lab/KURE-v1` (1024차원, MIT) |
 | 인증 | Google OAuth ID 토큰 검증 + 서명된 세션 쿠키 |
-| 실행 환경 | Docker Compose(Caddy + 앱 + OpenSearch + Postgres 17), Ubuntu Server 26.04 |
+| 실행 환경 | Docker Compose(Caddy + 앱 + OpenSearch + Postgres 17), Ubuntu Server 26.04 LTS |
 
 ---
 
@@ -158,12 +158,14 @@ HWP 지원에 대해: 본 제품은 한글과컴퓨터의 한글 문서 파일(.
 
 ## 🖥️ 인프라 세팅 현황
 
-> AX 기간에는 Railway에 올렸고, 지금은 집에 있는 여분 노트북을 서버로 쓰고 있습니다. Oracle Cloud 무료 서버는 7월과 10월 모두 용량 부족으로 만들어지지 않았습니다.
+남는 노트북에 Ubuntu Server 26.04 LTS를 깔고, Docker Compose로 리버스 프록시(Caddy), 앱, OpenSearch, PostgreSQL 네 개를 띄워서 운영하고 있습니다.
+
+> AX 기간에는 Railway에 올렸습니다. 이후 Oracle Cloud 무료 서버를 쓰려고 했지만 7월과 10월 모두 용량 부족으로 서버가 만들어지지 않았고, 문서 파싱 때 메모리를 7GiB 가까이 써서 다른 무료 클라우드로도 옮길 수 없었습니다.
 
 | 항목 | 내용 |
 |---|---|
-| 서버 | 여분 노트북 (RAM 8GB, SSD 238GB), Ubuntu Server 26.04, 스왑 8GB |
-| 구성 | Docker Compose로 Caddy, 앱, OpenSearch, Postgres 17 네 개를 띄웁니다. 재부팅하면 자동으로 다시 올라옵니다 |
+| 서버 | 여분 노트북 (RAM 8GB, SSD 238GB), Ubuntu Server 26.04 LTS, 스왑 8GB |
+| 구성 | Caddy, 앱, OpenSearch, Postgres 17 (Docker Compose). 재부팅하면 자동으로 다시 올라옵니다 |
 | 메모리 | 아무 작업이 없을 때 7.0GiB 중 3.1GiB 사용, 문서 파싱 중에는 7GiB 가까이 사용 |
 | HTTPS | Caddy + Let's Encrypt, 도메인은 nip.io |
 | 외부 포트 | 80·443만 엽니다. 공유기 UPnP로 열고, 공유기가 재부팅돼도 다시 열리도록 15분마다 확인합니다 |
